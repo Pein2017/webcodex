@@ -41,9 +41,7 @@ const stringProperty = (description, maxLength = 4096) => ({
 
 const integerProperty = (description, minimum, maximum) => ({
   type: "integer",
-  description,
-  minimum,
-  maximum,
+  description: `${description} Runtime accepts integers from ${minimum} through ${maximum}, inclusive.`,
 });
 
 const pytestTool = {
@@ -115,10 +113,10 @@ const codegraphTool = {
       project: stringProperty("Operator-configured project id to query.", 64),
       search: stringProperty("Symbol search text passed to CodeGraph.", 4096),
       pathPrefix: stringProperty("Optional project-relative directory scope."),
-      kind: {
-        ...stringProperty("Optional CodeGraph node kind filter, such as function, class, or method.", 128),
-        pattern: "^[A-Za-z_][A-Za-z0-9_-]*$",
-      },
+      kind: stringProperty(
+        "Optional CodeGraph node kind filter, such as function, class, or method. Runtime accepts an ASCII identifier beginning with a letter or underscore, followed by letters, digits, underscores, or hyphens.",
+        128,
+      ),
       limit: integerProperty("Maximum returned symbols; defaults to 20.", 1, 50),
     },
     required: ["project", "search"],

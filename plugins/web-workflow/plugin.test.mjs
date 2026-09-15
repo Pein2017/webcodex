@@ -9,6 +9,21 @@ import { fileURLToPath } from "node:url";
 const PROTOCOL_VERSION = "webcodex-plugin-v1";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pluginPath = path.join(here, "plugin.mjs");
+const ADMITTED_SCHEMA_KEYS = new Set([
+  "type",
+  "title",
+  "description",
+  "properties",
+  "required",
+  "additionalProperties",
+  "enum",
+  "const",
+  "minLength",
+  "maxLength",
+  "minItems",
+  "maxItems",
+  "items",
+]);
 
 function tempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "webcodex-web-workflow-"));
@@ -128,6 +143,21 @@ function call(name, arguments_, id = 2) {
   return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: arguments_ } };
 }
 
+function assertAdmittedSchemaSubset(schema, location) {
+  for (const keyword of Object.keys(schema)) {
+    assert.ok(ADMITTED_SCHEMA_KEYS.has(keyword), `${location} uses unsupported schema keyword ${keyword}`);
+  }
+  if (schema.properties !== undefined) {
+    for (const [name, child] of Object.entries(schema.properties)) {
+      assertAdmittedSchemaSubset(child, `${location}.properties.${name}`);
+    }
+  }
+  if (schema.items !== undefined) assertAdmittedSchemaSubset(schema.items, `${location}.items`);
+  if (schema.type === "integer") {
+    assert.match(schema.description, /Runtime accepts integers from .* through .* inclusive\./u, location);
+  }
+}
+
 test("actual Plugin protocol exposes only configured bounded tools", async () => {
   const fixture = createFixture();
   try {
@@ -146,6 +176,49 @@ test("actual Plugin protocol exposes only configured bounded tools", async () =>
       });
       assert.equal(tool.inputSchema.additionalProperties, false);
     }
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("tool schemas stay within the current Native Plugin admission subset", async () => {
+  const fixture = createFixture();
+  try {
+    const [response] = await runProtocol(fixture.env, [listTools()]);
+    for (const tool of response.result.tools) {
+      assertAdmittedSchemaSubset(tool.inputSchema, `${tool.name}.inputSchema`);
+      if (tool.outputSchema !== undefined) {
+        assertAdmittedSchemaSubset(tool.outputSchema, `${tool.name}.outputSchema`);
+      }
+    }
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("runtime validators retain numeric bounds and CodeGraph kind restrictions", async () => {
+  const fixture = createFixture();
+  try {
+    fs.writeFileSync(path.join(fixture.project, "reports", "junit.xml"), "<testsuite />");
+    const responses = await runProtocol(fixture.env, [
+      call(
+        "pytest_report_summary",
+        { project: "fixture", path: "reports/junit.xml", maxFailures: 0 },
+        1,
+      ),
+      call("memory_search", { query: "alpha", maxResults: 51 }, 2),
+      call("memory_read", { path: "MEMORY.md", offset: -1 }, 3),
+      call("memory_read", { path: "MEMORY.md", maxBytes: 63 }, 4),
+      call("codegraph_scoped_query", { project: "fixture", search: "alpha", limit: 51 }, 5),
+      call("codegraph_scoped_query", { project: "fixture", search: "alpha", kind: "--help" }, 6),
+    ]);
+    assert.deepEqual(
+      responses.map((response) => ({
+        isError: response.result.isError,
+        errorCode: response.result.structuredContent.errorCode,
+      })),
+      Array.from({ length: 6 }, () => ({ isError: true, errorCode: "invalid_arguments" })),
+    );
   } finally {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }
