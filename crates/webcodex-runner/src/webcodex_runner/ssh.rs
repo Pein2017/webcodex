@@ -2323,7 +2323,30 @@ mod tests {
         // SAFETY: the pid is reported by the control socket owned by this
         // test's pool, so it identifies only the temporary test master.
         assert_eq!(unsafe { libc::kill(master_pid, libc::SIGTERM) }, 0);
-        std::thread::sleep(Duration::from_millis(50));
+        // The reconnect assertion requires a dead master, not merely a sent
+        // signal. Observe control-socket shutdown instead of assuming that
+        // OpenSSH has completed teardown within a fixed 50 ms scheduling gap.
+        let shutdown_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let check = Command::new("ssh")
+                .arg("-F")
+                .arg(&server.client_config)
+                .arg("-S")
+                .arg(&first_control)
+                .arg("-O")
+                .arg("check")
+                .arg(&server.alias)
+                .output()
+                .expect("observe test SSH master shutdown");
+            if !check.status.success() {
+                break;
+            }
+            assert!(
+                Instant::now() < shutdown_deadline,
+                "test SSH master did not stop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let reconnected = run(&pool, &config, "tmp", "wc_sess_alpha", "printf reconnected");
         assert_eq!(reconnected.exit_code, Some(0), "{reconnected:?}");
         assert_eq!(reconnected.stdout.as_deref(), Some("reconnected"));
