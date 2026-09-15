@@ -212,14 +212,14 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 "invalid_count",
                 schema_type(
                     "integer",
-                    "Malformed/invalid packages isolated from the valid catalog.",
+                    "Malformed/invalid packages or rejected Skill sources isolated from the valid catalog.",
                 ),
             ),
             (
                 "diagnostics",
                 array_schema(
                     json!({"type":"object","additionalProperties":true}),
-                    "Bounded reason-code-only invalid package diagnostics.",
+                    "Bounded reason-code-only invalid package or rejected-source diagnostics.",
                 ),
             ),
             (

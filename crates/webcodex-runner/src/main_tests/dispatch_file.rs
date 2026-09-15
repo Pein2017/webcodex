@@ -176,6 +176,39 @@ fn skill_file_ops_are_project_contained_text_only_and_path_private() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn project_skill_root_symlink_is_rejected_without_listing_target() {
+    use std::os::unix::fs::symlink;
+
+    let holder = tempfile::tempdir().unwrap();
+    let project = holder.path().join("project");
+    let outside = holder.path().join("outside");
+    std::fs::create_dir_all(&project).unwrap();
+    let outside_skill = outside.join("must-not-list");
+    std::fs::create_dir_all(&outside_skill).unwrap();
+    std::fs::write(
+        outside_skill.join("SKILL.md"),
+        "PROJECT_SYMLINK_SKILL_BODY_MUST_NOT_BE_READ",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join(".agents")).unwrap();
+    symlink(&outside, project.join(".agents/skills")).unwrap();
+
+    let result = handle_file_request(
+        &project_policy(holder.path()),
+        &json_file_op_request(
+            &project,
+            "file_skill_list_packages",
+            ".agents/skills",
+            serde_json::json!({"limit": 257}),
+        ),
+    );
+    assert_eq!(result.exit_code, None);
+    assert_eq!(result.error.as_deref(), Some("skill_path_escape"));
+    assert_eq!(result.stdout, None);
+}
+
 #[test]
 fn dispatch_request_edit_routes_to_file_handler() {
     let tmp = tempfile::tempdir().unwrap();

@@ -788,6 +788,106 @@ async fn project_configured_and_managed_skills_share_one_conflict_safe_catalog()
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn rejected_project_skill_root_keeps_configured_runner_skill_list_and_read_available() {
+    use std::os::unix::fs::symlink;
+
+    let project_root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write_skill(
+        outside.path(),
+        "must-not-read",
+        "project-symlink-target",
+        "Project symlink target",
+        "PROJECT_SYMLINK_SKILL_BODY_MUST_NOT_BE_READ\n",
+    );
+    fs::create_dir_all(project_root.path().join(".agents")).unwrap();
+    symlink(
+        outside.path().join(".agents/skills"),
+        project_root.path().join(".agents/skills"),
+    )
+    .unwrap();
+
+    let runtime = ToolRuntime::new_for_tests();
+    let client_id = "skill-rejected-project-source";
+    register_agent_with_projects(
+        &runtime,
+        client_id,
+        None,
+        RunnerCapabilities {
+            file_read: true,
+            skill_runtime: true,
+            ..Default::default()
+        },
+        vec![registered_project(
+            "project",
+            project_root.path().to_string_lossy().as_ref(),
+        )],
+    )
+    .await;
+    let project = crate::tool_runtime::runner_project_runtime_id(client_id, "project");
+    let configured_id = format!("wc_skill_{}", "2".repeat(32));
+    let configured_revision = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let configured = Arc::new(Mutex::new(FakeOperatorSkillState {
+        configured: Some(FakeConfiguredSkillState {
+            skill_id: configured_id.clone(),
+            name: "runner-configured".to_string(),
+            description: "Configured Runner guidance".to_string(),
+            definition_revision: configured_revision.to_string(),
+            definition_text: "configured definition".to_string(),
+            resource_text: "CONFIGURED_RUNNER_RESOURCE".to_string(),
+            read_error: None,
+            next_definition_revision_after_probe: None,
+        }),
+        managed: None,
+    }));
+
+    let (listed, list_kinds) = call_kernel_with_fake_operator_store(
+        &runtime,
+        client_id,
+        "skill_list",
+        json!({"project": project, "limit": 10}),
+        configured.clone(),
+    )
+    .await;
+    assert!(listed.success, "{:?}", listed.error);
+    assert_eq!(listed.output["total_count"], 1);
+    assert_eq!(listed.output["invalid_count"], 1);
+    assert_eq!(
+        listed.output["diagnostics"],
+        json!([{"reason_code": "project_skill_source_rejected"}])
+    );
+    assert_eq!(listed.output["skills"][0]["skill_id"], configured_id);
+    assert_eq!(listed.output["skills"][0]["source_scope"], "runner");
+    assert_eq!(list_kinds, vec!["file_skill_list_packages", "skill:list"]);
+    assert!(!listed
+        .output
+        .to_string()
+        .contains("PROJECT_SYMLINK_SKILL_BODY_MUST_NOT_BE_READ"));
+
+    let (read, read_kinds) = call_kernel_with_fake_operator_store(
+        &runtime,
+        client_id,
+        "skill_read_file",
+        json!({
+            "project": project,
+            "skill_id": configured_id,
+            "path": "references/guide.md",
+            "expected_definition_revision": configured_revision,
+        }),
+        configured,
+    )
+    .await;
+    assert!(read.success, "{:?}", read.error);
+    assert_eq!(read.output["text"], "CONFIGURED_RUNNER_RESOURCE");
+    assert_eq!(read.output["source_scope"], "runner");
+    assert_eq!(
+        read_kinds,
+        vec!["file_skill_list_packages", "skill:resolve", "skill:read"]
+    );
+}
+
 #[tokio::test]
 async fn configured_skill_exact_read_uses_unified_resolve_then_read() {
     let root = tempfile::tempdir().unwrap();

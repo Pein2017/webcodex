@@ -88,6 +88,12 @@ enum SkillIoError {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectSkillSourceError {
+    Rejected,
+    Unavailable,
+}
+
 impl SkillIoError {
     fn invalid_reason(self) -> Option<&'static str> {
         match self {
@@ -391,7 +397,10 @@ impl ToolRuntime {
             .await
         {
             Ok(packages) => packages,
-            Err(_) => return ExactSkillProbeOutcome::SourceUnavailable,
+            Err(ProjectSkillSourceError::Rejected) => return ExactSkillProbeOutcome::NotApplicable,
+            Err(ProjectSkillSourceError::Unavailable) => {
+                return ExactSkillProbeOutcome::SourceUnavailable
+            }
         };
         let mut candidate = None;
         for package in packages.entries {
@@ -1515,9 +1524,26 @@ impl ToolRuntime {
         &self,
         project: &ResolvedProject,
     ) -> Result<SkillCatalog, &'static str> {
-        let packages = self
+        let packages = match self
             .list_agent_skill_packages(project, SkillSourceMetricOperation::CatalogList)
-            .await?;
+            .await
+        {
+            Ok(packages) => packages,
+            Err(ProjectSkillSourceError::Rejected) => {
+                let skills = Vec::new();
+                let diagnostics = vec![json!({
+                    "reason_code": "project_skill_source_rejected"
+                })];
+                return Ok(SkillCatalog {
+                    catalog_revision: catalog_revision(&skills, 1, &diagnostics, false),
+                    skills,
+                    invalid_count: 1,
+                    diagnostics,
+                    discovery_truncated: false,
+                });
+            }
+            Err(ProjectSkillSourceError::Unavailable) => return Err("skills_catalog_unavailable"),
+        };
         let discovery_truncated = packages.truncated;
         let mut invalid_count = 0usize;
         let mut diagnostics = Vec::new();
@@ -1606,7 +1632,7 @@ impl ToolRuntime {
         &self,
         project: &ResolvedProject,
         operation: SkillSourceMetricOperation,
-    ) -> Result<AgentSkillPackageList, &'static str> {
+    ) -> Result<AgentSkillPackageList, ProjectSkillSourceError> {
         let client_id = project.config.client_id.clone();
         let payload = json!({"limit": MAX_SKILL_DISCOVERY_PACKAGES + 1}).to_string();
         let wait_timeout = 20_u64;
@@ -1633,7 +1659,7 @@ impl ToolRuntime {
                 "skill_runtime".to_string(),
             )
             .await
-            .map_err(|_| "skills_catalog_unavailable")?;
+            .map_err(|_| ProjectSkillSourceError::Unavailable)?;
         let request_started = Instant::now();
         let response = match tokio::time::timeout(Duration::from_secs(wait_timeout + 2), rx).await {
             Ok(Ok(response)) => response,
@@ -1647,7 +1673,7 @@ impl ToolRuntime {
                     SkillSourceMetricOutcomeClass::Unavailable,
                     None,
                 );
-                return Err("skills_catalog_unavailable");
+                return Err(ProjectSkillSourceError::Unavailable);
             }
         };
         if response.exit_code != Some(0) || response.error.is_some() {
@@ -1661,7 +1687,9 @@ impl ToolRuntime {
                 None,
             );
             self.runner_registry.cancel_request(&request_id).await;
-            return Err("skills_catalog_unavailable");
+            return Err(classify_project_skill_source_error(
+                response.error.as_deref().or(response.stderr.as_deref()),
+            ));
         }
         let parsed: AgentSkillPackageList =
             match serde_json::from_str(response.stdout.as_deref().unwrap_or_default()) {
@@ -1676,7 +1704,7 @@ impl ToolRuntime {
                         SkillSourceMetricOutcomeClass::InvalidResponse,
                         None,
                     );
-                    return Err("skills_catalog_unavailable");
+                    return Err(ProjectSkillSourceError::Unavailable);
                 }
             };
         if parsed.format != SKILL_PACKAGE_LIST_FORMAT
@@ -1691,7 +1719,7 @@ impl ToolRuntime {
                 SkillSourceMetricOutcomeClass::InvalidResponse,
                 None,
             );
-            return Err("skills_catalog_unavailable");
+            return Err(ProjectSkillSourceError::Unavailable);
         }
         let observed_count = parsed.entries.len();
         observe_skill_source_request(
@@ -2257,9 +2285,35 @@ fn classify_skill_io_error(error: Option<&str>) -> SkillIoError {
     }
 }
 
+fn classify_project_skill_source_error(error: Option<&str>) -> ProjectSkillSourceError {
+    match error.unwrap_or_default() {
+        "skill_path_escape" => ProjectSkillSourceError::Rejected,
+        _ => ProjectSkillSourceError::Unavailable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_skill_source_classification_rejects_only_containment_escape() {
+        assert_eq!(
+            classify_project_skill_source_error(Some("skill_path_escape")),
+            ProjectSkillSourceError::Rejected
+        );
+        for unavailable in [
+            None,
+            Some("skill_list_unavailable"),
+            Some("skill_path_invalid"),
+            Some("transport disconnected"),
+        ] {
+            assert_eq!(
+                classify_project_skill_source_error(unavailable),
+                ProjectSkillSourceError::Unavailable
+            );
+        }
+    }
 
     #[test]
     fn frontmatter_parser_requires_explicit_bounded_metadata() {

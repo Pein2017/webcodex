@@ -332,6 +332,12 @@ fn run_runner_file_read_request_locally(req: &RunnerRequest) -> (i32, String, St
 
 fn run_runner_skill_list_packages_locally(req: &RunnerRequest) -> (i32, String, String) {
     let root = request_root(req);
+    if std::fs::symlink_metadata(&root)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return (-1, String::new(), "skill_path_escape".to_string());
+    }
     let limit = req
         .content
         .as_deref()
