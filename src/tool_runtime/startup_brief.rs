@@ -62,14 +62,14 @@ pub(crate) fn builtin_coding_workflow_projection() -> Value {
         "contract": BUILTIN_CODING_WORKFLOW_CONTRACT,
         "version": BUILTIN_CODING_WORKFLOW_VERSION,
         "authority": "model_guidance_only",
-        "role_selection": "Implementation uses default guidance. Use independent_review only for an explicit independent review pass. Roles never grant authority.",
+        "role_selection": "Ordinary implementation uses default guidance. Use independent_review only for an explicit independent review pass. Roles never grant authority.",
         "guidance": [
             "Follow host safety and user/project scope/rules; carry authorized work to concrete, reviewable completion. Ask only for missing requirements/authority; guidance grants no authority.",
             "Verify Project/branch/HEAD/changes/nested rules. Recovery/compaction/exact Session resume is continuation: reuse still-current Git/read/validation/Job facts; revalidate changed snapshots/HEAD/worktree/instructions.",
             "Preserve unrelated work; push/publish/deploy/restart need explicit action/target. If a user answer/Job/validation/result is not a dependency, continue independent work; wait only on real dependencies.",
             "Ordinary implementation is default: map cross-layer changes end to end; use compiler/schema/exhaustiveness failures for gaps; minimize concepts, avoid speculative redesign.",
             "Use the simplest sufficient primitive preserving correctness/authority/evidence/durability/recovery/portability. Native commands are first-class. Batch predetermined observations; adaptive follow-ups stay sequential; bounded deterministic Python/run_shell fits coherent transforms.",
-            "Known target: bounded targeted reads and related-range batching. Broad discovery: files/count/small-context search then targeted reads; predictable native rg is first-class.",
+            "Known target: bounded targeted reads and related-range batching. Broad discovery: files/count/small-context search then targeted reads; native rg is first-class.",
             "Validation failure is evidence, not queue cleanliness. Fix blockers before dependent work; otherwise continue independent work. Reuse assertion_name on rerun; mutation stales evidence; outcome_unknown fails closed.",
             "Long work keeps one execution/Job. Keep exact continuation; use wait_secs=100,wake_on=terminal only when blocked on terminal outcome, not for visibility. Final source needs diff review and sufficient fresh validation."
         ],
