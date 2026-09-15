@@ -21,6 +21,7 @@ const LARGE_UNTRACKED_BYTES: u64 = 5 * 1024 * 1024; // 5 MiB
 const HYGIENE_SCRIPT_TIMEOUT_SECS: u64 = 30;
 const HYGIENE_MAX_SCRIPT_ENTRIES: usize = 500;
 const HYGIENE_DIAGNOSTIC_SENTINEL: &str = "@@WEBCODEX_HYGIENE_STATUS@@";
+const HYGIENE_TRACKED_PATH_SENTINEL: &str = "@@WEBCODEX_HYGIENE_TRACKED@@";
 const HYGIENE_MAX_SIZE_PROBE_COMMAND_LEN: usize = 7_000;
 
 /// Kind of hygiene risk identified for a path or the worktree.
@@ -375,7 +376,8 @@ pub(crate) fn build_hygiene_summary(
     resolved_project: Option<&str>,
     git_available: bool,
     findings: &[HygieneFinding],
-    truncated: bool,
+    findings_truncated: bool,
+    diagnostic_output_truncated: bool,
     warnings: &[String],
 ) -> Value {
     let mut critical = 0u64;
@@ -409,7 +411,8 @@ pub(crate) fn build_hygiene_summary(
         }
     }
 
-    let clean = git_available && findings.is_empty();
+    let truncated = findings_truncated || diagnostic_output_truncated;
+    let clean = git_available && findings.is_empty() && !truncated;
 
     let findings_json: Vec<Value> = findings
         .iter()
@@ -426,7 +429,13 @@ pub(crate) fn build_hygiene_summary(
         .collect();
 
     let suggested_next_actions = suggested_hygiene_actions(findings);
-    let verdict = hygiene_verdict(git_available, findings, truncated, &suggested_next_actions);
+    let verdict = hygiene_verdict(
+        git_available,
+        findings,
+        findings_truncated,
+        diagnostic_output_truncated,
+        &suggested_next_actions,
+    );
     let counts = [
         ("findings", findings.len() as u64),
         ("critical", critical),
@@ -472,7 +481,8 @@ pub(crate) fn build_hygiene_summary(
 fn hygiene_verdict(
     git_available: bool,
     findings: &[HygieneFinding],
-    truncated: bool,
+    findings_truncated: bool,
+    diagnostic_output_truncated: bool,
     suggested_next_actions: &[Value],
 ) -> Value {
     let mut blocking_reasons: Vec<&'static str> = Vec::new();
@@ -503,11 +513,19 @@ fn hygiene_verdict(
         }
     }
 
-    if truncated {
+    if findings_truncated {
         push_unique_reason(&mut warning_reasons, "truncated_by_limit");
         push_unique_action(
             &mut actions,
             "rerun workspace_hygiene_check with a higher max_findings if needed",
+        );
+    }
+
+    if diagnostic_output_truncated {
+        push_unique_reason(&mut warning_reasons, "diagnostic_output_truncated");
+        push_unique_action(
+            &mut actions,
+            "treat this hygiene result as incomplete and inspect git status before relying on it",
         );
     }
 
@@ -546,12 +564,16 @@ fn push_unique_action(actions: &mut Vec<String>, action: &str) {
 // Fixed read-only diagnostic commands
 // =========================================================================
 
-pub(crate) fn hygiene_diagnostic_command() -> String {
+pub(crate) fn hygiene_diagnostic_command(include_tracked: bool) -> String {
+    let tracked_files = if include_tracked {
+        format!("git ls-files 2>/dev/null | sed 's|^|{HYGIENE_TRACKED_PATH_SENTINEL}|'; ")
+    } else {
+        String::new()
+    };
     format!(
-        "git status --porcelain=v1 2>/dev/null; \
+        "{tracked_files}git status --porcelain=v1 2>/dev/null; \
          status=$?; \
          printf '\\n{sentinel}%s\\n' \"$status\"; \
-         if [ \"$status\" -eq 0 ]; then git ls-files 2>/dev/null; fi; \
          exit 0",
         sentinel = HYGIENE_DIAGNOSTIC_SENTINEL,
     )
@@ -576,12 +598,12 @@ fn hygiene_path_is_metadata_safe(path: &str) -> bool {
         && !trimmed.split('/').any(|part| part.is_empty())
 }
 
-fn parse_hygiene_diagnostic_stdout(stdout: &str) -> (bool, Vec<Value>) {
-    let Some((status_stdout, rest)) = stdout.split_once(HYGIENE_DIAGNOSTIC_SENTINEL) else {
+fn parse_hygiene_diagnostic_stdout(stdout: &str, stdout_truncated: bool) -> (bool, Vec<Value>) {
+    let Some((diagnostic_stdout, rest)) = stdout.rsplit_once(HYGIENE_DIAGNOSTIC_SENTINEL) else {
         return (false, Vec::new());
     };
-    let mut rest_lines = rest.lines();
-    let git_available = rest_lines
+    let git_available = rest
+        .lines()
         .next()
         .and_then(|line| line.trim().parse::<i32>().ok())
         == Some(0);
@@ -589,11 +611,25 @@ fn parse_hygiene_diagnostic_stdout(stdout: &str) -> (bool, Vec<Value>) {
         return (false, Vec::new());
     }
 
-    let mut entries = Vec::new();
-    let mut seen_paths: HashSet<String> = HashSet::new();
-    for line in status_stdout.lines() {
-        if entries.len() >= HYGIENE_MAX_SCRIPT_ENTRIES {
-            break;
+    let mut status_entries = Vec::new();
+    let mut tracked_paths = Vec::new();
+    for (index, line) in diagnostic_stdout.lines().enumerate() {
+        // Runner stdout is a retained tail. Its first line may therefore be a
+        // fragment of a long tracked path and must not be parsed as porcelain.
+        if stdout_truncated && index == 0 {
+            continue;
+        }
+        if let Some(path) = line.strip_prefix(HYGIENE_TRACKED_PATH_SENTINEL) {
+            if tracked_paths.len() < HYGIENE_MAX_SCRIPT_ENTRIES {
+                let path = decode_hygiene_porcelain_path(path);
+                if !path.is_empty() {
+                    tracked_paths.push(path);
+                }
+            }
+            continue;
+        }
+        if status_entries.len() >= HYGIENE_MAX_SCRIPT_ENTRIES {
+            continue;
         }
         if line.len() < 4 {
             continue;
@@ -613,22 +649,26 @@ fn parse_hygiene_diagnostic_stdout(stdout: &str) -> (bool, Vec<Value>) {
         } else {
             "tracked"
         };
-        entries.push(json!({
+        status_entries.push(json!({
             "path": path,
             "x": x,
             "y": y,
             "tracked_status": tracked_status,
             "size_bytes": null,
         }));
-        seen_paths.insert(path);
     }
 
-    for line in rest_lines {
+    let mut entries = status_entries;
+    let mut seen_paths: HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| entry.get("path").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    for path in tracked_paths {
         if entries.len() >= HYGIENE_MAX_SCRIPT_ENTRIES.saturating_mul(2) {
             break;
         }
-        let path = line.trim();
-        if path.is_empty() || seen_paths.contains(path) {
+        if !seen_paths.insert(path.clone()) {
             continue;
         }
         entries.push(json!({
@@ -638,7 +678,6 @@ fn parse_hygiene_diagnostic_stdout(stdout: &str) -> (bool, Vec<Value>) {
             "tracked_status": "tracked",
             "size_bytes": null,
         }));
-        seen_paths.insert(path.to_string());
     }
 
     (true, entries)
@@ -735,7 +774,7 @@ impl ToolRuntime {
         // Run fixed read-only git diagnostics. The command always exits 0 and
         // carries the git status code in-band so non-git projects degrade to a
         // structured hygiene response.
-        let command = hygiene_diagnostic_command();
+        let command = hygiene_diagnostic_command(include_tracked);
         let output = match self
             .run_project_internal_posix_script_capture(
                 &project,
@@ -749,7 +788,8 @@ impl ToolRuntime {
             Err(e) => return ToolResult::err(e),
         };
 
-        let (git_available, entries) = parse_hygiene_diagnostic_stdout(&output.stdout);
+        let (git_available, entries) =
+            parse_hygiene_diagnostic_stdout(&output.stdout, output.stdout_truncated);
         let size_bytes_by_path = if git_available {
             let mut sizes = HashMap::new();
             for batch in hygiene_size_probe_batches(&entries) {
@@ -844,7 +884,7 @@ impl ToolRuntime {
         }
 
         // Bound the findings.
-        let (findings, truncated) = bound_hygiene_findings(findings, max_findings);
+        let (findings, findings_truncated) = bound_hygiene_findings(findings, max_findings);
 
         // Build warnings.
         let warnings: Vec<String> = if git_available {
@@ -858,7 +898,8 @@ impl ToolRuntime {
             Some(&resolved_project),
             git_available,
             &findings,
-            truncated,
+            findings_truncated,
+            output.stdout_truncated,
             &warnings,
         );
 
@@ -1048,6 +1089,7 @@ mod tests {
             true,
             &[],
             false,
+            false,
             &[],
         );
         assert_eq!(summary["git_available"], true);
@@ -1079,6 +1121,7 @@ mod tests {
             Some("agent:oe:demo"),
             false,
             &[],
+            false,
             false,
             &["non_git_project".to_string()],
         );
@@ -1118,6 +1161,7 @@ mod tests {
             Some("agent:oe:demo"),
             true,
             &findings,
+            false,
             false,
             &[],
         );

@@ -20,6 +20,27 @@ async fn dispatch_hygiene_with_agent(
     include_tracked: Option<bool>,
     session_id: Option<String>,
 ) -> ToolResult {
+    dispatch_hygiene_with_agent_output_cap(
+        runtime,
+        client_id,
+        project,
+        max_findings,
+        include_tracked,
+        session_id,
+        None,
+    )
+    .await
+}
+
+async fn dispatch_hygiene_with_agent_output_cap(
+    runtime: &ToolRuntime,
+    client_id: &str,
+    project: String,
+    max_findings: Option<usize>,
+    include_tracked: Option<bool>,
+    session_id: Option<String>,
+    output_cap: Option<usize>,
+) -> ToolResult {
     let runtime_for_task = runtime.clone();
     let task = tokio::spawn(async move {
         let bootstrap = auth_context(None, true);
@@ -65,7 +86,32 @@ async fn dispatch_hygiene_with_agent(
                 "hygiene diagnostics must not enqueue a Python helper: {}",
                 payload.script
             );
-            complete_agent_request_by_running_locally(runtime, client_id, req).await;
+            if let Some(output_cap) = output_cap {
+                let (exit_code, stdout, stderr) = run_runner_shell_request_locally(&req);
+                let stdout_truncated = stdout.len() > output_cap;
+                let stdout = if stdout_truncated {
+                    let mut start = stdout.len() - output_cap;
+                    while !stdout.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    &stdout[start..]
+                } else {
+                    &stdout
+                };
+                complete_patch_agent_request_with_truncation(
+                    runtime,
+                    client_id,
+                    &req.request_id,
+                    exit_code,
+                    stdout,
+                    &stderr,
+                    stdout_truncated,
+                    false,
+                )
+                .await;
+            } else {
+                complete_agent_request_by_running_locally(runtime, client_id, req).await;
+            }
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
@@ -136,6 +182,9 @@ fn workspace_hygiene_check_is_known_and_in_specs() {
     assert!(output_props["counts"]["description"]
         .as_str()
         .is_some_and(|description| description.contains("Sparse non-zero")));
+    assert!(output_props["truncated"]["description"]
+        .as_str()
+        .is_some_and(|description| description.contains("diagnostic output")));
 
     let openapi_spec = crate::openapi::build_openapi_spec();
     let action = &openapi_spec["paths"]["/api/actions/workspace_hygiene_check"]["post"];
@@ -199,6 +248,38 @@ async fn workspace_hygiene_check_clean_git_repo() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn workspace_hygiene_check_keeps_git_identity_without_claiming_a_truncated_tail_is_clean() {
+    let runtime = test_runtime();
+    let (tmp, project) = setup_clean_git_repo(&runtime, "hyc-tail", "demo").await;
+    let long_name = format!("tracked-{}.txt", "x".repeat(180));
+    commit_file(tmp.path(), &long_name, "tracked\n", "add long tracked path");
+    fs::write(tmp.path().join(&long_name), "modified\n").unwrap();
+
+    let result = dispatch_hygiene_with_agent_output_cap(
+        &runtime,
+        "hyc-tail",
+        project,
+        None,
+        Some(true),
+        None,
+        Some(96),
+    )
+    .await;
+
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.output["git_available"], true, "{}", result.output);
+    assert_eq!(result.output["clean"], false, "{}", result.output);
+    assert_eq!(result.output["truncated"], true, "{}", result.output);
+    assert!(result.output.get("findings").is_none(), "{}", result.output);
+    assert_eq!(result.output["verdict"]["status"], "warn");
+    assert_reason_list_contains(
+        &result.output["verdict"],
+        "warning_reasons",
+        "diagnostic_output_truncated",
+    );
 }
 
 // =========================================================================

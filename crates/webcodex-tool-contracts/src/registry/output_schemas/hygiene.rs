@@ -20,7 +20,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 "clean",
                 schema_type(
                     "boolean",
-                    "True when git is available and no findings were reported.",
+                    "True when git is available, no findings were reported, and diagnostic evidence was complete.",
                 ),
             ),
             (
@@ -36,7 +36,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "truncated",
-                schema_type("boolean", "Present as true when findings were truncated to max_findings; omitted otherwise."),
+                schema_type("boolean", "Present as true when findings were truncated to max_findings or Runner diagnostic output was truncated; omitted otherwise."),
             ),
             (
                 "warnings",
