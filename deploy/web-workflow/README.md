@@ -17,7 +17,7 @@ Use `skill_list` and `skill_read_file` or `context_request=["skills.catalog"]`; 
 
 For normal work, select the exact registered Project in `work_on_project`, leave repository instruction injection disabled, then use current search/read/edit/validation tools. Retain the Session identifier for multi-step work. Jobs or tmux work are retrieved manually; no ChatGPT auto-wake integration is provided.
 
-The merged upstream Git review path requires Git with `check-attr --source` support. Verify that command against a known commit before deployment; an older system Git can silently lose reviewed-commit attribute evidence. A private Git installation on the Server/Runner wrapper PATH keeps this dependency separate from other applications. Python report parsing requires Python 3 and the optional plugin requires Node.js 18+; CodeGraph uses its existing operator-installed runtime.
+The merged upstream Git review path requires Git with `check-attr --source` support. Verify `git check-attr --source=HEAD binary -- README.md` in this checkout before deployment; an older system Git can silently lose reviewed-commit attribute evidence. Use an operator-managed Git installation on the Server/Runner wrapper PATH (for example, the selected Conda environment), and verify the effective runtime executable. Python report parsing requires Python 3 and the optional plugin requires Node.js 18+; CodeGraph uses its existing operator-installed runtime.
 
 ## Fork maintenance and delivery
 

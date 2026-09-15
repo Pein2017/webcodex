@@ -22,6 +22,18 @@ fn run_command_sync_with_shell(
     shell: &Path,
 ) -> (i32, String, String, u64) {
     let start = Instant::now();
+    // Regular files cannot fill like pipes while the child is running. Keep
+    // capture file-backed so large fixture output cannot deadlock the test
+    // helper before `try_wait` observes process exit.
+    let ((mut stdout_capture, stdout_writer), (mut stderr_capture, stderr_writer)) = match (
+        new_test_command_capture("stdout"),
+        new_test_command_capture("stderr"),
+    ) {
+        (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+        (Err(error), _) | (_, Err(error)) => {
+            return (-1, String::new(), error, start.elapsed().as_millis() as u64);
+        }
+    };
     let mut command = std::process::Command::new(shell);
     #[cfg(windows)]
     command.arg("-s").stdin(std::process::Stdio::piped());
@@ -29,14 +41,13 @@ fn run_command_sync_with_shell(
     command.arg("-c").arg(cmd);
     command
         .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::from(stdout_writer))
+        .stderr(std::process::Stdio::from(stderr_writer));
     // Put the command in its own process group so its whole subtree can be
     // reaped as a group. Argument 0 makes the child a group leader whose pgid
-    // equals its pid. Without this, a backgrounded grandchild that inherits the
-    // stdout/stderr pipes (e.g. `some-daemon &`) keeps the pipe write-end open,
-    // and `wait_with_output()` below blocks on pipe EOF *forever* — the exact
-    // intermittent "no reply" hang this guards against.
+    // equals its pid. Without this, a backgrounded grandchild (for example,
+    // `some-daemon &`) can outlive the requested command and keep writing to
+    // its inherited output handles.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -99,17 +110,17 @@ fn run_command_sync_with_shell(
         }
     }
     // Whether the command timed out or exited on its own, reap the entire
-    // process group before draining output. This kills any backgrounded
-    // grandchildren still holding the stdout/stderr pipes so `wait_with_output`
-    // observes EOF promptly instead of blocking indefinitely. On a clean exit
-    // with no stragglers the signal simply finds nothing to kill.
+    // process group before collecting output. This kills any backgrounded
+    // grandchildren which could otherwise continue writing after the command
+    // is considered complete. On a clean exit with no stragglers the signal
+    // simply finds nothing to kill.
     reap_process_group(pgid);
-    let output = child.wait_with_output();
+    let status = child.wait();
+    let stdout = read_test_command_capture(&mut stdout_capture, "stdout");
+    let stderr = read_test_command_capture(&mut stderr_capture, "stderr");
     let elapsed = start.elapsed().as_millis() as u64;
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    match (status, stdout, stderr) {
+        (Ok(status), Ok(stdout), Ok(mut stderr)) => {
             if timed_out {
                 if !stderr.is_empty() && !stderr.ends_with('\n') {
                     stderr.push('\n');
@@ -117,26 +128,65 @@ fn run_command_sync_with_shell(
                 stderr.push_str(&format!("Command timed out after {} seconds", timeout_secs));
                 (-1, stdout, stderr, elapsed)
             } else {
-                let code = out.status.code().unwrap_or(-1);
+                let code = status.code().unwrap_or(-1);
                 (code, stdout, stderr, elapsed)
             }
         }
-        Err(e) if timed_out => (
+        (Err(error), _, _) if timed_out => (
+            -1,
+            String::new(),
+            format!(
+                "Command timed out after {} seconds; failed to reap command: {}",
+                timeout_secs, error
+            ),
+            elapsed,
+        ),
+        (Err(error), _, _) => (
+            -1,
+            String::new(),
+            format!("Failed to wait for command: {error}"),
+            elapsed,
+        ),
+        (_, Err(error), _) | (_, _, Err(error)) if timed_out => (
             -1,
             String::new(),
             format!(
                 "Command timed out after {} seconds; failed to collect output: {}",
-                timeout_secs, e
+                timeout_secs, error
             ),
             elapsed,
         ),
-        Err(e) => (
+        (_, Err(error), _) | (_, _, Err(error)) => (
             -1,
             String::new(),
-            format!("Failed to collect command output: {}", e),
+            format!("Failed to collect command output: {error}"),
             elapsed,
         ),
     }
+}
+
+#[cfg(test)]
+fn new_test_command_capture(stream: &str) -> Result<(std::fs::File, std::process::Stdio), String> {
+    let capture = tempfile::tempfile()
+        .map_err(|error| format!("Failed to create {stream} capture: {error}"))?;
+    let writer = capture
+        .try_clone()
+        .map_err(|error| format!("Failed to clone {stream} capture: {error}"))?;
+    Ok((capture, std::process::Stdio::from(writer)))
+}
+
+#[cfg(test)]
+fn read_test_command_capture(capture: &mut std::fs::File, stream: &str) -> Result<String, String> {
+    use std::io::{Read, Seek};
+
+    capture
+        .rewind()
+        .map_err(|error| format!("failed to rewind {stream} capture: {error}"))?;
+    let mut bytes = Vec::new();
+    capture
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {stream} capture: {error}"))?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[cfg(all(test, not(windows)))]
@@ -168,8 +218,8 @@ fn git_for_windows_shell() -> Option<PathBuf> {
 
 /// Best-effort SIGKILL of an entire process group (`kill(-pgid, SIGKILL)`; a
 /// negative target signals every process in the group). Reaps background
-/// grandchildren a synchronous command may have left holding its stdout/stderr
-/// pipes, which would otherwise block `wait_with_output()` on pipe EOF forever.
+/// grandchildren a synchronous command may have left running with inherited
+/// stdout/stderr handles.
 ///
 /// `pgid` is always our own child's pid (made a group leader via
 /// `process_group(0)`), so this only ever targets that command's own subtree —
@@ -776,11 +826,10 @@ mod tests {
         }
     }
 
-    /// Regression guard for the local-command infinite hang: a shell that exits
-    /// immediately after backgrounding a long-lived process which inherits the
-    /// stdout/stderr pipes must NOT make `run_command_sync` block on pipe EOF.
-    /// Before the process-group reap this returned only after the background
-    /// `sleep` exited (~5s); now the group is killed and it returns promptly.
+    /// Regression guard for local-command process cleanup: a shell that exits
+    /// immediately after backgrounding a long-lived process must not leave the
+    /// helper waiting on inherited output handles. The group is killed and the
+    /// helper returns promptly.
     #[cfg(unix)]
     #[test]
     #[ignore = "manual real-process timing: validates OS process-group pipe-holder reap"]
@@ -808,6 +857,22 @@ mod tests {
 
         let (code, _stdout, _stderr, _ms) = run_command_sync("exit 3", &dir, 10);
         assert_eq!(code, 3, "non-zero exit codes must survive the reap");
+    }
+
+    /// Both output streams must be drained while the command is running. A
+    /// wait-before-drain implementation blocks once the OS pipes fill and
+    /// incorrectly turns a fast successful command into a timeout.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_sync_captures_stdout_and_stderr_larger_than_pipe_capacity() {
+        let dir = std::env::temp_dir();
+        let command =
+            "i=0; while [ \"$i\" -lt 20000 ]; do printf o; printf e >&2; i=$((i + 1)); done";
+        let (code, stdout, stderr, _ms) = run_command_sync(command, &dir, 2);
+
+        assert_eq!(code, 0, "large output capture must not time out");
+        assert_eq!(stdout.len(), 20_000);
+        assert_eq!(stderr.len(), 20_000);
     }
 
     /// A genuinely slow foreground command still hits the timeout path.
