@@ -26,6 +26,15 @@ Status: lead-accepted and deployed. Published as [coordexp-2026.09.15.1](https:/
 - Final binaries passed the 11-check isolated smoke again (2.01 seconds). External connector verification returned matching clean `b0edfa887a83` Server/Runner builds, three online Projects, and no active Jobs. The private `live-acceptance.json` receipt captures guidance hash, canonical HEADs, shared-Skill diagnostics, memory reads, Git recognition, actual pytest counts and scoped CodeGraph freshness.
 - Original binaries and private configuration were retained, and the stopped Server database backup passed SQLite integrity checking. A second pre-final state copy is retained. Operator rollback instructions and exact deployment paths live alongside that private snapshot, not in public release assets. The existing tunnel window was not restarted or replaced.
 
+## User-accepted Web-host check (2026-09-15)
+
+The user supplied a ChatGPT Web read-only acceptance report and explicitly accepted this phase ("OK,完美"). This is user-reported host evidence, separate from the lead's earlier local and connector receipts; it was not regenerated during the documentation closeout.
+
+- All six requested feature groups passed on `b0edfa887a83`: aligned clean Server/Runner builds and three online canonical Projects; common 3033-byte startup guidance without repository/workflow bodies; shared Runner Skill discovery/read; native-plugin discovery and read-only shared-memory search/read; directory-scoped research CodeGraph with reported fresh index metadata; and the expected pytest report counts plus correct Git recognition.
+- The intentional pytest failure remained untouched. Existing research dirty work was preserved. The report states that no files were changed, no experiments were started, and all three acceptance Workflow Sessions were closed.
+- LSP capability probes returned `probe_timeout`: semantic-navigation readiness remains unverified and was outside this acceptance scope. `missing_skill_definition` and `project_skill_source_rejected` diagnostics did not prevent the authorized shared Runner Skills from being discovered or read.
+- Phase disposition: user-accepted and closed at the agreed feature boundary. This closeout adds evidence only; it does not authorize LSP repairs, additional indexing, another release, service restarts, or changes to the immutable published tag.
+
 ## OpenSpec verification
 
 | Dimension | Result |
