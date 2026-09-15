@@ -176,7 +176,10 @@ fn sparsify_structured_validation_runtime_metadata(tool_name: &str, result: &mut
 /// structured execution, but only after the complete ToolResult has already
 /// been recorded into the Session ledger. Failure/uncertain/Job projections
 /// remain explicit because they participate in retry and reconciliation safety.
-fn sparsify_terminal_structured_execution_success(tool_name: &str, result: &mut ToolResult) {
+pub(super) fn sparsify_terminal_structured_execution_success(
+    tool_name: &str,
+    result: &mut ToolResult,
+) {
     if is_structured_validation_tool(tool_name) {
         sparsify_terminal_structured_validation_success(tool_name, result);
         return;
@@ -1721,7 +1724,13 @@ impl ToolRuntime {
             material_capabilities,
         )
         .await;
-        sparsify_terminal_structured_execution_success(tool_name, &mut result);
+        // A kernel call with a trusted outer recording Session has not yet
+        // recorded its canonical execution result. Preserve direct process and
+        // script facts until that outer recorder has consumed them; the kernel
+        // applies the same compact model projection afterwards.
+        if inner_model_facing_recording || !matches!(tool_name, "run_process" | "run_script") {
+            sparsify_terminal_structured_execution_success(tool_name, &mut result);
+        }
         sparsify_structured_validation_runtime_metadata(tool_name, &mut result);
         result
     }

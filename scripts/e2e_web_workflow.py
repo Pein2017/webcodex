@@ -723,7 +723,8 @@ def main() -> int:
             )
             async_job_id = async_pytest.get("job_id")
             require(
-                async_pytest.get("promoted_to_job") is True
+                async_pytest.get("command_started") is True
+                and async_pytest.get("command_completed") is False
                 and async_pytest.get("execution_source") == "run_process"
                 and isinstance(async_job_id, str) and async_job_id,
                 f"typed pytest did not hand off the original execution: {bounded(async_pytest)}",
@@ -887,6 +888,21 @@ def main() -> int:
             pytest_by_success = {event.get("success"): event for event in pytest_events}
             failed_event = pytest_by_success.get(False, {})
             passed_event = pytest_by_success.get(True, {})
+            count_evidence = [
+                {key: event.get(key) for key in (
+                    "success", "validation_passed", "tests_detected", "tests_run_count",
+                    "tests_passed", "tests_failed", "zero_tests_run", "stdout_truncated",
+                )}
+                for event in pytest_events
+            ]
+            sync_pass_evidence = {
+                key: pytest_after.get(key) for key in (
+                    "execution_source", "purpose", "execution_state", "exit_code",
+                    "stdout_truncated", "stderr_truncated", "process_summary",
+                    "command_summary", "stdout_tail", "stderr_tail", "detected_summary",
+                    "tests_detected", "tests_run_count", "tests_passed", "tests_failed",
+                )
+            }
             require(
                 len(pytest_by_success) == 2
                 and failed_event.get("tests_detected") is True
@@ -899,7 +915,7 @@ def main() -> int:
                 and passed_event.get("tests_passed") == 1
                 and passed_event.get("tests_failed") == 0
                 and passed_event.get("zero_tests_run") is False,
-                f"recorded real pytest counts are missing or fabricated: {bounded(pytest_events)}",
+                f"recorded real pytest counts are missing or fabricated: {bounded(count_evidence)}; synchronous pass: {bounded(sync_pass_evidence)}",
             )
             ok("full Session evidence detects actual pytest fail/pass terminal counts")
             async_events = [

@@ -41,6 +41,12 @@ Extract supported counts before the Session shortens its output excerpt; preserv
 original Runner truncation/unknown status. Raw shell assertion recovery still uses
 its existing explicit identity and actual outcome.
 
+Real MCP validation additionally requires the outer Session recorder to consume
+canonical process/script results before the public success projection removes
+redundant execution fields. Defer that existing projection to the kernel's final
+model-facing boundary when the outer recorder owns the call; do not reconstruct
+missing exit/completeness facts from a compact success response.
+
 ### Feedback disposition
 
 | Feedback | Decision |

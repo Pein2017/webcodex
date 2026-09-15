@@ -518,6 +518,91 @@ async fn run_process_enqueues_only_typed_argv_and_reports_completed_exit_codes()
 }
 
 #[tokio::test]
+async fn kernel_records_completed_pytest_counts_before_compacting_public_success() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = test_runtime();
+    let client_id = "process-pytest-canonical-ledger";
+    let project = register_process_agent(&runtime, client_id, temp.path(), true).await;
+    let session = runtime.sessions.start_session(Some(project.clone()), None);
+    let session_id = session.session_id;
+    let auth = auth_context(None, true);
+
+    let request_task = tokio::spawn({
+        let runtime = runtime.clone();
+        let project = project.clone();
+        let session_id = session_id.clone();
+        let auth = auth.clone();
+        async move {
+            runtime
+                .call_tool_with_context(
+                    ToolCallRequest {
+                        tool_name: "run_process".to_string(),
+                        arguments: json!({
+                            "project": project,
+                            "executable": "python3",
+                            "args": ["-B", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_workflow.py"],
+                            "purpose": "test",
+                            "timeout_secs": 30,
+                            "sync_wait_secs": 30,
+                            "assertion_name": "kernel-pytest-success"
+                        }),
+                    },
+                    ToolCallContext {
+                        transport: ToolTransport::Mcp,
+                        session_id: Some(&session_id),
+                        auth: Some(&auth),
+                        window: None,
+                        record_oauth_scope_denials: true,
+                        host_file_import_trust:
+                            crate::tool_runtime::kernel::HostFileImportTrust::Untrusted,
+                    },
+                )
+                .await
+        }
+    });
+    let request = wait_for_patch_agent_request(&runtime, client_id).await;
+    assert_eq!(request.kind, "run_process");
+    complete_process_lifecycle(
+        &runtime,
+        client_id,
+        request.request_id,
+        ShellCommandExecutionState::Completed,
+        Some(0),
+        ". [100%]\n1 passed in 0.01s\n",
+        "",
+        None,
+    )
+    .await;
+    let outcome = request_task.await.unwrap();
+    assert!(outcome.success);
+    let result = outcome.result.expect("model-facing result");
+    assert_eq!(result.output["tests_detected"], true);
+    assert_eq!(result.output["tests_run_count"], 1);
+    assert_eq!(result.output["tests_passed"], 1);
+    assert_eq!(result.output["tests_failed"], 0);
+    assert!(result.output.get("execution_state").is_none());
+    assert!(result.output.get("exit_code").is_none());
+
+    let validation = runtime
+        .validation_summary_tool(project, session_id, Some(20), Some(&auth))
+        .await;
+    assert!(validation.success, "{}", validation.output);
+    let event = validation.output["validation"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["assertion_name"] == "kernel-pytest-success")
+        .expect("correlated pytest validation event");
+    assert_eq!(event["success"], true);
+    assert_eq!(event["validation_passed"], true);
+    assert_eq!(event["tests_detected"], true);
+    assert_eq!(event["tests_run_count"], 1);
+    assert_eq!(event["tests_passed"], 1);
+    assert_eq!(event["tests_failed"], 0);
+    assert_eq!(event["zero_tests_run"], false);
+}
+
+#[tokio::test]
 async fn run_process_preserves_remote_windows_cwd_syntax_before_dispatch() {
     let runtime = test_runtime();
     let client_id = "process-windows-cwd";

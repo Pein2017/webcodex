@@ -926,6 +926,12 @@ impl ToolRuntime {
         }
         // Final model-facing projection: authoritative permission decisions and
         // recorder events have already been consumed by the Session ledger.
+        if matches!(request.tool_name.as_str(), "run_process" | "run_script") {
+            super::dispatch::sparsify_terminal_structured_execution_success(
+                &request.tool_name,
+                &mut result,
+            );
+        }
         super::dispatch::sparsify_failure_model_result_metadata(&request.tool_name, &mut result);
         if !result.success
             && request.tool_name != "read_tool_trace"
