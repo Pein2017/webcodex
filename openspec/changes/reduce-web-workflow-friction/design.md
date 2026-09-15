@@ -35,6 +35,12 @@ that generic test summaries currently use Cargo grammar, so pytest counts are no
 recognized. Repair that gap without redefining all previous shell failures as
 protocol misuse.
 
+New pytest counts require a direct typed `run_process` execution identity (or its
+Job with equivalent retained source identity), not a raw shell/script preview.
+Extract supported counts before the Session shortens its output excerpt; preserve
+original Runner truncation/unknown status. Raw shell assertion recovery still uses
+its existing explicit identity and actual outcome.
+
 ### Feedback disposition
 
 | Feedback | Decision |

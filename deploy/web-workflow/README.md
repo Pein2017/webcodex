@@ -36,6 +36,14 @@ expected negative results before execution. Test counts from supported summaries
 remain separate from exit status, completeness and scientific acceptance. The
 optional JUnit report reader still never executes tests.
 
+Pytest count evidence from a direct typed `run_process` invocation uses reported `passed + failed` for
+`tests_run_count`; skips, collection/fixture errors and deselection are not
+silently counted as passes or failures. Unsupported or incomplete summaries keep
+counts unknown. Use the existing JUnit reader for the report's separate skipped
+and error counts, and retain actual execution evidence for acceptance.
+Raw shell/script previews do not establish pytest executable identity and do not
+gain this new count parser merely by printing a pytest-like summary.
+
 The merged upstream Git review path requires Git with `check-attr --source` support. Verify `git check-attr --source=HEAD binary -- README.md` in this checkout before deployment; an older system Git can silently lose reviewed-commit attribute evidence. Use an operator-managed Git installation on the Server/Runner wrapper PATH (for example, the selected Conda environment), and verify the effective runtime executable. Python report parsing requires Python 3 and the optional plugin requires Node.js 18+; CodeGraph uses its existing operator-installed runtime.
 
 ## Fork maintenance and delivery

@@ -5,9 +5,9 @@
 
 ## 2. Implement the bounded workflow
 
-- [ ] 2.1 Retain and compare bounded startup/finish Git path/status observations; verify fresh/resumed/restored Sessions, dirty overlap, new paths, and unavailable/truncated observations with focused tests.
-- [ ] 2.2 Add conservative pytest terminal-summary evidence to the existing test execution path; verify positive, malformed, absent and incomplete summaries plus matching-assertion recovery and unresolved-failure preservation.
-- [ ] 2.3 Update Web guidance for actual read_revision, recorder/ACK, language prerequisites and observed-versus-owned effects; verify references and instruction size.
+- [x] 2.1 Retain and compare bounded startup/finish Git path/status observations; verify fresh/resumed/restored Sessions, dirty overlap, new paths, and unavailable/truncated observations with focused tests.
+- [x] 2.2 Add conservative pytest terminal-summary evidence to the existing test execution path; verify positive, malformed, absent and incomplete summaries plus matching-assertion recovery and unresolved-failure preservation.
+- [x] 2.3 Update Web guidance for actual read_revision, recorder/ACK, language prerequisites and observed-versus-owned effects; verify references and instruction size.
 - [ ] 2.4 Extend the existing disposable MCP smoke for JavaScript, guarded/stale edits and recorded validation/closeout; run against matching integrated binaries.
 
 ## 3. Integrate and deliver
