@@ -2537,6 +2537,7 @@ async fn runtime_status_does_not_expose_tokens_or_secrets() {
         configured_public_url: Some("https://example.com".to_string()),
         oauth2_enabled: true,
         oauth2_shared_key_bridge_enabled: true,
+        mcp_instructions: None,
         quic: Some(Arc::new(std::sync::Mutex::new(
             crate::config::QuicServerConfig::default().runtime_status(),
         ))),
@@ -2605,6 +2606,7 @@ async fn runtime_status_quic_enabled_error_is_sanitized() {
         quic: Some(status),
         oauth2_enabled: false,
         oauth2_shared_key_bridge_enabled: false,
+        mcp_instructions: None,
     });
     let result = runtime.dispatch(runtime_status_call()).await;
     assert!(result.success);
@@ -2636,6 +2638,7 @@ async fn runtime_status_quic_started_reports_listen_and_alpn() {
         quic: Some(status),
         oauth2_enabled: false,
         oauth2_shared_key_bridge_enabled: false,
+        mcp_instructions: None,
     });
     let result = runtime.dispatch(runtime_status_call()).await;
     assert!(result.success);
@@ -2655,6 +2658,7 @@ async fn runtime_status_auth_enabled_reflects_runtime_info() {
         configured_public_url: None,
         oauth2_enabled: false,
         oauth2_shared_key_bridge_enabled: false,
+        mcp_instructions: None,
         quic: Some(Arc::new(std::sync::Mutex::new(
             crate::config::QuicServerConfig::default().runtime_status(),
         ))),
@@ -2669,6 +2673,7 @@ async fn runtime_status_auth_enabled_reflects_runtime_info() {
         configured_public_url: Some("https://webcodex.example.com".to_string()),
         oauth2_enabled: true,
         oauth2_shared_key_bridge_enabled: true,
+        mcp_instructions: None,
         quic: Some(Arc::new(std::sync::Mutex::new(
             crate::config::QuicServerConfig::default().runtime_status(),
         ))),

@@ -272,9 +272,11 @@ only for local/trusted-network demos."
     // projection reads this immutable enum from ToolRuntime.
     let runtime_exposure = model_surface::resolve_runtime_exposure(connector_context.as_ref())
         .map_err(std::io::Error::other)?;
-    let runtime_info = Arc::new(tool_runtime::RuntimeInfo::from_config_with_quic_config(
-        &config, &quic_cfg,
-    ));
+    let mut runtime_info_value =
+        tool_runtime::RuntimeInfo::from_config_with_quic_config(&config, &quic_cfg);
+    runtime_info_value.mcp_instructions =
+        config::load_mcp_instructions_from_env().map_err(std::io::Error::other)?;
+    let runtime_info = Arc::new(runtime_info_value);
     let runtime_state_dir = config.runtime_state_dir();
     let mut tool_runtime_builder =
         tool_runtime::ToolRuntime::new(runner_registry.clone(), runtime_info.clone())

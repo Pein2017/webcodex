@@ -1077,12 +1077,20 @@ async fn handle_mcp_request_with_lifecycle(
             };
             rpc_result(
                 id,
-                protocol::server_discover_payload(capabilities, runtime_exposure.name()),
+                protocol::server_discover_payload(
+                    capabilities,
+                    runtime_exposure.name(),
+                    runtime.runtime_info.mcp_instructions.as_deref(),
+                ),
             )
         }
         "initialize" if !stateless_2026 => rpc_result(
             id,
-            protocol::legacy_initialize_payload(&request.params, runtime_exposure.name()),
+            protocol::legacy_initialize_payload(
+                &request.params,
+                runtime_exposure.name(),
+                runtime.runtime_info.mcp_instructions.as_deref(),
+            ),
         ),
         "ping" if !stateless_2026 => rpc_result(id, json!({})),
         "tools/list" => {

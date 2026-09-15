@@ -31,6 +31,7 @@ pub struct RuntimeInfo {
     pub configured_public_url: Option<String>,
     pub oauth2_enabled: bool,
     pub oauth2_shared_key_bridge_enabled: bool,
+    pub mcp_instructions: Option<String>,
     pub quic: Option<std::sync::Arc<std::sync::Mutex<crate::config::QuicRuntimeStatus>>>,
 }
 
@@ -58,6 +59,7 @@ impl RuntimeInfo {
             oauth2_enabled: config.oauth2.enabled,
             oauth2_shared_key_bridge_enabled: config.oauth2.enabled
                 && config.oauth2.shared_key_bridge_enabled,
+            mcp_instructions: None,
             quic: Some(std::sync::Arc::new(std::sync::Mutex::new(
                 quic_cfg.runtime_status(),
             ))),
@@ -1458,6 +1460,7 @@ impl Default for RuntimeInfo {
             configured_public_url: None,
             oauth2_enabled: false,
             oauth2_shared_key_bridge_enabled: false,
+            mcp_instructions: None,
             quic: Some(std::sync::Arc::new(std::sync::Mutex::new(
                 crate::config::QuicServerConfig::default().runtime_status(),
             ))),

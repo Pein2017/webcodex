@@ -1,6 +1,39 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+pub(crate) const MCP_INSTRUCTIONS_FILE_ENV: &str = "WEBCODEX_MCP_INSTRUCTIONS_FILE";
+pub(crate) const MCP_INSTRUCTIONS_MAX_BYTES: usize = 16 * 1024;
+
+pub(crate) fn load_mcp_instructions_from_env() -> Result<Option<String>, String> {
+    let Some(path) = std::env::var_os(MCP_INSTRUCTIONS_FILE_ENV) else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        return Err(format!("{MCP_INSTRUCTIONS_FILE_ENV} cannot be empty"));
+    }
+    load_mcp_instructions_file(Path::new(&path)).map(Some)
+}
+
+fn load_mcp_instructions_file(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        format!(
+            "failed to read {MCP_INSTRUCTIONS_FILE_ENV} path {}: {error}",
+            path.display()
+        )
+    })?;
+    if bytes.len() > MCP_INSTRUCTIONS_MAX_BYTES {
+        return Err(format!(
+            "{MCP_INSTRUCTIONS_FILE_ENV} exceeds {MCP_INSTRUCTIONS_MAX_BYTES} bytes"
+        ));
+    }
+    let instructions = String::from_utf8(bytes)
+        .map_err(|_| format!("{MCP_INSTRUCTIONS_FILE_ENV} must contain UTF-8 text"))?;
+    if instructions.trim().is_empty() {
+        return Err(format!("{MCP_INSTRUCTIONS_FILE_ENV} cannot be blank"));
+    }
+    Ok(instructions)
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub addr: String,
@@ -546,6 +579,37 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_instructions_file_is_bounded_utf8() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("instructions.md");
+        std::fs::write(&path, "verify the exact project first").unwrap();
+        assert_eq!(
+            load_mcp_instructions_file(&path).unwrap(),
+            "verify the exact project first"
+        );
+
+        std::fs::write(&path, vec![b'x'; MCP_INSTRUCTIONS_MAX_BYTES + 1]).unwrap();
+        assert!(load_mcp_instructions_file(&path)
+            .unwrap_err()
+            .contains("exceeds"));
+
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(load_mcp_instructions_file(&path)
+            .unwrap_err()
+            .contains("UTF-8"));
+    }
+
+    #[test]
+    fn mcp_instructions_file_rejects_blank_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("instructions.md");
+        std::fs::write(&path, " \n\t").unwrap();
+        assert!(load_mcp_instructions_file(&path)
+            .unwrap_err()
+            .contains("blank"));
+    }
 
     #[test]
     fn quic_server_config_defaults_to_disabled() {

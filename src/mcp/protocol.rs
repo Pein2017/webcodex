@@ -83,46 +83,94 @@ pub(super) fn legacy_initialize_protocol_version(params: &Value) -> &'static str
     }
 }
 
-pub(super) fn server_discover_payload(capabilities: Value, runtime_exposure_name: &str) -> Value {
-    json!({
-        "resultType": "complete",
-        "ttlMs": 0,
-        "cacheScope": "private",
-        "runtimeExposure": runtime_exposure_name,
-        "supportedVersions": [
-            MCP_STATELESS_PROTOCOL_VERSION,
-            MCP_CHATGPT_PROTOCOL_VERSION,
-            MCP_PROTOCOL_VERSION
-        ],
-        "capabilities": capabilities,
-        "_meta": {
-            "io.modelcontextprotocol/serverInfo": {
-                "name": "webcodex",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        }
-    })
+fn with_instructions(mut payload: Value, instructions: Option<&str>) -> Value {
+    if let Some(instructions) = instructions {
+        payload
+            .as_object_mut()
+            .expect("MCP discovery payload must be an object")
+            .insert("instructions".to_string(), json!(instructions));
+    }
+    payload
 }
 
-pub(super) fn legacy_initialize_payload(params: &Value, runtime_exposure_name: &str) -> Value {
-    json!({
-        "protocolVersion": legacy_initialize_protocol_version(params),
-        "capabilities": {
-            "tools": {
-                "listChanged": false
+pub(super) fn server_discover_payload(
+    capabilities: Value,
+    runtime_exposure_name: &str,
+    instructions: Option<&str>,
+) -> Value {
+    with_instructions(
+        json!({
+            "resultType": "complete",
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "runtimeExposure": runtime_exposure_name,
+            "supportedVersions": [
+                MCP_STATELESS_PROTOCOL_VERSION,
+                MCP_CHATGPT_PROTOCOL_VERSION,
+                MCP_PROTOCOL_VERSION
+            ],
+            "capabilities": capabilities,
+            "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                    "name": "webcodex",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
             }
-        },
-        "serverInfo": {
-            "name": "webcodex",
-            "version": env!("CARGO_PKG_VERSION"),
-            "runtimeExposure": runtime_exposure_name
-        }
-    })
+        }),
+        instructions,
+    )
+}
+
+pub(super) fn legacy_initialize_payload(
+    params: &Value,
+    runtime_exposure_name: &str,
+    instructions: Option<&str>,
+) -> Value {
+    with_instructions(
+        json!({
+            "protocolVersion": legacy_initialize_protocol_version(params),
+            "capabilities": {
+                "tools": {
+                    "listChanged": false
+                }
+            },
+            "serverInfo": {
+                "name": "webcodex",
+                "version": env!("CARGO_PKG_VERSION"),
+                "runtimeExposure": runtime_exposure_name
+            }
+        }),
+        instructions,
+    )
 }
 
 pub(super) fn era_label(protocol_era: McpProtocolEra) -> &'static str {
     match protocol_era {
         McpProtocolEra::Legacy => "legacy",
         McpProtocolEra::Stateless2026 => "stateless_2026",
+    }
+}
+
+#[cfg(test)]
+mod instructions_tests {
+    use super::*;
+
+    #[test]
+    fn initialize_includes_configured_instructions() {
+        let payload = legacy_initialize_payload(&json!({}), "runtime", Some("verify first"));
+        assert_eq!(payload["instructions"], "verify first");
+    }
+
+    #[test]
+    fn initialize_omits_unconfigured_instructions() {
+        let payload = legacy_initialize_payload(&json!({}), "runtime", None);
+        assert!(payload.get("instructions").is_none());
+    }
+
+    #[test]
+    fn stateless_discovery_includes_configured_instructions() {
+        let payload =
+            server_discover_payload(json!({"tools": {}}), "runtime", Some("verify first"));
+        assert_eq!(payload["instructions"], "verify first");
     }
 }
