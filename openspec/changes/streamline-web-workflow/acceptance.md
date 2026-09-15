@@ -1,6 +1,6 @@
 # Fork acceptance
 
-Status: source-accepted; final deployment and release checks remain pending in tasks.md.
+Status: lead-accepted and deployed. Published as [coordexp-2026.09.15.1](https://github.com/Pein2017/webcodex/releases/tag/coordexp-2026.09.15.1), with Linux bundle and SHA256SUMS assets confirmed uploaded. Exact build/tag source: `b0edfa887a836491c9150550e3c7da067db669b0`. This final receipt is a documentation-only follow-up; the immutable release tag is not moved.
 
 ## Accepted source checks
 
@@ -21,8 +21,20 @@ Status: source-accepted; final deployment and release checks remain pending in t
 - Initial deployed checks passed: matching clean Server/Runner identity, three online Projects, unchanged authenticated exposure, and the same 3033-byte guidance hash through initialize and server/discover. All three real worktrees report `git_available=true`.
 - Live Native Plugin admission passed for all three configured provider instances. A real pytest report preserved 1 pass, 1 failure, 1 skip and `testsExecuted=false`. Shared memory search/read returned bounded source-provenanced results. Scoped CodeGraph returned a symbol inside the requested research directory with freshness and truncation metadata.
 - Main/infra currently have no CodeGraph CLI index; the scoped adapter reports `codegraph_uninitialized` rather than fabricating results. Research and the WebCodex source checkout have indexes; existing CodeGraph access remains installed.
-- The external WebCodex connector successfully returned deployed runtime status and 36 shared Runner Skills for the research worktree. Main-project shared-Skill acceptance remains pending the symlink-source isolation repair.
+- Final deployed acceptance confirmed 36 shared Runner Skills discoverable and readable from each of the three canonical Projects. Their common memory source was read through all three provider instances without copies. Main reports `project_skill_source_rejected` while retaining the valid configured Runner catalog; its existing symlink was preserved. Research dirty work was preserved.
 - The main-project source-isolation repair passed caller-facing RED/GREEN, 14 Server Skill tests, 6 real Runner file-handler tests, and schema checks. It excludes only the fixed project-root `skill_path_escape` source with `project_skill_source_rejected`; the configured Runner source stays independently readable. Genuine transport/I/O/format failures remain unavailable, and the existing project symlink is never traversed or modified.
+- Final binaries passed the 11-check isolated smoke again (2.01 seconds). External connector verification returned matching clean `b0edfa887a83` Server/Runner builds, three online Projects, and no active Jobs. The private `live-acceptance.json` receipt captures guidance hash, canonical HEADs, shared-Skill diagnostics, memory reads, Git recognition, actual pytest counts and scoped CodeGraph freshness.
+- Original binaries and private configuration were retained, and the stopped Server database backup passed SQLite integrity checking. A second pre-final state copy is retained. Operator rollback instructions and exact deployment paths live alongside that private snapshot, not in public release assets. The existing tunnel window was not restarted or replaced.
+
+## OpenSpec verification
+
+| Dimension | Result |
+| --- | --- |
+| Completeness | 11/11 tasks and 6/6 requirements covered |
+| Correctness | Changed trust/bounds paths have discriminating regressions; final real MCP/Runner and deployed checks passed |
+| Coherence | Existing project entry, canonical checkout authority, guarded edits, optional native plugins and manual Job retrieval retained |
+
+Requirement evidence maps to `src/config.rs`, `src/tool_runtime/coding_task.rs`, `src/tool_runtime/startup_brief.rs` (guidance/startup); `src/tool_runtime/skills.rs` and `plugins/web-workflow/` (shared context); `src/tool_runtime/hygiene.rs` (Git diagnostics); and `scripts/e2e_web_workflow.py` plus the published build receipt (real delivery). No critical verification issue remains. Portability, unindexed-project and browser-host limitations above are explicit scope boundaries, not claims of tested behavior.
 
 ## Build prerequisites discovered
 

@@ -7,7 +7,7 @@
 
 - [x] 2.1 Enhance work_on_project with effective guidance identity while reusing bounded upstream catalogs; verify focused startup and MCP tests.
 - [x] 2.2 Reproduce and fix Git hygiene false negatives if present; verify a discriminating regression and real Runner worktree check.
-- [ ] 2.3 Add a Web-specific instruction example and configure shared skills plus read-only memories; verify discovery/read from all three registered projects without context copies.
+- [x] 2.3 Add a Web-specific instruction example and configure shared skills plus read-only memories; verify discovery/read from all three registered projects without context copies.
 
 ## 3. Python and code intelligence
 
@@ -17,6 +17,6 @@
 ## 4. Acceptance and delivery
 
 - [x] 4.1 Integrate packages and run focused contracts plus a real isolated Server/Runner edit/test smoke; record exact results.
-- [ ] 4.2 Commit and push reviewed public-safe code and OpenSpec artifacts; verify clean source and remote identity.
-- [ ] 4.3 Build the committed source, retain rollback, deploy to the existing Linux tmux service and verify live MCP guidance, projects and shared context.
-- [ ] 4.4 Record version, checks, deployment/rollback paths and browser refresh instructions in the release and acceptance handoff.
+- [x] 4.2 Commit and push reviewed public-safe code and OpenSpec artifacts; verify clean source and remote identity.
+- [x] 4.3 Build the committed source, retain rollback, deploy to the existing Linux tmux service and verify live MCP guidance, projects and shared context.
+- [x] 4.4 Record version, checks, deployment/rollback paths and browser refresh instructions in the release and acceptance handoff.
