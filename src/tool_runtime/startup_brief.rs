@@ -364,6 +364,7 @@ pub(crate) fn build_startup_brief(input: StartupBriefInput<'_>) -> Value {
         "detail": input.detail.as_str(),
         "session": {
             "session_id": input.session.session_id,
+            "workspace_baseline": super::workspace_baseline::startup_baseline_projection(input.session.workspace_baseline.as_ref()),
             "mode": input.session.mode,
             "execution_context": input.session.execution_context,
             "continuation": input.continuation_kind,

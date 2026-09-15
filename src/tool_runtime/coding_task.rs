@@ -859,6 +859,21 @@ impl ToolRuntime {
                 &mut warnings,
             )
             .await;
+        let repository_key =
+            super::session_context::canonical_repository_key(&resolved.config.path);
+        let workspace_baseline = (!resume_requested).then(|| {
+            let show_changes = git.get("show_changes").cloned().unwrap_or(Value::Null);
+            let result = if git.get("show_changes_success").and_then(Value::as_bool) == Some(true) {
+                ToolResult::ok(show_changes)
+            } else {
+                ToolResult::err_with_output("startup Git inspection unavailable", show_changes)
+            };
+            super::workspace_baseline::capture_workspace_baseline(
+                &result,
+                &resolved.resolved_id,
+                &repository_key,
+            )
+        });
         // Surface dirty/conflict worktree state at top-level so compact Action
         // responses that omit full git payloads still keep the warning reason.
         if !git.is_null() {
@@ -882,7 +897,7 @@ impl ToolRuntime {
                 );
             }
         };
-        let session_outcome = match self.sessions.ensure_coding_session(
+        let session_outcome = match self.sessions.ensure_coding_session_with_baseline(
             sessions::CodingSessionRequest {
                 project: resolved.resolved_id.clone(),
                 authority_fingerprint,
@@ -901,6 +916,7 @@ impl ToolRuntime {
                 context_refreshed: true,
                 write_scope_verified,
             },
+            workspace_baseline,
         ) {
             Ok(outcome) => outcome,
             Err(sessions::CodingSessionError::InvalidResumeSessionId) => {
@@ -1090,6 +1106,7 @@ impl ToolRuntime {
                 "mode": session_summary.mode,
                 "guards": session_summary.guards,
                 "execution_context": session_summary.execution_context,
+                "workspace_baseline": super::workspace_baseline::startup_baseline_projection(session_summary.workspace_baseline.as_ref()),
                 "lifecycle": session_summary.lifecycle,
                 "continuation": if resume_requested { "resumed_explicitly" } else { "created" },
                 "reused": session_outcome.reused,
@@ -1523,6 +1540,12 @@ impl ToolRuntime {
             }));
         }
         let workspace = workspace_payload_from_show_changes(&changes_result.output);
+        let workspace_observations = super::workspace_baseline::compare_workspace_observations(
+            session_summary.workspace_baseline.as_ref(),
+            &changes_result,
+            &resolved.resolved_id,
+            &super::session_context::canonical_repository_key(&resolved.config.path),
+        );
         append_workspace_warnings(&workspace, &mut final_warnings);
 
         let permissions = permission_summary_from_events(
@@ -1678,6 +1701,7 @@ impl ToolRuntime {
             "resolved_project": resolved_project_payload(&resolved),
             "session_id": session_id,
             "workspace": workspace,
+            "workspace_observations": workspace_observations,
             "changes": {
                 "show_changes": changes_result.output,
                 "hunks_truncated": changes_result.output
@@ -1851,6 +1875,7 @@ impl ToolRuntime {
                     "message": result.error,
                 }));
             }
+            output["show_changes_success"] = json!(result.success);
             output["available"] = json!(result
                 .output
                 .get("git_available")
@@ -2077,6 +2102,7 @@ struct WorkOnProjectSessionProjection {
     session_id: String,
     continuation: String,
     execution_context: sessions::SessionExecutionContext,
+    workspace_baseline: Value,
 }
 
 #[derive(Deserialize)]
@@ -2454,6 +2480,7 @@ fn project_work_on_project_output_with_workflow_inner(
         "resolved_project": projection.project.resolved_id,
         "continuation": projection.session.continuation,
         "workspace": workspace,
+        "workspace_baseline": projection.session.workspace_baseline,
         "instructions": instructions,
         "semantic_navigation": semantic_navigation,
     }));
@@ -2728,6 +2755,7 @@ fn finish_decision_output(output: &Value) -> Value {
     let mut decision = json!({
         "workspace_clean": workspace_clean,
         "workspace_conflicts": workspace_conflicts,
+        "workspace_observations": output.get("workspace_observations").cloned().unwrap_or(Value::Null),
         "hygiene_clean": hygiene_clean,
         "hygiene_secret_like_paths": hygiene_secret_like_paths,
         "hygiene_truncated": hygiene_truncated,
@@ -2758,6 +2786,7 @@ fn compact_finish_output(decision: &Value) -> Value {
         "summary_only": true,
         "workspace_clean": decision.get("workspace_clean").cloned().unwrap_or(json!(false)),
         "workspace_conflicts": decision.get("workspace_conflicts").cloned().unwrap_or(json!(0)),
+        "workspace_observations": decision.get("workspace_observations").cloned().unwrap_or(Value::Null),
         "hygiene_clean": decision.get("hygiene_clean").cloned().unwrap_or(json!(true)),
         "hygiene_secret_like_paths": decision.get("hygiene_secret_like_paths").cloned().unwrap_or(json!(0)),
         "hygiene_truncated": decision.get("hygiene_truncated").cloned().unwrap_or(json!(false)),

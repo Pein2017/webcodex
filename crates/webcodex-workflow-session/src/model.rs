@@ -36,6 +36,112 @@ pub const MAX_MATERIALIZED_VALIDATION_JOB_IDS: usize =
 /// This covers the largest currently supported structured search/LSP result
 /// while keeping every event independently bounded.
 pub const MAX_OBSERVED_PATHS_PER_EVENT: usize = 201;
+/// Matches the existing producer's bounded status records, not a new Git scan.
+pub const MAX_WORKSPACE_BASELINE_ENTRIES: usize = 200;
+pub const MAX_WORKSPACE_BASELINE_PATH_BYTES: usize = 4 * 1024;
+/// Independent ledger memory/disk cap, below a single Runner result budget.
+pub const MAX_WORKSPACE_BASELINE_METADATA_BYTES: usize = 64 * 1024;
+
+/// Immutable creation-time path/status observation. A missing value identifies
+/// a legacy or non-coding Session; an unavailable observation is stored as
+/// `Some` with no entries so resume cannot fabricate its original baseline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceBaseline {
+    pub project: String,
+    /// Domain-separated SHA-256 of the resolved project root (never its path).
+    pub repository_key: String,
+    pub head: Option<String>,
+    pub complete: bool,
+    pub files_total: Option<usize>,
+    pub entries: Vec<WorkspaceBaselineEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceBaselineEntry {
+    pub path: String,
+    pub status: String,
+}
+
+impl WorkspaceBaseline {
+    pub fn unavailable(project: &str, repository_key: &str) -> Self {
+        let safe_repository_key = if repository_key.len() == 64
+            && repository_key
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            repository_key.to_string()
+        } else {
+            "0".repeat(64)
+        };
+        Self {
+            project: project.to_string(),
+            repository_key: safe_repository_key,
+            head: None,
+            complete: false,
+            files_total: None,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn validated(self, project: &str) -> Self {
+        let unavailable = || Self::unavailable(project, &self.repository_key);
+        let hash_valid = |hash: &str| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        };
+        let head_valid = self.head.as_deref().is_none_or(|head| {
+            matches!(head.len(), 40 | 64)
+                && head
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        });
+        if self.project != project
+            || !hash_valid(&self.repository_key)
+            || !head_valid
+            || self.entries.len() > MAX_WORKSPACE_BASELINE_ENTRIES
+            || self
+                .files_total
+                .is_some_and(|total| total < self.entries.len())
+            || (self.complete && self.files_total != Some(self.entries.len()))
+        {
+            return unavailable();
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut metadata_bytes = 0usize;
+        for entry in &self.entries {
+            let path = entry.path.as_str();
+            metadata_bytes = metadata_bytes
+                .saturating_add(path.len())
+                .saturating_add(entry.status.len())
+                .saturating_add(32);
+            if path.is_empty()
+                || path.len() > MAX_WORKSPACE_BASELINE_PATH_BYTES
+                || metadata_bytes > MAX_WORKSPACE_BASELINE_METADATA_BYTES
+                || path.starts_with('/')
+                || path.chars().any(char::is_control)
+                || path.split('/').any(|component| component == "..")
+                || !seen.insert(path)
+                || !matches!(
+                    entry.status.as_str(),
+                    "modified"
+                        | "added"
+                        | "deleted"
+                        | "renamed"
+                        | "copied"
+                        | "untracked"
+                        | "conflicted"
+                )
+            {
+                return unavailable();
+            }
+        }
+        self
+    }
+}
 pub const DEFAULT_SUMMARY_LIMIT: usize = 50;
 pub const MAX_SUMMARY_LIMIT: usize = 200;
 pub const MAX_SUMMARY_STRING_CHARS: usize = 240;
@@ -264,6 +370,7 @@ pub struct SessionRecord {
     pub mode: SessionMode,
     pub guards: SessionGuards,
     pub execution_context: SessionExecutionContext,
+    pub workspace_baseline: Option<WorkspaceBaseline>,
     /// Explicit canonical lifecycle; always set in memory.
     pub lifecycle: SessionLifecycle,
     pub created_at: i64,
@@ -578,6 +685,8 @@ pub struct PersistedSessionRecord {
     pub mode: SessionMode,
     pub guards: SessionGuards,
     pub execution_context: SessionExecutionContext,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_baseline: Option<WorkspaceBaseline>,
     pub lifecycle: SessionLifecycle,
     pub created_at: i64,
     pub updated_at: i64,
@@ -1249,6 +1358,11 @@ pub struct SessionSummary {
     pub mode: SessionMode,
     pub guards: SessionGuards,
     pub execution_context: SessionExecutionContext,
+    /// Original coding startup snapshot; absent on legacy Sessions.
+    /// Do not include raw 200×4 KiB paths or internal root hash in generic
+    /// Session summaries/handoff/console; coding-task projections bound them.
+    #[serde(skip)]
+    pub workspace_baseline: Option<WorkspaceBaseline>,
     pub lifecycle: SessionLifecycle,
     pub created_at: i64,
     pub updated_at: i64,

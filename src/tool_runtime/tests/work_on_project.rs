@@ -836,6 +836,7 @@ fn valid_work_on_project_projection_input() -> serde_json::Value {
         "detail": "standard",
         "session": {
             "session_id": "wc_sess_projection",
+            "workspace_baseline": {"status": "complete", "pre_existing_dirty_count": 0, "files_total": 0},
             "continuation": "created",
             "execution_context": {},
         },

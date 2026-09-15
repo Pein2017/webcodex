@@ -58,4 +58,5 @@ mod validation_identity;
 mod validation_summary;
 mod work_on_project;
 mod work_result;
+mod workspace_baseline;
 mod write_project_file;

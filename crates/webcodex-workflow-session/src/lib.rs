@@ -30,6 +30,8 @@ mod session_context_tests;
 mod session_lifecycle_tests;
 #[cfg(test)]
 mod session_store_tests;
+#[cfg(test)]
+mod workspace_baseline_tests;
 
 pub use closeout::closeout_work_projection;
 pub use console::{
@@ -67,11 +69,12 @@ pub use model::{
     SessionLifecycleDenial, SessionMessage, SessionMessageError, SessionMessageKind,
     SessionMessageObservationError, SessionMessagePriority, SessionMessageStatus, SessionSummary,
     SessionTransport, ToolCallExpectation, ToolCallRecorderMetadata,
-    ToolCallSessionMessageResolution, ToolCallStart, DEFAULT_MAX_EVENTS_PER_SESSION,
-    DEFAULT_MAX_SESSIONS, MAX_CODING_INSTRUCTION_CHARS, MAX_MESSAGE_COMPLETION_KEY_CHARS,
-    MAX_MESSAGE_LIST_LIMIT, MAX_MESSAGE_RESOLUTION_CHARS,
+    ToolCallSessionMessageResolution, ToolCallStart, WorkspaceBaseline, WorkspaceBaselineEntry,
+    DEFAULT_MAX_EVENTS_PER_SESSION, DEFAULT_MAX_SESSIONS, MAX_CODING_INSTRUCTION_CHARS,
+    MAX_MESSAGE_COMPLETION_KEY_CHARS, MAX_MESSAGE_LIST_LIMIT, MAX_MESSAGE_RESOLUTION_CHARS,
     MAX_MODEL_VALIDATION_ASSERTION_NAME_CHARS, MAX_TOOL_CALL_ACK_MESSAGE_IDS,
-    SESSION_INBOX_HIGH_GUIDANCE_ATTENTION_INSTRUCTION,
+    MAX_WORKSPACE_BASELINE_ENTRIES, MAX_WORKSPACE_BASELINE_METADATA_BYTES,
+    MAX_WORKSPACE_BASELINE_PATH_BYTES, SESSION_INBOX_HIGH_GUIDANCE_ATTENTION_INSTRUCTION,
     SESSION_INBOX_HIGH_GUIDANCE_ATTENTION_REASON, TOOL_ACCEPTED_EXIT_CODES_FIELD,
     TOOL_ASSERTION_NAME_FIELD, TOOL_CALL_ACK_SESSION_CONTEXT_REVISION_FIELD,
     TOOL_CALL_ACK_SESSION_MESSAGE_IDS_FIELD, TOOL_CALL_RECORDING_SESSION_ID_FIELD,

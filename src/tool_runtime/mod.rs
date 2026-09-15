@@ -99,6 +99,7 @@ pub(crate) mod validation_parser;
 pub(crate) mod validation_profile;
 pub(crate) mod window_activity;
 mod work_result;
+mod workspace_baseline;
 pub(crate) use window_activity::{ActiveWindowRequest, MAX_ACTIVE_REQUESTS_PER_WINDOW};
 
 #[cfg(test)]

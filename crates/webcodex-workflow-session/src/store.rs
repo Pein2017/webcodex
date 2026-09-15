@@ -498,6 +498,7 @@ impl SessionStore {
             mode: opts.mode,
             guards,
             execution_context: opts.execution_context,
+            workspace_baseline: None,
             // Create always yields Active; only explicit close transitions later.
             lifecycle: SessionLifecycle::Active,
             created_at: now,
@@ -535,6 +536,17 @@ impl SessionStore {
         &self,
         request: CodingSessionRequest,
     ) -> Result<CodingSessionOutcome, CodingSessionError> {
+        self.ensure_coding_session_with_baseline(request, None)
+    }
+
+    /// Commit the original bounded workspace observation with fresh Session
+    /// creation. Continuation never replaces it, including for legacy Sessions
+    /// whose original observation was not retained.
+    pub fn ensure_coding_session_with_baseline(
+        &self,
+        request: CodingSessionRequest,
+        workspace_baseline: Option<super::model::WorkspaceBaseline>,
+    ) -> Result<CodingSessionOutcome, CodingSessionError> {
         let explicit_resume_session_id = match request.resume_session_id.as_deref() {
             Some(session_id)
                 if session_id != session_id.trim() || !is_valid_session_id(session_id) =>
@@ -549,6 +561,8 @@ impl SessionStore {
         let new_session_id = format!("{SESSION_ID_PREFIX}{}", uuid::Uuid::new_v4().simple());
         let new_event_id = format!("{EVENT_ID_PREFIX}{}", uuid::Uuid::new_v4().simple());
         let requested_guards = SessionGuards::effective(request.mode, request.guards);
+        let workspace_baseline =
+            workspace_baseline.map(|baseline| baseline.validated(&request.project));
         let requested_execution_context = request
             .execution_context
             .clone()
@@ -750,6 +764,7 @@ impl SessionStore {
                     mode: request.mode,
                     guards: requested_guards,
                     execution_context,
+                    workspace_baseline,
                     lifecycle: SessionLifecycle::Active,
                     created_at: now,
                     updated_at: now,
@@ -2629,6 +2644,7 @@ fn summarize_record(
         mode: record.mode,
         guards: record.guards,
         execution_context: record.execution_context.clone(),
+        workspace_baseline: record.workspace_baseline.clone(),
         lifecycle: record.lifecycle,
         created_at: record.created_at,
         updated_at: record.updated_at,

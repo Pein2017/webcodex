@@ -93,6 +93,7 @@ impl PersistedSessionRecord {
             mode: record.mode,
             guards: record.guards,
             execution_context: record.execution_context.clone(),
+            workspace_baseline: record.workspace_baseline.clone(),
             lifecycle: record.lifecycle,
             created_at: record.created_at,
             updated_at: record.updated_at,
@@ -132,6 +133,7 @@ impl PersistedSessionRecord {
             && self.mode == record.mode
             && self.guards == record.guards
             && self.execution_context == record.execution_context
+            && self.workspace_baseline == record.workspace_baseline
             && self.lifecycle == record.lifecycle
             && self.created_at == record.created_at
             && self.updated_at == record.updated_at
@@ -371,6 +373,10 @@ impl PersistedSessionRecord {
             .max()
             .unwrap_or(0);
         let project = self.project.map(|value| bound_summary_string(value.trim()));
+        let workspace_baseline = project.as_deref().and_then(|project| {
+            self.workspace_baseline
+                .map(|baseline| baseline.validated(project))
+        });
         let execution_context = if project.is_some() {
             self.execution_context.sanitized_for_restore()
         } else {
@@ -384,6 +390,7 @@ impl PersistedSessionRecord {
             mode: self.mode,
             guards: SessionGuards::effective(self.mode, self.guards),
             execution_context,
+            workspace_baseline,
             lifecycle,
             created_at: self.created_at,
             updated_at: self.updated_at.max(self.created_at),

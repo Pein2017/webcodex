@@ -51,6 +51,10 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 open_object_schema("Workspace cleanliness, changed file count, and warnings."),
             ),
             (
+                "workspace_observations",
+                workspace_observations_schema(),
+            ),
+            (
                 "changes",
                 open_object_schema("show_changes output and hunk truncation metadata."),
             ),
@@ -408,6 +412,7 @@ fn startup_session_schema() -> Value {
         "type": "object",
         "properties": {
             "session_id": {"type": "string", "pattern": "^wc_sess_[A-Za-z0-9_]+$"},
+            "workspace_baseline": startup_baseline_schema(),
             "mode": {"type": "string", "enum": ["normal", "read_only"]},
             "execution_context": session_execution_context_schema(
                 "Persistent execution defaults currently stored for this Workflow Session."
@@ -419,6 +424,7 @@ fn startup_session_schema() -> Value {
         },
         "required": [
             "session_id",
+            "workspace_baseline",
             "mode",
             "execution_context",
             "continuation",
@@ -426,6 +432,73 @@ fn startup_session_schema() -> Value {
             "resume_requested",
             "explicit_resume_required_for_continuation"
         ],
+        "additionalProperties": false
+    })
+}
+
+fn startup_baseline_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Immutable creation-time bounded Git path/status evidence. Existing Sessions retain their original baseline; resumed legacy Sessions never recapture it. Paths are exposed at finish only.",
+        "properties": {
+            "status": {"type": "string", "enum": ["complete", "partial", "unavailable", "legacy_missing"]},
+            "pre_existing_dirty_count": nullable_schema("integer", "Count of actually observed startup dirty paths; null when unavailable or legacy-missing. Partial observations cannot prove a missing path clean."),
+            "files_total": nullable_schema("integer", "Producer total Git path count; null when unavailable or legacy-missing.")
+        },
+        "required": ["status", "pre_existing_dirty_count"],
+        "additionalProperties": false
+    })
+}
+
+fn workspace_observations_schema() -> Value {
+    let detail = json!({
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["complete", "partial", "unavailable", "legacy_missing"]},
+            "head": nullable_schema("string", "Full observed HEAD SHA, never file content."),
+            "complete": {"type": "boolean"},
+            "files_total": nullable_schema("integer", "Producer total status paths; null if unavailable."),
+            "observed_count": nullable_schema("integer", "Count of returned status records when observed; null if unavailable or legacy-missing. Partial count is not a cleanliness proof.")
+        },
+        "required": ["status", "head", "complete", "files_total", "observed_count"],
+        "additionalProperties": false
+    });
+    let path_item = json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "maxLength": 512},
+            "status": {"type": "string", "enum": ["modified", "added", "deleted", "renamed", "copied", "untracked", "conflicted"]},
+        },
+        "required": ["path", "status"],
+        "additionalProperties": false
+    });
+    let overlap_item = json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "maxLength": 512},
+            "startup_status": {"type": "string"},
+            "finish_status": {"type": "string"}
+        },
+        "required": ["path", "startup_status", "finish_status"],
+        "additionalProperties": false
+    });
+    let group = |item| json!({"type": "array", "maxItems": 16, "items": item});
+    json!({
+        "type": "object",
+        "description": "Informational startup/finish bounded Git path/status observations, not exclusive Session authorship or proof of unchanged content. Newly dirty requires a complete startup snapshot; cleared requires complete startup and finish snapshots. Partial, unavailable, changed HEAD or target and legacy Session limitations remain explicit. Returned paths have independent presentation limits; inspect display and counts before relying on a missing displayed path.",
+        "properties": {
+            "status": {"type": "string", "enum": ["comparable", "partial", "unavailable", "legacy_missing", "target_changed", "head_changed"]},
+            "startup": detail,
+            "finish": detail,
+            "counts": open_object_schema("Observed category counts before presentation clipping. Null means insufficient evidence to infer zero/absence; no actor attribution."),
+            "display": open_object_schema("Presentation truncation and returned_count; cannot turn missing displayed paths into absence claims."),
+            "pre_existing_dirty": group(path_item.clone()),
+            "newly_dirty": group(path_item.clone()),
+            "cleared": group(path_item),
+            "overlapping_dirty": group(overlap_item),
+            "overlap_content_unknown": {"type": "boolean", "description": "True whenever overlap was observed, even if its path is presentation-truncated; no same-content claim."}
+        },
+        "required": ["status", "startup", "finish", "counts", "display", "pre_existing_dirty", "newly_dirty", "cleared", "overlapping_dirty", "overlap_content_unknown"],
         "additionalProperties": false
     })
 }
@@ -1260,6 +1333,10 @@ fn work_on_project_output_schema() -> Value {
         (
             "workspace",
             compact_workspace,
+        ),
+        (
+            "workspace_baseline",
+            startup_baseline_schema(),
         ),
         (
             "worktree",
