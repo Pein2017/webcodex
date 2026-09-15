@@ -827,7 +827,7 @@ async fn rejected_project_skill_root_keeps_configured_runner_skill_list_and_read
     )
     .await;
     let project = crate::tool_runtime::runner_project_runtime_id(client_id, "project");
-    let configured_id = format!("wc_skill_{}", "2".repeat(32));
+    let configured_id = "wc_skill_IiIiIiIiIiIiIiIiIiIiIg".to_string();
     let configured_revision = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let configured = Arc::new(Mutex::new(FakeOperatorSkillState {
         configured: Some(FakeConfiguredSkillState {
