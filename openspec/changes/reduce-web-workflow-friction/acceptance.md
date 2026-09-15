@@ -1,6 +1,6 @@
 # Acceptance receipt
 
-Status: implementation in progress. No release/deployment claimed yet.
+Status: implementation and disposable release acceptance passed; fork publication and local activation pending.
 
 ## Source and scope
 
@@ -21,8 +21,16 @@ Status: implementation in progress. No release/deployment claimed yet.
 - Integrated suites subsequently passed 4537 tests (6 intentionally ignored). The final guidance keeps upstream's tested ordering/role language and saves 50 bytes without raising startup budgets. A production-only build failure exposed a test-gated constant re-export; `5a5b9949` corrects that visibility, and the clean release build passed.
 - Real stateless MCP evidence passed JS, revision-guarded edit/stale rejection, baseline comparison, synchronous fail/fix/pass, and async pytest Job counts. It then exposed missing synchronous PASS counts in the outer Session ledger despite correct public counts. A matching kernel caller fixture reproduced this (exit 101), then passed after deferring process/script compaction until after the canonical outer recorder. No inferred exit code, new wire field, hidden recorder, or assertion-budget relaxation was introduced. Final rebuilt real-MCP GREEN remains required.
 
-## Remaining acceptance
+## Final candidate acceptance
 
-Merged-source tests, clean release build, disposable real MCP smoke, fork push and
-local deployment/rollback verification remain required. Path/status comparison is
-not content auditing or Session authorship; no browser automatic wake is claimed.
+- Clean binary source: `69f0273dcf80e1232f7a22e0e7f77c5778d1c447`, upstream `01dc7d31` included. Both release binaries report `dirty=false`, version `0.4.1`, and the same source/built-at identity.
+- Server suite after the recorder fix: 2658 passed, 2 ignored. Unchanged package/Runner suites contribute 1880 passed, 4 ignored: total 4538 passed, 6 intentionally ignored. Optional Native Plugin tests: 11 passed.
+- Real stateless MCP smoke: 25 checks passed in 7.22 seconds (7.369 seconds including cleanup), fixture resources removed. Operator-local receipt: `verification/coordexp-2026.09.15.2/e2e-owned-async/receipt.json`.
+- Async Job ownership remains explicit: a supported business `session_id` is required in addition to `recording_session_id` for Session-owned closeout. No runtime authority change was made. The synchronous regression remains outer-recorder-only.
+- Server SHA-256: `93336d8409e13cd59e9bbbdade9e493195db6d02f048eb25ff39c0f799e4ce6e`.
+- Runner SHA-256: `04fa884fed87bbaece083c1e6546436e2c720837e1ba852c5bce00f3fb2baa74`.
+- Final operator guidance: 5527 UTF-8 bytes, SHA-256 `30fc7b623263919e2ecf8e225b0e7dbef405733d9bf9604348ca64b5988c05e2`. The final guidance/smoke clarification does not alter compiled Rust source.
+
+Fork push and local deployment/rollback verification remain required. Path/status
+comparison is not content auditing or Session authorship; no browser automatic
+wake or ChatGPT UI acceptance is claimed.

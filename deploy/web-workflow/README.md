@@ -44,6 +44,12 @@ and error counts, and retain actual execution evidence for acceptance.
 Raw shell/script previews do not establish pytest executable identity and do not
 gain this new count parser merely by printing a pytest-like summary.
 
+For an asynchronous `run_process` Job that belongs in Session closeout, explicitly
+pass the supported business `session_id` as well as `recording_session_id`.
+The former binds the Job through normal Session authorization; the latter records
+the call but does not grant Job ownership. The smoke retains an outer-recorder-only
+synchronous test and uses explicit business ownership for its asynchronous test.
+
 The merged upstream Git review path requires Git with `check-attr --source` support. Verify `git check-attr --source=HEAD binary -- README.md` in this checkout before deployment; an older system Git can silently lose reviewed-commit attribute evidence. Use an operator-managed Git installation on the Server/Runner wrapper PATH (for example, the selected Conda environment), and verify the effective runtime executable. Python report parsing requires Python 3 and the optional plugin requires Node.js 18+; CodeGraph uses its existing operator-installed runtime.
 
 ## Fork maintenance and delivery

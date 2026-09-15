@@ -10,7 +10,7 @@
 - 按操作选择工具：run_process 用明确 argv，run_shell 用 shell 语法或短命令链，run_script 用程序式脚本，长任务用 Job。JS/TS 需要目标 Runner 对应 capability 和可用 Node；发现语言与可执行环境是两件事。遇到 schema 错误，记录实际工具/参数/返回与 build，先区分网页调用前拒绝和服务器拒绝。
 - 测试调用显式设置 purpose=test 与稳定 assertion_name；pytest 计数使用 run_process 直接运行 python -m pytest 的证据。修复后的同一验证复用该名称，不能用无关 PASS 抹掉失败。预期负例在执行前声明 result_expectation，不能事后把失败改称预期。pytest_report_summary 只读取报告，不执行测试；核对真实退出状态、摘要完整性、报告新鲜度和范围。
 - finish_coding_task 是证据摘要，不替代验收。workspace baseline 比较的是启动与收尾的路径/状态：既有 dirty、后来新增 dirty、消失及重叠；重叠不证明内容没变，变化不证明属于当前 Session。write_like 是工具类别计数，0 不等于 shell 没改文件；必要时检查源码和 diff。
-- 长任务使用可恢复 Job 或用户指定的 tmux，保存标识、日志和结果位置。断连不等于任务停止；恢复时先查既有任务，避免重复启动。用户手动返回查看结果，不承诺自动唤醒网页对话。
+- 长任务使用可恢复 Job 或用户指定的 tmux，保存标识、日志和结果位置。异步 Job 要纳入 Session 收尾，需在工具支持时同时显式传业务 session_id；recording_session_id 仅记录调用，不代替 Job 归属。断连不等于任务停止；恢复时先查既有任务，避免重复启动。用户手动返回查看结果，不承诺自动唤醒网页对话。
 
 ## 按需上下文
 

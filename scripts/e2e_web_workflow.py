@@ -710,6 +710,7 @@ def main() -> int:
                 "run_process",
                 {
                     "project": RUNTIME_PROJECT,
+                    "session_id": recording_session_id,
                     "executable": "python3",
                     "args": [
                         "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
@@ -924,6 +925,14 @@ def main() -> int:
                 if event.get("assertion_name") == async_pytest_assertion
                 and event.get("tool_name") == "run_process"
             ]
+            validation_event_ids = [
+                {key: event.get(key) for key in (
+                    "tool_name", "assertion_name", "command_summary", "execution_state",
+                    "success", "validation_passed", "tests_detected", "tests_run_count",
+                    "tests_passed", "tests_failed", "zero_tests_run",
+                )}
+                for event in validation_result.get("events", [])
+            ]
             require(
                 len(async_events) == 1
                 and async_events[0].get("success") is True
@@ -934,7 +943,7 @@ def main() -> int:
                 and async_events[0].get("tests_passed") == 1
                 and async_events[0].get("tests_failed") == 0
                 and async_events[0].get("zero_tests_run") is False,
-                f"async typed pytest evidence was not persisted at finish: {bounded(async_events)}",
+                f"async typed pytest evidence was not persisted at finish: {bounded(validation_event_ids, 4000)}",
             )
             ok("explicit Session finish persists the async typed pytest counts")
             require(
