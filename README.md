@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+This is the CoordExp self-hosted fork. See the [Web workflow setup and fork delivery policy](deploy/web-workflow/README.md) and [OpenSpec change](openspec/changes/streamline-web-workflow/proposal.md). Fork builds are published separately from upstream npm packages.
+
 **WebCodex lets ChatGPT, Claude, and other AI agents work directly with code and developer tools on your own machines.**
 
 Ask your assistant to inspect a repository, modify code, run tests, use Git, or investigate a failure. Your repository stays on the machine where it already lives; you do not need to move the project into a hosted workspace just to use an AI coding agent.

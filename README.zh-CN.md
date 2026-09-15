@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+这是 CoordExp 自托管 fork。定制配置和维护方式见 [Web 工作流说明](deploy/web-workflow/README.md)，设计与进度见 [OpenSpec change](openspec/changes/streamline-web-workflow/proposal.md)。Fork 发版独立于上游 npm 包。
+
 **WebCodex 让 ChatGPT、Claude 和其他 AI Agent 直接使用你自己机器上的代码仓库和开发工具。**
 
 你可以直接让 AI 理解项目、修改代码、运行测试、检查 Git 或排查问题。仓库仍然留在原来的机器上，不需要为了使用 WebCodex 把整个项目搬到托管环境里。

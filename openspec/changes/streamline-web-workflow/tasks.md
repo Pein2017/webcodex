@@ -1,7 +1,7 @@
 ## 1. Source and contract
 
 - [x] 1.1 Create the authorized fork, preserve the existing MCP patch and merge current upstream; verify Git remotes and ancestry.
-- [ ] 1.2 Validate the OpenSpec proposal, specification and design with openspec validate --strict.
+- [x] 1.2 Validate the OpenSpec proposal, specification and design with openspec validate --strict.
 
 ## 2. Runtime entry and shared context
 
@@ -11,8 +11,8 @@
 
 ## 3. Python and code intelligence
 
-- [ ] 3.1 Provide bounded pytest report summaries using existing execution/plugin mechanisms; verify pass/fail/skip and malformed/bounded input tests.
-- [ ] 3.2 Provide scoped CodeGraph access and freshness guidance; verify filtered results or explicit unsupported errors and preserve existing unscoped behavior.
+- [x] 3.1 Provide bounded pytest report summaries using existing execution/plugin mechanisms; verify pass/fail/skip and malformed/bounded input tests.
+- [x] 3.2 Provide scoped CodeGraph access and freshness guidance; verify filtered results or explicit unsupported errors and preserve existing unscoped behavior.
 
 ## 4. Acceptance and delivery
 

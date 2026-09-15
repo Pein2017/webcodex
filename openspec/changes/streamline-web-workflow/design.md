@@ -10,6 +10,7 @@ Non-goals: a project-family framework, automatic browser wake, another scheduler
 ## Decisions
 
 - Keep Web-specific operator instructions in a versioned example loaded via WEBCODEX_MCP_INSTRUCTIONS_FILE. Startup exposes digest/size, not another full instruction copy. Repository AGENTS remains developer guidance, separate from runtime guidance.
+- In this fork, omitted include_project_instructions/include_workflow_guidance flags default to false in both parsing and schema metadata; explicit true retains upstream opt-in behavior. This avoids contradictory fresh-context tool guidance reintroducing Codex harness instructions. Internal identity/fingerprint observations retain their existing contract.
 - Reuse upstream startup catalogs and Runner-configured skill directories. Treat Codex-specific skills as guidance whose tool requirements must be checked, not automatically executable commands.
 - Shared memories are read-only source files through a bounded native plugin where existing exact-project memory tools cannot reach them; no write or synchronization API is added.
 - Use an optional native plugin for scoped CodeGraph and pytest report projection when no equivalent upstream mechanism exists. Preserve existing guarded file edits and process/job execution.
