@@ -17,6 +17,25 @@ Use `skill_list` and `skill_read_file` or `context_request=["skills.catalog"]`; 
 
 For normal work, select the exact registered Project in `work_on_project`, leave repository instruction injection disabled, then use current search/read/edit/validation tools. Retain the Session identifier for multi-step work. Jobs or tmux work are retrieved manually; no ChatGPT auto-wake integration is provided.
 
+Use `recording_session_id` explicitly for recorded calls. `read_files` returns a
+`read_revision` that can be copied directly to `apply_text_edits` as
+`expected_read_revision`; callers do not translate it into a SHA. Discover current
+schemas and inspect the selected Runner's capabilities when a script language is
+unavailable. JS/TS also require a suitable Node runtime on that Runner.
+
+Startup/finish workspace observations distinguish pre-existing dirty paths from
+later path/status changes. These are bounded Git observations, not filesystem
+auditing or proof of Session authorship. Already-dirty overlap does not prove
+unchanged contents, and failed/incomplete observations cannot prove absence.
+`write_like` counts tool classes, so zero does not mean a shell made no writes.
+
+For generic test execution, use `purpose=test` and a stable `assertion_name` for
+the same validation across fixes. A later matching PASS can resolve a prior failed
+assertion; unrelated success cannot clear a real execution failure. Declare
+expected negative results before execution. Test counts from supported summaries
+remain separate from exit status, completeness and scientific acceptance. The
+optional JUnit report reader still never executes tests.
+
 The merged upstream Git review path requires Git with `check-attr --source` support. Verify `git check-attr --source=HEAD binary -- README.md` in this checkout before deployment; an older system Git can silently lose reviewed-commit attribute evidence. Use an operator-managed Git installation on the Server/Runner wrapper PATH (for example, the selected Conda environment), and verify the effective runtime executable. Python report parsing requires Python 3 and the optional plugin requires Node.js 18+; CodeGraph uses its existing operator-installed runtime.
 
 ## Fork maintenance and delivery

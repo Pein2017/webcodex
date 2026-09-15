@@ -28,6 +28,13 @@ This deliberately starts with path/status evidence instead of hashing every file
 
 Use existing explicit assertion identity and result expectations. Verify that later successful matching assertions resolve earlier failures without making unrelated successes or expected negatives count as validation. Add pytest summary support through the existing validation evidence path where the captured execution metadata permits it; missing/truncated evidence must remain unknown. Do not add another test executor or rely on a model-authored report as proof of execution.
 
+Inspection confirmed that matching-assertion failure recovery already exists.
+Started generic execution failures intentionally remain actionable unless their
+declared validation/expectation evidence resolves them. The verified parser gap is
+that generic test summaries currently use Cargo grammar, so pytest counts are not
+recognized. Repair that gap without redefining all previous shell failures as
+protocol misuse.
+
 ### Feedback disposition
 
 | Feedback | Decision |
