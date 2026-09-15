@@ -14,4 +14,4 @@
 
 - [x] 3.1 Commit scoped changes, merge current upstream main, resolve routine conflicts and verify affected tests, formatting, OpenSpec and Git hygiene.
 - [x] 3.2 Build from clean source and pass the disposable Server/Runner smoke and existing optional-plugin checks; preserve an acceptance receipt.
-- [ ] 3.3 Push reviewed history to the existing fork, preserve rollback/state backup, deploy locally and verify matching build identity, guidance, Projects and current plugin discovery.
+- [x] 3.3 Push reviewed history to the existing fork, preserve rollback/state backup, deploy locally and verify matching build identity, guidance, Projects and current plugin discovery.

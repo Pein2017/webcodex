@@ -1,13 +1,13 @@
 # Acceptance receipt
 
-Status: implementation and disposable release acceptance passed; fork publication and local activation pending.
+Status: lead-accepted; fork publication and local activation passed.
 
 ## Source and scope
 
 - Initial checkout: `coordexp/web-workflow` at `47bf37df`; fork `Pein2017/webcodex`, upstream `yyjeqhc/webcodex`.
 - Planning: `6e7cfd3e`; guidance: `edaa9fe0`. Strict OpenSpec validation passed before implementation.
 - Upstream fetched at assessment: `6a1433d0`, four incoming commits; refreshed to `01dc7d31` (one additional execution-guidance update) and merged as `0c660be3`. Seven ordinary overlapping files were reconciled: compact IDs, under-lock allocation, additive baseline fields, fixture identity, opt-in guidance prose, and the existing bounded SSH shutdown check. No authority or instruction-default change was accepted.
-- Current deployed baseline observed: clean matching Server/Runner `b0edfa887a83`, four online Projects, no active Jobs.
+- Pre-upgrade deployed baseline observed: clean matching Server/Runner `b0edfa887a83`, four online Projects, no active Jobs.
 
 ## Evidence retained
 
@@ -16,10 +16,10 @@ Status: implementation and disposable release acceptance passed; fork publicatio
 - Baseline GREEN: persistence/resume/legacy 2, real startup/finish and bounded comparisons 6, existing startup projections 6 tests passed. Lead reviewed persistence, raw Git capture, completeness and public projection boundaries. Implementation commit: `502a1f1f`.
 - Existing optional Native Plugin suite: 11 passed, 0 failed. Its source/dependencies are unchanged. Raw log remains operator-local under this deployment's verification directory.
 - Guidance: 5371 UTF-8 bytes (below 16 KiB); initial Markdown local-link check passed (88 files, 529 links, zero missing targets).
-- First integrated root run: 2655 passed, 2 failed, 2 ignored. One fork-only Skill fixture still used the upstream-retired hexadecimal ID; its isolated failure reproduced, then passed with the actual compact ID format and unchanged behavioral assertions. The other failure exceeded existing startup budgets by 41/40 bytes; shorten only the context-sidecar prose by 42 bytes and retain both original budgets. Final integrated GREEN remains required.
+- First integrated root run: 2655 passed, 2 failed, 2 ignored. One fork-only Skill fixture still used the upstream-retired hexadecimal ID; its isolated failure reproduced, then passed with the actual compact ID format and unchanged behavioral assertions. The other failure exceeded existing startup budgets by 41/40 bytes; initial prose shortening then required preserving upstream's literal ordering/role checks. Both original budgets and behavioral assertions were retained in the final GREEN below.
 - The four implementation package suites passed before merge: Core 252, Tool Contracts 132, Validation 97, Workflow Session 178. Post-merge optional plugin tests passed 11/11; strict OpenSpec and local Markdown links passed (90 files, 529 links).
 - Integrated suites subsequently passed 4537 tests (6 intentionally ignored). The final guidance keeps upstream's tested ordering/role language and saves 50 bytes without raising startup budgets. A production-only build failure exposed a test-gated constant re-export; `5a5b9949` corrects that visibility, and the clean release build passed.
-- Real stateless MCP evidence passed JS, revision-guarded edit/stale rejection, baseline comparison, synchronous fail/fix/pass, and async pytest Job counts. It then exposed missing synchronous PASS counts in the outer Session ledger despite correct public counts. A matching kernel caller fixture reproduced this (exit 101), then passed after deferring process/script compaction until after the canonical outer recorder. No inferred exit code, new wire field, hidden recorder, or assertion-budget relaxation was introduced. Final rebuilt real-MCP GREEN remains required.
+- Real stateless MCP evidence passed JS, revision-guarded edit/stale rejection, baseline comparison, synchronous fail/fix/pass, and async pytest Job counts. It then exposed missing synchronous PASS counts in the outer Session ledger despite correct public counts. A matching kernel caller fixture reproduced this (exit 101), then passed after deferring process/script compaction until after the canonical outer recorder. No inferred exit code, new wire field, hidden recorder, or assertion-budget relaxation was introduced. Rebuilt real-MCP GREEN is recorded below.
 
 ## Final candidate acceptance
 
@@ -31,6 +31,13 @@ Status: implementation and disposable release acceptance passed; fork publicatio
 - Runner SHA-256: `04fa884fed87bbaece083c1e6546436e2c720837e1ba852c5bce00f3fb2baa74`.
 - Final operator guidance: 5527 UTF-8 bytes, SHA-256 `30fc7b623263919e2ecf8e225b0e7dbef405733d9bf9604348ca64b5988c05e2`. The final guidance/smoke clarification does not alter compiled Rust source.
 
-Fork push and local deployment/rollback verification remain required. Path/status
-comparison is not content auditing or Session authorship; no browser automatic
-wake or ChatGPT UI acceptance is claimed.
+## Publication and local activation
+
+- Reviewed history was fast-forward pushed atomically to `Pein2017/webcodex` branches `main` and `coordexp/web-workflow` at `e345afbb`; this acceptance closeout is a subsequent documentation-only commit. No force push or upstream publication.
+- Activated local release `coordexp-2026.09.15.2` in the existing Server/Runner tmux windows. Existing Tunnel process remained untouched; its health endpoint returned HTTP 200.
+- Stopped-state Server data, private config and old wrappers were backed up before activation; backup SQLite `quick_check=ok`. Previous `.1` binaries remain. Backup retained operator-locally at `rollback/coordexp-2026.09.15.2`; a rollback was not executed.
+- Live stateless MCP acceptance passed: both binaries `69f0273dcf80`, `dirty=false`, source `aligned`; all four existing Projects online; CodeGraph plus three Web workflow providers ready; initialize/discover return the expected 5527-byte guidance. A new main-project Session returned a complete clean startup baseline and was then closed.
+- Production repositories and research processes were not modified or restarted by the release workflow. No npm, container, desktop, or GitHub binary release was published.
+
+Path/status comparison is not content auditing or Session authorship; no browser
+automatic wake or ChatGPT UI acceptance is claimed.
