@@ -1,4 +1,7 @@
 use serde_json::{json, Value};
+use webcodex_core::pytest_test_count::{
+    is_supported_pytest_command_summary, parse_pytest_terminal_test_counts,
+};
 use webcodex_core::runner_job_lifecycle::RunnerJobLifecycle;
 use webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS;
 use webcodex_core::workflow_session_contract::is_validation_like_execution_purpose;
@@ -31,20 +34,24 @@ pub(crate) fn is_terminal_job_status(status: &str) -> bool {
 
 pub(crate) fn detected_job_summary(
     command_summary: Option<&str>,
+    execution_source: Option<&str>,
     purpose: Option<&str>,
     status: &str,
     exit_code: Option<i64>,
     stdout: &str,
     stderr: &str,
+    truncated: bool,
 ) -> Value {
     detected_job_summary_with_activity(
         command_summary,
+        execution_source,
         purpose,
         status,
         exit_code,
         stdout,
         stderr,
         None,
+        truncated,
     )
 }
 
@@ -92,12 +99,14 @@ fn activity_progress_projection(activity: &ShellJobActivity) -> Value {
 
 pub(crate) fn detected_job_summary_with_activity(
     command_summary: Option<&str>,
+    execution_source: Option<&str>,
     purpose: Option<&str>,
     status: &str,
     exit_code: Option<i64>,
     stdout: &str,
     stderr: &str,
     activity: Option<&ShellJobActivity>,
+    truncated: bool,
 ) -> Value {
     let normalized = command_summary
         .unwrap_or_default()
@@ -177,7 +186,28 @@ pub(crate) fn detected_job_summary_with_activity(
             detected["progress"] = progress;
         }
     }
-    if kind == "test" {
+    if kind == "test"
+        && execution_source == Some("run_process")
+        && is_supported_pytest_command_summary(&normalized)
+    {
+        // A tail cannot prove the complete terminal summary if either stream
+        // was truncated. Never convert an unseen pytest run into Cargo's
+        // tests_detected=false just because the parsers recognize different
+        // harness grammars.
+        let finished = matches!(
+            lifecycle,
+            Some(RunnerJobLifecycle::Completed | RunnerJobLifecycle::Failed)
+        ) && exit_code.is_some();
+        if finished && !truncated {
+            if let Some(metadata) = parse_pytest_terminal_test_counts(stdout, stderr) {
+                detected["tests_detected"] = json!(metadata.tests_detected);
+                detected["tests_run_count"] = json!(metadata.tests_run_count);
+                detected["tests_passed"] = json!(metadata.tests_passed);
+                detected["tests_failed"] = json!(metadata.tests_failed);
+                detected["zero_tests_run"] = json!(metadata.zero_tests_run);
+            }
+        }
+    } else if kind == "test" && !is_supported_pytest_command_summary(&normalized) {
         let combined = format!("{stdout}\n{stderr}");
         let metadata = super::cargo::parse_cargo_test_run_metadata(&combined);
         detected["tests_detected"] = json!(metadata.tests_detected);
@@ -189,45 +219,219 @@ pub(crate) fn detected_job_summary_with_activity(
     detected
 }
 
+/// Retain sparse, typed pytest facts from the bounded *original* synchronous
+/// Runner result before the Session ledger's privacy-filtered 800-char excerpt
+/// is derived. No stdout/stderr body or invented fallback becomes ledger truth.
+pub(crate) fn attach_pytest_terminal_metadata(output: &mut Value) {
+    let command = output
+        .get("command_summary")
+        .or_else(|| output.get("process_summary"))
+        .or_else(|| output.get("script_summary"))
+        .and_then(Value::as_str);
+    if output.get("execution_source").and_then(Value::as_str) != Some("run_process")
+        || output.get("purpose").and_then(Value::as_str) != Some("test")
+        || output.get("execution_state").and_then(Value::as_str) != Some("completed")
+        || output.get("exit_code").and_then(Value::as_i64).is_none()
+        || output.get("stdout_truncated").and_then(Value::as_bool) != Some(false)
+        || output.get("stderr_truncated").and_then(Value::as_bool) != Some(false)
+        || !command.is_some_and(is_supported_pytest_command_summary)
+    {
+        return;
+    }
+    let stdout = output
+        .get("stdout_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stderr = output
+        .get("stderr_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(metadata) = parse_pytest_terminal_test_counts(stdout, stderr) {
+        output["tests_detected"] = json!(metadata.tests_detected);
+        if let Some(run) = metadata.tests_run_count {
+            output["tests_run_count"] = json!(run);
+        }
+        if let Some(passed) = metadata.tests_passed {
+            output["tests_passed"] = json!(passed);
+        }
+        if let Some(failed) = metadata.tests_failed {
+            output["tests_failed"] = json!(failed);
+        }
+        if let Some(zero) = metadata.zero_tests_run {
+            output["zero_tests_run"] = json!(zero);
+        }
+    }
+}
+
 #[cfg(test)]
 mod detected_summary_tests {
-    use super::{detected_job_summary, detected_job_summary_with_activity};
+    use super::{
+        attach_pytest_terminal_metadata, detected_job_summary, detected_job_summary_with_activity,
+    };
     use crate::runner_protocol::{
         ShellJobActivity, ShellJobActivityPhase, ShellJobActivitySource, ShellJobActivityState,
     };
+    use serde_json::json;
 
     #[test]
     fn cargo_progress_is_advisory_and_command_scoped() {
         let locked = detected_job_summary(
             Some("cargo check -p webcodex"),
+            None,
             Some("validation"),
             "running",
             None,
             "",
             "Blocking waiting for file lock on build directory\n",
+            false,
         );
         assert_eq!(locked["progress"]["state"], "waiting");
         assert_eq!(locked["progress"]["reason_code"], "cargo_build_lock");
 
         let compiling = detected_job_summary(
             Some("cargo test -p webcodex"),
+            None,
             Some("test"),
             "running",
             None,
             "",
             "   Compiling webcodex v0.3.9\n",
+            false,
         );
         assert_eq!(compiling["progress"]["reason_code"], "cargo_compiling");
 
         let unrelated = detected_job_summary(
             Some("custom-tool"),
+            None,
             Some("operation"),
             "running",
             None,
             "Blocking waiting for file lock on build directory\n",
             "",
+            false,
         );
         assert!(unrelated.get("progress").is_none());
+    }
+
+    #[test]
+    fn completed_pytest_job_detects_terminal_counts_without_marking_collected_skips_as_run() {
+        let pytest = detected_job_summary(
+            Some("python -m pytest tests/test_api.py -q"),
+            Some("run_process"),
+            Some("test"),
+            "completed",
+            Some(0),
+            "..s [100%]\n=================== 2 passed, 1 skipped in 0.12s ===================\n",
+            "",
+            false,
+        );
+        assert_eq!(pytest["outcome"], "passed");
+        assert_eq!(pytest["tests_detected"], true);
+        assert_eq!(pytest["tests_run_count"], 2);
+        assert_eq!(pytest["tests_passed"], 2);
+        assert_eq!(pytest["tests_failed"], 0);
+        assert_eq!(pytest["zero_tests_run"], false);
+
+        let unrelated = detected_job_summary(
+            Some("python -m unittest discover"),
+            Some("run_process"),
+            Some("test"),
+            "completed",
+            Some(0),
+            "2 passed in 0.12s\n",
+            "",
+            false,
+        );
+        assert_ne!(unrelated["tests_detected"], true);
+        assert!(unrelated["tests_run_count"].is_null());
+    }
+
+    #[test]
+    fn pytest_job_count_remains_unknown_for_truncation_or_unfinished_execution() {
+        let complete_failure = detected_job_summary(
+            Some("python3 -B -m pytest -q"),
+            Some("run_process"),
+            Some("test"),
+            "failed",
+            Some(1),
+            "==== 1 failed, 2 passed, 1 error in 0.12s ====\n",
+            "",
+            false,
+        );
+        assert_eq!(complete_failure["outcome"], "failed");
+        assert_eq!(complete_failure["tests_detected"], true);
+        assert_eq!(complete_failure["tests_passed"], 2);
+        assert_eq!(complete_failure["tests_failed"], 1);
+
+        for (status, exit_code, truncated) in [
+            ("failed", Some(1), true),
+            ("running", None, false),
+            ("lost", None, false),
+        ] {
+            let unknown = detected_job_summary(
+                Some("python3 -B -m pytest -q"),
+                Some("run_process"),
+                Some("test"),
+                status,
+                exit_code,
+                "==== 2 passed in 0.12s ====\n",
+                "",
+                truncated,
+            );
+            assert!(unknown.get("tests_detected").is_none(), "{unknown}");
+            assert!(unknown.get("tests_run_count").is_none(), "{unknown}");
+        }
+    }
+
+    #[test]
+    fn completed_synchronous_pytest_retains_typed_counts_before_ledger_excerpt_shortening() {
+        let mut output = json!({
+            "execution_source": "run_process",
+            "purpose": "test",
+            "execution_state": "completed",
+            "exit_code": 0,
+            "process_summary": "python3 -B -m pytest -q",
+            "stdout_tail": format!("{}\n=== 581 passed in 109.10s (0:01:49) ===\n", "progress".repeat(110)),
+            "stderr_tail": "",
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+        });
+        attach_pytest_terminal_metadata(&mut output);
+        assert_eq!(output["tests_detected"], true);
+        assert_eq!(output["tests_run_count"], 581);
+        assert_eq!(output["tests_passed"], 581);
+        assert_eq!(output["tests_failed"], 0);
+        assert_eq!(output["zero_tests_run"], false);
+
+        output["stdout_truncated"] = json!(true);
+        for key in [
+            "tests_detected",
+            "tests_run_count",
+            "tests_passed",
+            "tests_failed",
+            "zero_tests_run",
+        ] {
+            output.as_object_mut().unwrap().remove(key);
+        }
+        attach_pytest_terminal_metadata(&mut output);
+        assert!(output.get("tests_run_count").is_none());
+
+        output["stdout_truncated"] = json!(false);
+        output["execution_source"] = json!("run_shell");
+        attach_pytest_terminal_metadata(&mut output);
+        assert!(output.get("tests_detected").is_none());
+
+        let shell = detected_job_summary(
+            Some("python3 -B -m pytest -q"),
+            Some("run_shell"),
+            Some("test"),
+            "completed",
+            Some(0),
+            "=== 581 passed in 109.10s (0:01:49) ===\n",
+            "",
+            false,
+        );
+        assert!(shell.get("tests_run_count").is_none());
     }
 
     #[test]
@@ -239,12 +443,14 @@ mod detected_summary_tests {
         };
         let detected = detected_job_summary_with_activity(
             Some("cargo check -p webcodex"),
+            None,
             Some("validation"),
             "running",
             None,
             "",
             "Checking webcodex v0.3.9\n",
             Some(&activity),
+            false,
         );
         assert_eq!(detected["progress"]["state"], "waiting");
         assert_eq!(
@@ -1413,12 +1619,16 @@ impl ToolRuntime {
                 let purpose = job.purpose.clone().unwrap_or_else(|| "other".to_string());
                 let detected_summary = detected_job_summary_with_activity(
                     Some(&command_summary),
+                    job.structured_execution
+                        .as_ref()
+                        .map(|metadata| metadata.execution_source.as_str()),
                     Some(&purpose),
                     &job.status,
                     job.exit_code.map(i64::from),
                     &wait.analysis_stdout,
                     &wait.analysis_stderr,
                     job.activity.as_ref(),
+                    wait.stdout_truncated || wait.stderr_truncated,
                 );
                 let validation_tool = job
                     .validation

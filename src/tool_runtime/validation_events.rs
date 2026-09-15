@@ -435,6 +435,9 @@ impl ToolRuntime {
             } else {
                 let detected = super::jobs::detected_job_summary(
                     job.get("command_summary").and_then(Value::as_str),
+                    structured_execution
+                        .and_then(|metadata| metadata.get("execution_source"))
+                        .and_then(Value::as_str),
                     job.get("purpose").and_then(Value::as_str),
                     terminal_status,
                     status.output.get("exit_code").and_then(Value::as_i64),
@@ -446,6 +449,14 @@ impl ToolRuntime {
                         .get("stderr_tail")
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
+                    output
+                        .get("stdout_truncated")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true)
+                        || output
+                            .get("stderr_truncated")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
                 );
                 for field in [
                     "tests_detected",

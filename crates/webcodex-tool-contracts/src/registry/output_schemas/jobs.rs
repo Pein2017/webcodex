@@ -809,6 +809,26 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 ),
                 ("purpose", schema_type("string", "Declared execution purpose. Audit metadata: omitted on ordinary synchronous terminal success and from the default model-facing failure projection.")),
                 (
+                    "tests_detected",
+                    schema_type("boolean", "Present only when typed run_process directly executed pytest and a complete, untruncated supported terminal summary was observed."),
+                ),
+                (
+                    "tests_run_count",
+                    schema_type("integer", "Pytest reported passed + failed count; skipped, deselected and collection/fixture errors are not reclassified as successes or failures. Omitted when not proven."),
+                ),
+                (
+                    "tests_passed",
+                    schema_type("integer", "Pytest terminal-summary passed count; omitted when not proven."),
+                ),
+                (
+                    "tests_failed",
+                    schema_type("integer", "Pytest terminal-summary failed count; the actual process exit code remains authoritative. Omitted when not proven."),
+                ),
+                (
+                    "zero_tests_run",
+                    schema_type("boolean", "True only when a supported pytest summary proves zero reported passed+failed tests and no skip/error category leaves execution uncertain; absent otherwise."),
+                ),
+                (
                     "process_summary",
                     schema_type(
                         "string",

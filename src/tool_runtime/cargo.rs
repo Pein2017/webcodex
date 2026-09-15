@@ -1309,12 +1309,14 @@ impl ToolRuntime {
         );
         let detected_summary = crate::tool_runtime::jobs::detected_job_summary_with_activity(
             Some(&handoff.command_summary),
+            Some(&handoff.execution_source),
             Some(&handoff.purpose),
             &latest_status,
             observation.job.exit_code.map(i64::from),
             &observation.stdout_tail,
             &observation.stderr_tail,
             observation.job.activity.as_ref(),
+            observation.stdout_truncated || observation.stderr_truncated,
         );
         let continuation = crate::tool_runtime::jobs::observe_job_continuation(
             &handoff.job_id,

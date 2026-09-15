@@ -10,6 +10,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use webcodex_core::audit_preview::command_preview;
+use webcodex_core::pytest_test_count::{
+    is_supported_pytest_command_summary, parse_pytest_terminal_test_counts,
+};
 use webcodex_core::validation_evidence::{
     ValidationDiagnostics, PARSER_KIND, PARSER_LIMITATIONS, PARSER_VERSION,
     VALIDATION_OUTPUT_METADATA_ABSENT_REASON,
@@ -757,6 +760,21 @@ fn validation_event_is_proven_success(event: &ValidationEvent) -> bool {
     if generic_cargo_test_has_reliable_zero_test_evidence(event) {
         return false;
     }
+    // A known pytest command without one supported, complete terminal
+    // summary has an actual successful process result but not a proven test
+    // assertion. Do not turn missing/truncated output into imaginary tests.
+    if event.tool_name == "run_process"
+        && event.validation_kind == "test"
+        && event
+            .command_summary
+            .as_deref()
+            .is_some_and(is_supported_pytest_command_summary)
+        && (event.tests_detected != Some(true)
+            || !event.tests_run_count.is_some_and(|count| count > 0)
+            || event.zero_tests_run != Some(false))
+    {
+        return false;
+    }
     if !structured_test_requires_execution_proof(event) {
         return true;
     }
@@ -1057,7 +1075,14 @@ fn validation_event_from_finished(
         stderr_lines,
     ) = execution_output_evidence(finished);
     let (tests_detected, tests_run_count, tests_passed, tests_failed, zero_tests_run) =
-        validation_test_run_metadata(finished, adapter, diagnostics.as_ref());
+        validation_test_run_metadata(
+            finished,
+            adapter,
+            diagnostics.as_ref(),
+            &purpose,
+            &execution_state,
+            command_summary.as_deref(),
+        );
     let test_count_assertion = finished
         .validation_output_summary
         .as_ref()
@@ -1522,6 +1547,9 @@ fn validation_test_run_metadata(
     finished: &SessionEvent,
     adapter: Option<&dyn ValidationAdapter>,
     diagnostics: Option<&ValidationDiagnostics>,
+    purpose: &str,
+    execution_state: &str,
+    command_summary: Option<&str>,
 ) -> (
     Option<bool>,
     Option<u64>,
@@ -1541,10 +1569,6 @@ fn validation_test_run_metadata(
         .into_iter()
         .any(|field| value.get(field).is_some())
     });
-    if !adapter.is_some_and(ValidationAdapter::reports_test_run_metadata) && !explicit_test_metadata
-    {
-        return (None, None, None, None, None);
-    }
     let parsed_test_summary = diagnostics.and_then(|value| value.test_summary.as_ref());
     let truncated = summary
         .and_then(|value| value.get("stdout_truncated"))
@@ -1554,11 +1578,47 @@ fn validation_test_run_metadata(
             .and_then(|value| value.get("stderr_truncated"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    // The ledger has already sanitized and bounded these excerpts. Admit
+    // pytest counts only for a completed, known-result direct pytest process;
+    // purpose=test alone cannot turn a model-authored line into execution proof.
+    let pytest = (finished.tool_name == "run_process"
+        && adapter.is_none()
+        && purpose == "test"
+        && execution_state == "completed"
+        && finished.exit_code.is_some()
+        && !truncated
+        && command_summary.is_some_and(is_supported_pytest_command_summary))
+    .then(|| {
+        let stdout = summary
+            .and_then(|value| value.get("stdout_tail_excerpt"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let stderr = summary
+            .and_then(|value| value.get("stderr_tail_excerpt"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        parse_pytest_terminal_test_counts(stdout, stderr)
+    })
+    .flatten();
+    if !adapter.is_some_and(ValidationAdapter::reports_test_run_metadata)
+        && !explicit_test_metadata
+        && pytest.is_none()
+    {
+        return (None, None, None, None, None);
+    }
     let parsed_passed = (!truncated)
-        .then(|| parsed_test_summary.and_then(|value| value.passed))
+        .then(|| {
+            parsed_test_summary
+                .and_then(|value| value.passed)
+                .or(pytest.and_then(|value| value.tests_passed))
+        })
         .flatten();
     let parsed_failed = (!truncated)
-        .then(|| parsed_test_summary.and_then(|value| value.failed))
+        .then(|| {
+            parsed_test_summary
+                .and_then(|value| value.failed)
+                .or(pytest.and_then(|value| value.tests_failed))
+        })
         .flatten();
     let parsed_ignored = (!truncated)
         .then(|| parsed_test_summary.and_then(|value| value.ignored))
@@ -1579,10 +1639,12 @@ fn validation_test_run_metadata(
         _ => None,
     };
     let parsed_tests_run = component_tests_run(parsed_passed, parsed_failed);
-    let tests_detected = summary
-        .and_then(|value| value.get("tests_detected"))
-        .and_then(Value::as_bool)
-        .or_else(|| Some(parsed_test_summary.is_some()));
+    let tests_detected = pytest.map(|value| value.tests_detected).or_else(|| {
+        summary
+            .and_then(|value| value.get("tests_detected"))
+            .and_then(Value::as_bool)
+            .or_else(|| adapter.map(|_| parsed_test_summary.is_some()))
+    });
 
     let explicit_tests_run_field = summary.and_then(|value| value.get("tests_run_count"));
     let explicit_tests_passed_field = summary.and_then(|value| value.get("tests_passed"));
@@ -1638,15 +1700,26 @@ fn validation_test_run_metadata(
     let tests_run_count = explicit_tests_run
         .or(explicit_component_run)
         .or(parsed_tests_run);
-    let zero_tests_run = explicit_zero_tests.or_else(|| tests_run_count.map(|count| count == 0));
+    let zero_tests_run = explicit_zero_tests
+        .or_else(|| pytest.and_then(|value| value.zero_tests_run))
+        .or_else(|| {
+            pytest
+                .is_none()
+                .then(|| tests_run_count.map(|count| count == 0))
+                .flatten()
+        });
     let component_run = component_tests_run(tests_passed, tests_failed);
     if matches!((tests_run_count, component_run), (Some(run), Some(component_run)) if run != component_run)
         || (zero_tests_run == Some(true)
             && (tests_run_count.is_some_and(|count| count > 0)
                 || tests_passed.is_some_and(|count| count > 0)
                 || tests_failed.is_some_and(|count| count > 0)))
+        || (tests_detected == Some(false)
+            && (tests_run_count.is_some_and(|count| count > 0)
+                || tests_passed.is_some_and(|count| count > 0)
+                || tests_failed.is_some_and(|count| count > 0)))
     {
-        return (tests_detected, None, None, None, None);
+        return (None, None, None, None, None);
     }
     (
         tests_detected,
