@@ -20,13 +20,19 @@ work_on_project
 `work_on_project` 是普通 coding/review 的 canonical bootstrap。把当前任务 instruction 交给它，然后遵循连接到的 Server 返回的 project instructions 与 tool surface。
 默认情况下，它还会返回一个很小且有界的 `extensions` selection catalog：Skill metadata 来自 canonical 的 project / Runner-configured `skills.roots` / Runner-managed Skill Store 三类来源；Plugin metadata 只包含 configured working directory 与当前 Project root 匹配、且已 ready/committed 的 provider。该 metadata 不授予任何 authority，也不会自动读取 Skill body 或创建 Plugin binding；模型选择后仍需使用 `skill_read_file`，或走 `plugin_tool describe -> call`。只有当前模型上下文仍明确保留这些 discovery metadata 时，才应设置 `include_extension_catalog=false`。
 
+Server 配置的 MCP initialization guidance 是默认的专用 guidance body。
+`work_on_project` 只返回它的 SHA-256 revision 和字节数，让调用方确认已收到
+哪一版 guidance，而不再次复制正文。Repository instruction body 和 WebCodex
+内置 workflow body 是彼此独立的 opt-in projection；需要时分别显式设置
+`include_project_instructions=true` 或 `include_workflow_guidance=true`。
+
 ## 开始或继续任务
 
 新任务和显式 continuation 都使用 `work_on_project`。WebCodex 会保留有界 Workflow Session evidence，让 validation、review 与 handoff 可以指向同一轮工作，但 Workflow Session 不是认证凭据，也不会扩大 project authority。
 
 普通使用不需要理解 WebCodex 内部的 continuity/audit field；这些属于 implementation/maintainer contract。
 
-内置工作流为所有任务提供默认 guidance，不要求先指定角色：核对目标和适用规则、保留已有工作、完成已授权的实现、按改动范围验证、观察已有 Job 而不重复执行，以及如实报告证据。只使用当前暴露的 schema 支持的工具与协议字段。
+显式请求后，内置 workflow body 会提供无需指定角色的通用 guidance：核对目标和适用规则、保留已有工作、完成已授权的实现、按改动范围验证、观察已有 Job 而不重复执行，以及如实报告证据。只使用当前暴露的 schema 支持的工具与协议字段。
 
 Behavioral role 在默认原则上增加侧重点，写在 task instruction 里即可，例如实现任务：
 
@@ -44,7 +50,7 @@ Behavioral role 在默认原则上增加侧重点，写在 task instruction 里�
 
 如果也希望修复，明确补充“修复具体发现，并运行聚焦回归验证”。单独指定评审角色不代表授权修改。
 
-Guidance 通过工具结果交给客户端，不是客户端的 system prompt，也不会授予执行权限。Host 指令、用户任务、适用项目规则、认证和运行时安全策略仍然有效。返回 guidance 不等于模型已经读取、记住或遵守；只有当前模型上下文仍保留内容时才应关闭其返回。
+Opt-in workflow guidance 通过工具结果交给客户端，不是客户端的 system prompt，也不会授予执行权限。Host 指令、用户任务、适用项目规则、认证和运行时安全策略仍然有效。返回 guidance 不等于模型已经读取、记住或遵守。MCP initialization guidance 遵循 MCP connection lifecycle，并与这些 project-startup projection 保持分离。
 
 ## 编辑前先检查
 

@@ -18,8 +18,10 @@ use crate::tool_runtime::{
     registered_tool_specs, SessionMode, StartupDetail, ToolCall, ToolResult, ToolRuntime,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use webcodex_core::plugin::{
     PluginGatewayRequest, PluginGatewayResponse, PluginGatewayResponsePayload,
     PluginSelectionAnnotations, ProjectPluginCatalog, ProjectPluginCatalogEntry,
@@ -977,9 +979,9 @@ fn work_on_project_schema_and_registration() {
     assert_eq!(props["session_id"]["type"], "string");
     assert_eq!(props["session_id"]["pattern"], "^wc_sess_[A-Za-z0-9_]+$");
     assert_eq!(props["include_project_instructions"]["type"], "boolean");
-    assert_eq!(props["include_project_instructions"]["default"], true);
+    assert_eq!(props["include_project_instructions"]["default"], false);
     assert_eq!(props["include_workflow_guidance"]["type"], "boolean");
-    assert_eq!(props["include_workflow_guidance"]["default"], true);
+    assert_eq!(props["include_workflow_guidance"]["default"], false);
     assert_eq!(props["include_extension_catalog"]["type"], "boolean");
     assert_eq!(props["include_extension_catalog"]["default"], true);
     for keyword in [
@@ -1061,6 +1063,7 @@ fn work_on_project_schema_and_registration() {
         "worktree",
         "repository",
         "workflow",
+        "mcp_guidance",
         "instructions",
         "semantic_navigation",
         "extensions",
@@ -1110,8 +1113,8 @@ fn work_on_project_schema_and_registration() {
             session_id,
             ..
         } => {
-            assert!(*include_project_instructions);
-            assert!(*include_workflow_guidance);
+            assert!(!*include_project_instructions);
+            assert!(!*include_workflow_guidance);
             assert!(*include_extension_catalog);
             assert_eq!(session_id.as_deref(), Some("wc_sess_target"));
         }
@@ -1763,6 +1766,11 @@ async fn work_on_project_without_session_id_always_creates_fresh_session() {
     assert_eq!(result.output["project"], "demo");
     assert_eq!(result.output["resolved_project"], project);
     assert_eq!(result.output["continuation"], "created");
+    assert!(
+        result.output.get("mcp_guidance").is_none(),
+        "unconfigured runtime guidance must preserve the sparse default: {}",
+        result.output
+    );
     for omitted in [
         "project_resolution",
         "execution_context",
@@ -1919,6 +1927,115 @@ async fn work_on_project_without_session_id_always_creates_fresh_session() {
             .len(),
         second_before
     );
+}
+
+#[tokio::test]
+async fn work_on_project_identifies_configured_mcp_guidance_without_copying_it() {
+    let guidance = "Shared Web guidance: verify the exact project before editing.";
+    let runtime = ToolRuntime::new(
+        Arc::new(crate::runner_http::RunnerRegistry::default()),
+        Arc::new(crate::tool_runtime::RuntimeInfo {
+            mcp_instructions: Some(guidance.to_string()),
+            ..Default::default()
+        }),
+    );
+    let first_root = tempfile::tempdir().unwrap();
+    let second_root = tempfile::tempdir().unwrap();
+    init_git_repo(first_root.path());
+    init_git_repo(second_root.path());
+    let first_repository_guidance = "FIRST_REPOSITORY_GUIDANCE_MUST_NOT_BE_DEFAULT_CONTEXT";
+    let second_repository_guidance = "SECOND_REPOSITORY_GUIDANCE_MUST_NOT_BE_DEFAULT_CONTEXT";
+    commit_file(
+        first_root.path(),
+        "AGENTS.md",
+        first_repository_guidance,
+        "initial",
+    );
+    commit_file(
+        second_root.path(),
+        "AGENTS.md",
+        second_repository_guidance,
+        "initial",
+    );
+    let first_project =
+        register_runner_project_at_path(&runtime, "wop-guidance-a", "demo", first_root.path())
+            .await;
+    let second_project =
+        register_runner_project_at_path(&runtime, "wop-guidance-b", "demo", second_root.path())
+            .await;
+
+    let first = dispatch_coding_call_in_window(
+        &runtime,
+        "wop-guidance-a",
+        ToolCall::from_tool_name(
+            "work_on_project",
+            json!({"project": first_project, "instruction": "inspect first"}),
+        )
+        .unwrap(),
+        Some(&auth_context(None, true)),
+        "wop-guidance-a-window",
+    )
+    .await;
+    let second = dispatch_coding_call_in_window(
+        &runtime,
+        "wop-guidance-b",
+        ToolCall::from_tool_name(
+            "work_on_project",
+            json!({"project": second_project, "instruction": "inspect second"}),
+        )
+        .unwrap(),
+        Some(&auth_context(None, true)),
+        "wop-guidance-b-window",
+    )
+    .await;
+
+    assert!(first.success, "{:?}", first.error);
+    assert!(second.success, "{:?}", second.error);
+    let expected = json!({
+        "revision": format!("sha256:{:x}", Sha256::digest(guidance.as_bytes())),
+        "size_bytes": guidance.len(),
+    });
+    assert_eq!(first.output["mcp_guidance"], expected);
+    assert_eq!(second.output["mcp_guidance"], expected);
+    assert_ne!(
+        first.output["resolved_project"],
+        second.output["resolved_project"]
+    );
+    assert_ne!(
+        first.output["instructions"]["sources"][0]["fingerprint"],
+        second.output["instructions"]["sources"][0]["fingerprint"],
+        "suppressing instruction bodies must retain per-project instruction identity"
+    );
+    for result in [&first, &second] {
+        assert!(
+            !result.output.to_string().contains(guidance),
+            "work_on_project must identify MCP guidance without repeating its content"
+        );
+        assert!(result.output.get("workflow").is_none(), "{}", result.output);
+        assert!(
+            result.output["instructions"]
+                .get("content_included")
+                .is_none(),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output["instructions"]["sources"]
+                .as_array()
+                .is_some_and(|sources| sources.len() == 1
+                    && sources[0].get("fingerprint").is_some()
+                    && sources[0].get("content").is_none()),
+            "{}",
+            result.output
+        );
+        let schema = crate::tool_runtime::registry::output_schema_for_tool("work_on_project");
+        let instance = json!({"success": true, "output": result.output});
+        crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&instance, &schema)
+            .unwrap_or_else(|error| panic!("guidance identity output must match schema: {error}"));
+    }
+    let serialized = format!("{}{}", first.output, second.output);
+    assert!(!serialized.contains(first_repository_guidance));
+    assert!(!serialized.contains(second_repository_guidance));
 }
 
 #[tokio::test]

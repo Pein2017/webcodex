@@ -84,8 +84,8 @@ async fn mcp_tools_list_exposes_canonical_coding_bootstrap_and_runtime_status_ux
     ] {
         assert!(work_props.contains_key(field), "MCP schema missing {field}");
     }
-    assert_eq!(work_props["include_project_instructions"]["default"], true);
-    assert_eq!(work_props["include_workflow_guidance"]["default"], true);
+    assert_eq!(work_props["include_project_instructions"]["default"], false);
+    assert_eq!(work_props["include_workflow_guidance"]["default"], false);
     assert_eq!(work_props["include_extension_catalog"]["default"], true);
     assert_eq!(work_props["mode"]["enum"], json!(["checkout", "worktree"]));
     assert_eq!(work_props["mode"]["default"], "checkout");

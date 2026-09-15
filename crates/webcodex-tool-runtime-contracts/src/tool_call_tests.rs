@@ -1132,6 +1132,9 @@ fn work_on_project_parses_path_source_and_rejects_ambiguous_sources() {
     assert!(work.project().is_none());
     let work_audit = work.session_log_arguments();
     assert_eq!(work_audit["path_source_requested"], true);
+    assert_eq!(work_audit["include_project_instructions"], false);
+    assert_eq!(work_audit["include_workflow_guidance"], false);
+    assert_eq!(work_audit["include_extension_catalog"], true);
     assert!(work_audit.get("path").is_none());
     assert!(!work_audit.to_string().contains("/root/git/example"));
 

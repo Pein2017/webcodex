@@ -246,6 +246,19 @@ fn startup_extensions_schema() -> Value {
     })
 }
 
+fn mcp_guidance_identity_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Identity of configured MCP initialization guidance. The body is delivered by MCP initialization/discovery and is not repeated in project startup. Omitted when no MCP guidance is configured.",
+        "properties": {
+            "revision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "size_bytes": {"type": "integer", "minimum": 1, "maximum": 16384}
+        },
+        "required": ["revision", "size_bytes"],
+        "additionalProperties": false
+    })
+}
+
 #[cfg(any(test, feature = "root-test-support"))]
 fn startup_brief_schema(detail: &str) -> Value {
     json!({
@@ -258,6 +271,7 @@ fn startup_brief_schema(detail: &str) -> Value {
             "project_resolution": project_resolution_schema(),
             "workspace": startup_workspace_schema(),
             "workflow": startup_workflow_schema(),
+            "mcp_guidance": mcp_guidance_identity_schema(),
             "instructions": startup_instructions_schema(),
             "continuation": startup_continuation_schema(detail),
             "semantic_navigation": startup_semantic_navigation_schema(),
@@ -1274,10 +1288,11 @@ fn work_on_project_output_schema() -> Value {
             "workflow",
             {
                 let mut schema = startup_workflow_schema();
-                schema["description"] = json!("Canonical static built-in WebCodex coding-workflow guidance. Included on every work_on_project call with include_workflow_guidance=true and omitted only when the caller explicitly passes false; Workflow Session or transport identity never suppresses it automatically.");
+                schema["description"] = json!("Canonical static built-in WebCodex coding-workflow guidance. Included only when the caller explicitly passes include_workflow_guidance=true; Workflow Session or transport identity never selects it automatically.");
                 schema
             },
         ),
+        ("mcp_guidance", mcp_guidance_identity_schema()),
         ("instructions", compact_instructions),
         ("semantic_navigation", compact_semantic_navigation),
         ("extensions", startup_extensions_schema()),

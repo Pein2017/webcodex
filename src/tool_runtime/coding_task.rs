@@ -33,8 +33,8 @@ use super::sessions::tool_failure_summary_from_events;
 use super::sessions::{self, SessionTransport, TOOL_CALL_RECORDING_SESSION_ID_FIELD};
 use super::startup_brief::{
     bounded_extension_description, build_startup_brief, builtin_coding_workflow_projection,
-    startup_brief_from_output, StartupBriefInput, StartupExtensions, StartupPluginEntry,
-    StartupPluginsCatalog, REPOSITORY_OVERVIEW_NOT_REQUESTED_REASON,
+    startup_brief_from_output, McpGuidanceIdentity, StartupBriefInput, StartupExtensions,
+    StartupPluginEntry, StartupPluginsCatalog, REPOSITORY_OVERVIEW_NOT_REQUESTED_REASON,
 };
 use super::tool_catalog::TOOL_RECOMMENDED_FLOWS;
 use super::tool_inputs::{SessionMode, StartupDetail};
@@ -1177,6 +1177,7 @@ impl ToolRuntime {
             force_instruction_load,
             include_project_instructions: startup.include_project_instructions,
             include_reused_instruction_content: startup.include_reused_instruction_content,
+            mcp_instructions: self.runtime_info.mcp_instructions.as_deref(),
             extensions: extensions.as_ref(),
             git: &git,
             semantic_navigation: &semantic_navigation,
@@ -2058,6 +2059,8 @@ struct WorkOnProjectBriefProjection {
     project_resolution: ProjectResolutionMetadata,
     workspace: WorkOnProjectWorkspaceProjection,
     workflow: Value,
+    #[serde(default)]
+    mcp_guidance: Option<McpGuidanceIdentity>,
     instructions: WorkOnProjectInstructionsProjection,
     semantic_navigation: WorkOnProjectSemanticNavigationProjection,
     #[serde(default)]
@@ -2456,6 +2459,9 @@ fn project_work_on_project_output_with_workflow_inner(
     }));
     if let Some(knowledge_association) = projection.project.knowledge_association {
         result.output["knowledge_association"] = knowledge_association;
+    }
+    if let Some(mcp_guidance) = projection.mcp_guidance {
+        result.output["mcp_guidance"] = json!(mcp_guidance);
     }
     if let Some(extensions) = projection.extensions {
         result.output["extensions"] = extensions;

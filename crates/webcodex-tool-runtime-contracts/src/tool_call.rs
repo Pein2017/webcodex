@@ -530,9 +530,9 @@ pub enum ToolCall {
         #[serde(default)]
         base_ref: Option<String>,
         instruction: String,
-        #[serde(default = "default_true")]
+        #[serde(default)]
         include_project_instructions: bool,
-        #[serde(default = "default_true")]
+        #[serde(default)]
         include_workflow_guidance: bool,
         #[serde(default = "default_true")]
         include_extension_catalog: bool,

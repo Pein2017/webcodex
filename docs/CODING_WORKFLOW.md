@@ -20,17 +20,25 @@ work_on_project
 `work_on_project` is the canonical bootstrap for normal coding and review. Give it the current task instruction and then follow the project instructions and tools returned by the connected Server.
 By default it also returns a small bounded `extensions` catalog for selection: Skill metadata comes from the canonical project/configured/managed Skill union, and Plugin metadata is restricted to ready providers whose configured working directory matches the Project root. This metadata grants no authority and does not load Skill bodies or create Plugin bindings; use `skill_read_file` or `plugin_tool describe -> call` only after selecting a relevant entry. Set `include_extension_catalog=false` only when the current model context already retains that discovery metadata.
 
+Server-configured MCP initialization guidance is the dedicated default guidance
+body. `work_on_project` returns only its SHA-256 revision and byte size so a
+caller can confirm which guidance it received without copying the body again.
+Repository instruction bodies and WebCodex's built-in workflow body are separate
+opt-in projections: set `include_project_instructions=true` or
+`include_workflow_guidance=true` when either additional body is needed.
+
 ## Start or continue a task
 
 Use `work_on_project` for both a new coding task and an explicit continuation. WebCodex keeps bounded Workflow Session evidence so validation, review, and handoff can refer to the same unit of work, but that Session is not an authentication credential and does not widen project access.
 
 For ordinary use you do not need to reason about WebCodex's internal continuity or audit fields. Those are implementation/maintainer contracts.
 
-The built-in workflow includes default guidance for every task, even when no
-role is named: inspect the target and applicable rules, preserve existing work,
-complete authorized implementation, validate proportionally, observe existing
-Jobs instead of duplicating effects, and report evidence honestly. Use only
-tools and protocol fields supported by the current exposed schemas.
+When requested, the built-in workflow body provides general guidance without
+requiring a named role: inspect the target and applicable rules, preserve
+existing work, complete authorized implementation, validate proportionally,
+observe existing Jobs instead of duplicating effects, and report evidence
+honestly. Use only tools and protocol fields supported by the current exposed
+schemas.
 
 Behavioral roles add emphasis to those defaults. They are expressed in the task
 instruction, not through a separate authority mechanism. For example:
@@ -50,11 +58,12 @@ report concrete findings with file/line evidence and impact, and do not edit.
 To request corrections as well, explicitly add “fix concrete findings and run
 focused regression validation.” Naming a review role alone does not authorize edits.
 
-Guidance is delivered in tool results; it is not the client's system prompt and
+Opt-in workflow guidance is delivered in tool results; it is not the client's system prompt and
 does not grant execution authority. Host instructions, the user's task,
 applicable project rules, authentication, and runtime safety policy still apply.
 Delivery is not proof that a model read, retained, or followed the guidance.
-Keep guidance enabled unless the current model context already retains it.
+MCP initialization guidance follows the MCP connection lifecycle and remains
+separate from these project-startup projections.
 
 ## Inspect before editing
 

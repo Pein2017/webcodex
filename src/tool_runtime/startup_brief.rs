@@ -5,8 +5,9 @@
 //! only the facts a coding model needs to start or continue work.
 
 use crate::json_measurement::serialized_json_len;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::collections::BTreeSet;
 
@@ -267,6 +268,23 @@ pub(crate) struct StartupExtensions {
     pub(crate) plugins: StartupPluginsCatalog,
 }
 
+/// Content identity for the Server-configured MCP initialization guidance.
+/// The guidance body is delivered by MCP initialization/discovery and is not
+/// copied into every project startup result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct McpGuidanceIdentity {
+    pub(crate) revision: String,
+    pub(crate) size_bytes: usize,
+}
+
+fn mcp_guidance_identity(instructions: Option<&str>) -> Option<McpGuidanceIdentity> {
+    let instructions = instructions?;
+    Some(McpGuidanceIdentity {
+        revision: format!("sha256:{:x}", Sha256::digest(instructions.as_bytes())),
+        size_bytes: instructions.len(),
+    })
+}
+
 impl StartupExtensions {
     pub(crate) fn serialized_len(&self) -> usize {
         serialized_json_len(self).unwrap_or(usize::MAX)
@@ -299,6 +317,7 @@ pub(crate) struct StartupBriefInput<'a> {
     pub(crate) force_instruction_load: bool,
     pub(crate) include_project_instructions: bool,
     pub(crate) include_reused_instruction_content: bool,
+    pub(crate) mcp_instructions: Option<&'a str>,
     pub(crate) extensions: Option<&'a StartupExtensions>,
     pub(crate) git: &'a Value,
     pub(crate) semantic_navigation: &'a Value,
@@ -373,6 +392,9 @@ pub(crate) fn build_startup_brief(input: StartupBriefInput<'_>) -> Value {
     });
     if let Some(association) = input.knowledge_association {
         brief["project"]["knowledge_association"] = association.clone();
+    }
+    if let Some(identity) = mcp_guidance_identity(input.mcp_instructions) {
+        brief["mcp_guidance"] = json!(identity);
     }
     if let Some(extensions) = input.extensions {
         debug_assert!(extensions.serialized_len() <= STARTUP_EXTENSION_CATALOG_HARD_MAX_BYTES);
@@ -2153,6 +2175,7 @@ mod tests {
                 force_instruction_load: true,
                 include_project_instructions: true,
                 include_reused_instruction_content: false,
+                mcp_instructions: None,
                 extensions: Some(&extensions),
                 git: &git,
                 semantic_navigation: &semantic_navigation,

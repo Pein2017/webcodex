@@ -39,13 +39,13 @@ pub fn work_on_project_input_schema() -> Value {
             },
             "include_project_instructions": {
                 "type": "boolean",
-                "default": true,
-                "description": "Whether this bootstrap response should include bounded project-instruction bodies such as AGENTS.md. Defaults to true. A fresh Workflow Session does not imply a fresh model context: explicitly set false even for a new Session when the current model context already retains the applicable repository instructions; keep true for a fresh or uncertain model context. WebCodex never infers retention from Session id, Window, transport, credential, or Server identity. Instruction files are still re-observed for fingerprint/change detection and Workflow Session metadata is still updated; false controls only redundant model-facing instruction-body projection."
+                "default": false,
+                "description": "Whether this bootstrap response should include bounded project-instruction bodies such as repository AGENTS.md. Defaults to false so dedicated MCP initialization guidance remains the only default instruction body. Set true only when repository instruction bodies are needed in the current model context. Instruction files are still re-observed for fingerprint/change detection and Workflow Session metadata is still updated; false controls only model-facing instruction-body projection."
             },
             "include_workflow_guidance": {
                 "type": "boolean",
-                "default": true,
-                "description": "Whether this bootstrap response should include the static built-in WebCodex coding-workflow guidance. Defaults to true. A fresh Workflow Session does not imply a fresh model context: explicitly set false even for a new Session when the current model context already retains this guidance; keep true for a fresh or uncertain model context. WebCodex never infers retention from Session id, Window, transport, credential, or Server identity. False controls only redundant model-facing workflow projection; it does not change Workflow Session state, authority, role selection, or execution semantics."
+                "default": false,
+                "description": "Whether this bootstrap response should include the static built-in WebCodex coding-workflow guidance. Defaults to false so dedicated MCP initialization guidance remains the only default guidance body. Set true only when the built-in workflow body is needed in the current model context. False does not change Workflow Session state, authority, role selection, or execution semantics."
             },
             "include_extension_catalog": {
                 "type": "boolean",
@@ -55,7 +55,7 @@ pub fn work_on_project_input_schema() -> Value {
             "session_id": {
                 "type": "string",
                 "pattern": "^wc_sess_[A-Za-z0-9_]+$",
-                "description": "Optional explicit Workflow Session to continue exactly. It must be active and accessible and remains bound to its exact final Project; in worktree mode the Runner re-observes that registered managed Project and its source provenance instead of creating a second worktree. Failure never guesses or creates a replacement Session. Supplying session_id does not prove this model context still retains project instructions, workflow guidance, or extension metadata; a fresh model context should keep the include_* defaults true. This business input is distinct from wrapper recording_session_id."
+                "description": "Optional explicit Workflow Session to continue exactly. It must be active and accessible and remains bound to its exact final Project; in worktree mode the Runner re-observes that registered managed Project and its source provenance instead of creating a second worktree. Failure never guesses or creates a replacement Session. Supplying session_id does not change the caller-explicit instruction, workflow-guidance, or extension projections. This business input is distinct from wrapper recording_session_id."
             }
         },
         "required": ["instruction"],

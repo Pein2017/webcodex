@@ -452,8 +452,11 @@ as evidence that the current model still retains static bootstrap content. The
 same `wc_sess_*` may be explicitly resumed by multiple independent ChatGPT
 conversations. Its `include_workflow_guidance`, `include_project_instructions`, and
 `include_extension_catalog` flags are caller-explicit model-facing projection
-preferences only: their defaults are true, and false is appropriate only when
-the caller's current model context already retains the corresponding content.
+preferences only. Workflow and repository-instruction bodies default to false so
+the Server-configured MCP initialization guidance remains the dedicated default
+body; callers may opt into either additional body explicitly. The extension
+selection catalog remains enabled by default and can be suppressed when the
+caller already retains its metadata.
 Repository instruction files are still re-observed and Session metadata/delta
 status still update when instruction bodies are suppressed. The default bounded
 extension catalog contains selection metadata only: Skills are drawn from the

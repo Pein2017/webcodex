@@ -13,19 +13,22 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "omit session_id",
         "fresh workflow session",
         "does not imply a fresh model context",
-        "fresh or uncertain model context",
+        "configured mcp initialization guidance",
+        "dedicated default guidance body",
+        "revision without copying",
+        "defaults suppress",
+        "repository-instruction",
+        "built-in workflow",
+        "include_* flag true",
         "re-observes instruction files",
         "exact resume",
         "active accessible session",
         "never guesses prior session",
-        "project instructions",
-        "workflow guidance",
         "skills",
         "plugin",
         "selection metadata",
         "current model context",
         "does not require git",
-        "never proves retention",
         "skill_read_file",
         "plugin_tool describe",
         "mode=worktree",
@@ -884,11 +887,7 @@ fn session_tool_specs_describe_explicit_targeting() {
         .as_str()
         .expect("work_on_project session_id description")
         .to_lowercase();
-    for phrase in [
-        "does not prove",
-        "fresh model context",
-        "include_* defaults true",
-    ] {
+    for phrase in ["does not change", "caller-explicit"] {
         assert!(
             session_id_description.contains(phrase),
             "work_on_project session_id description should mention {phrase}: {session_id_description}"

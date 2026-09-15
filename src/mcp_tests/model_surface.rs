@@ -98,8 +98,8 @@ async fn local_coding_tools_list_returns_exact_ordered_surface() {
     ] {
         assert!(props.contains_key(field), "local_coding missing {field}");
     }
-    assert_eq!(props["include_project_instructions"]["default"], true);
-    assert_eq!(props["include_workflow_guidance"]["default"], true);
+    assert_eq!(props["include_project_instructions"]["default"], false);
+    assert_eq!(props["include_workflow_guidance"]["default"], false);
     assert_eq!(schema["required"], json!(["instruction"]));
     assert_eq!(schema["additionalProperties"], false);
     assert!(schema.get("oneOf").is_none());
