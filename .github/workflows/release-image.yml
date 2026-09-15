@@ -26,6 +26,8 @@ env:
 
 jobs:
   resolve:
+    # Self-hosted fork tags publish only the explicitly supplied Linux bundle.
+    if: ${{ !startsWith(github.event.release.tag_name || inputs.tag, 'coordexp-') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:

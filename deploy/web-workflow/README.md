@@ -24,6 +24,7 @@ The merged upstream Git review path requires Git with `check-attr --source` supp
 - `upstream` is the original WebCodex repository; `origin` is the operator's fork.
 - Use scoped development branches and commits with repository-local OpenSpec changes. This fork uses `coordexp/*` because its inherited `codex` branch prevents a `codex/*` ref namespace. Merge upstream before accepting an update, preserving the original history and local patches.
 - Fork deployment tags use `coordexp-YYYY.MM.DD.N`. These are self-hosted Linux prereleases, not upstream npm/desktop/container releases. The upstream package version remains visible alongside the exact Git commit and dirty flag.
+- The inherited container-release workflow skips `coordexp-*` tags; creating a fork prerelease does not authorize container or npm publication.
 - Before deployment: focused changed-contract tests, optional-plugin tests, strict OpenSpec validation, and a disposable real Server/Runner smoke. Build both binaries from the same clean commit using `release`; record checksums and actual build identities.
 - Retain old binaries, operator config and a consistent Server-state backup. Check active jobs before restarting the existing Server/Runner. A schema migration may require restoring the matching backup when rolling back.
 - Publish only reviewed source and Linux artifacts with scope/validation notes to the fork. Do not invoke upstream package publication workflows. Never publish private configuration, memory content or operational credentials.

@@ -16,7 +16,7 @@
 
 ## 4. Acceptance and delivery
 
-- [ ] 4.1 Integrate packages and run focused contracts plus a real isolated Server/Runner edit/test smoke; record exact results.
+- [x] 4.1 Integrate packages and run focused contracts plus a real isolated Server/Runner edit/test smoke; record exact results.
 - [ ] 4.2 Commit and push reviewed public-safe code and OpenSpec artifacts; verify clean source and remote identity.
 - [ ] 4.3 Build the committed source, retain rollback, deploy to the existing Linux tmux service and verify live MCP guidance, projects and shared context.
 - [ ] 4.4 Record version, checks, deployment/rollback paths and browser refresh instructions in the release and acceptance handoff.

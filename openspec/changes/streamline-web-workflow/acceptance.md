@@ -1,6 +1,6 @@
 # Fork acceptance
 
-Status: candidate; deployment and release checks remain pending in tasks.md.
+Status: source-accepted; final deployment and release checks remain pending in tasks.md.
 
 ## Accepted source checks
 
@@ -8,10 +8,11 @@ Status: candidate; deployment and release checks remain pending in tasks.md.
 - Startup/tool contracts: 132 tool-contract and 86 runtime-contract tests passed.
 - Git hygiene: 16 tests passed, including bounded-output identity and incomplete-diagnostic regressions. The old sentinel-before-tracked-list ordering lost repository identity when the retained output tail exceeded its bound.
 - Optional plugin: lead replay passed 11 tests. Concrete repair checks cover non-JUnit roots, UTF-16 entity declarations, invalid UTF-8 continuation, and the admitted Native Plugin schema subset; no memory mutation API exists. Native admission rejects numeric bounds/pattern schema keywords, so descriptions state bounds while unchanged runtime validation enforces them.
-- Server library: 2640 passed, 0 failed, 2 intentionally ignored real-process tests. The two timeout/process-group tests were also run explicitly and passed.
-- Runner: 844 passed, 0 failed, 4 intentionally ignored tests using Rust 1.95. Formatting and strict OpenSpec validation passed.
+- Final Server library: 2642 passed, 0 failed, 2 intentionally ignored real-process tests. The two timeout/process-group tests were also run explicitly and passed.
+- Final Runner: 845 passed, 0 failed, 4 intentionally ignored tests using Rust 1.95. Formatting and strict OpenSpec validation passed.
+- The upstream SSH reconnect fixture failed before repair because sending SIGTERM plus sleeping 50 ms did not establish that its temporary master had stopped. The test now observes bounded control-socket shutdown before asserting dead-master reconnection; its exact regression and full Runner suite passed. Production SSH behavior is unchanged.
 - Synchronous command fixture: a 20,000-byte stdout plus stderr case timed out before repair and passed after anonymous file-backed capture. This is a test-only change; production command execution is unchanged.
-- Markdown links: 82 files, 529 links, zero missing local targets.
+- Markdown links: 84 files, 529 links, zero missing local targets.
 
 ## Real-entry evidence
 
@@ -21,6 +22,7 @@ Status: candidate; deployment and release checks remain pending in tasks.md.
 - Live Native Plugin admission passed for all three configured provider instances. A real pytest report preserved 1 pass, 1 failure, 1 skip and `testsExecuted=false`. Shared memory search/read returned bounded source-provenanced results. Scoped CodeGraph returned a symbol inside the requested research directory with freshness and truncation metadata.
 - Main/infra currently have no CodeGraph CLI index; the scoped adapter reports `codegraph_uninitialized` rather than fabricating results. Research and the WebCodex source checkout have indexes; existing CodeGraph access remains installed.
 - The external WebCodex connector successfully returned deployed runtime status and 36 shared Runner Skills for the research worktree. Main-project shared-Skill acceptance remains pending the symlink-source isolation repair.
+- The main-project source-isolation repair passed caller-facing RED/GREEN, 14 Server Skill tests, 6 real Runner file-handler tests, and schema checks. It excludes only the fixed project-root `skill_path_escape` source with `project_skill_source_rejected`; the configured Runner source stays independently readable. Genuine transport/I/O/format failures remain unavailable, and the existing project symlink is never traversed or modified.
 
 ## Build prerequisites discovered
 
