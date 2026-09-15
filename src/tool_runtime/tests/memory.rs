@@ -289,7 +289,10 @@ fn memory_runtime_search_read_cas_pagination_and_project_scope_are_explicit() {
     let stale_read = runtime.memory_read(
         &project_a,
         "architecture-decisions".to_string(),
-        Some(format!("wc_memrev_{}", "0".repeat(64))),
+        Some(format!(
+            "wc_memrev_{}",
+            webcodex_core::compact::encode([0_u8; 32])
+        )),
     );
     assert!(!stale_read.success);
     assert_eq!(stale_read.output["error_kind"], "memory_changed");
@@ -573,11 +576,6 @@ async fn memory_bootstrap_is_lightweight_explicit_bounded_and_post_tool() {
             },
         )
         .await;
-    assert_eq!(result.output["context_projection"]["timing"], "post_tool");
-    assert_eq!(
-        result.output["context_projection"]["applies_to_current_effect"],
-        false
-    );
     assert!(result.output["context_projection"]["materials"]
         .as_array()
         .unwrap()
@@ -818,11 +816,6 @@ async fn context_material_registry_enforces_scope_and_surface_before_provider() 
         public.output["context_projection"]["materials"][0]["status"],
         "available"
     );
-    assert_eq!(public.output["context_projection"]["timing"], "post_tool");
-    assert_eq!(
-        public.output["context_projection"]["applies_to_current_effect"],
-        false
-    );
 }
 
 #[tokio::test]
@@ -905,11 +898,6 @@ async fn memory_bootstrap_is_explicit_and_never_inferred_from_session_ack_recove
         .unwrap();
     assert_eq!(material["status"], "available");
     assert!(material.to_string().contains(private_summary));
-    assert_eq!(explicit.output["context_projection"]["timing"], "post_tool");
-    assert_eq!(
-        explicit.output["context_projection"]["applies_to_current_effect"],
-        false
-    );
     assert!(!explicit.output["session_recovery"]
         .to_string()
         .contains(private_summary));
@@ -1182,14 +1170,6 @@ async fn memory_surface_scopes_and_permission_are_independent_authority() {
         .result
         .expect("memory_set sidecar result");
     assert!(mutation_with_bootstrap.success);
-    assert_eq!(
-        mutation_with_bootstrap.output["context_projection"]["timing"],
-        "post_tool"
-    );
-    assert_eq!(
-        mutation_with_bootstrap.output["context_projection"]["applies_to_current_effect"],
-        false
-    );
     assert_eq!(
         mutation_with_bootstrap.output["context_projection"]["materials"][0]["status"],
         "available"
@@ -2063,7 +2043,7 @@ fn memory_catalog_revision_depends_only_on_key_revision_pairs() {
     let tags = vec!["tag".to_string()];
     let records = [
         crate::db::ProjectMemoryRecord {
-            memory_id: "wc_mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            memory_id: "wc_mem_qqqqqqqqqqqqqqqq".to_string(),
             memory_key: "b".to_string(),
             summary: "summary".to_string(),
             body: "body".to_string(),
@@ -2076,12 +2056,12 @@ fn memory_catalog_revision_depends_only_on_key_revision_pairs() {
             updated_by_kind: "test".to_string(),
             updated_by_principal_digest: Some(format!("wc_memprincipal_{}", "1".repeat(64))),
             generation: 1,
-            revision: format!("wc_memrev_{}", "b".repeat(64)),
+            revision: format!("wc_memrev_{}", webcodex_core::compact::encode([0xbb; 32])),
             created_at_unix_ms: 1,
             updated_at_unix_ms: 99,
         },
         crate::db::ProjectMemoryRecord {
-            memory_id: "wc_mem_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            memory_id: "wc_mem_u7u7u7u7u7u7u7u7".to_string(),
             memory_key: "a".to_string(),
             summary: "other".to_string(),
             body: "different".to_string(),
@@ -2094,7 +2074,7 @@ fn memory_catalog_revision_depends_only_on_key_revision_pairs() {
             updated_by_kind: "test".to_string(),
             updated_by_principal_digest: Some(format!("wc_memprincipal_{}", "2".repeat(64))),
             generation: 1,
-            revision: format!("wc_memrev_{}", "a".repeat(64)),
+            revision: format!("wc_memrev_{}", webcodex_core::compact::encode([0xaa; 32])),
             created_at_unix_ms: 2,
             updated_at_unix_ms: 3,
         },

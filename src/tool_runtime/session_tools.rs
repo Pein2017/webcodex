@@ -635,10 +635,6 @@ impl ToolRuntime {
                 "session_id": session_id,
                 "messages": observation.messages,
                 "observation_token": observation.observation_token,
-                "continuation_semantics": super::ContinuationSemantics::new(
-                    super::ContinuationKind::Observe,
-                    super::ContinuationCarrier::ObservationToken,
-                ).to_value(),
                 "changed": observation.changed,
                 "wait_outcome": observation.wait_outcome,
                 "waited_ms": observation.waited_ms,
@@ -781,7 +777,6 @@ fn session_message_observation_error_result(
         }
         sessions::SessionMessageObservationError::MalformedToken
         | sessions::SessionMessageObservationError::OversizedToken
-        | sessions::SessionMessageObservationError::WrongSession
         | sessions::SessionMessageObservationError::FutureRevision => ToolResult::err_with_output(
             "invalid_session_message_observation_token",
             json!({

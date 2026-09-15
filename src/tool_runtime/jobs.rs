@@ -962,7 +962,6 @@ fn unknown_job_observation_result(job_id: &str) -> ToolResult {
             "suggested_call": list_jobs_recovery_suggested_call(None),
         }),
     )
-    .with_recovery(RecoveryKind::Reobserve)
 }
 
 fn agent_job_log_error_result(job_id: &str, error: String) -> ToolResult {
@@ -1015,7 +1014,6 @@ fn job_not_found_result(project: &str, job_id: &str) -> ToolResult {
             "suggested_call": list_jobs_recovery_suggested_call(Some(project)),
         }),
     )
-    .with_recovery(RecoveryKind::Reobserve)
 }
 
 fn job_project_mismatch_result(
@@ -2275,7 +2273,7 @@ mod recovery_projection_tests {
 
         let missing = job_not_found_result("agent:special:demo", "job-missing");
         assert_eq!(missing.output["failure_kind"], "job_not_found");
-        assert_eq!(missing.output["recovery_kind"], "reobserve");
+        assert!(missing.output.get("recovery_kind").is_none());
         assert!(missing.output.get("recovery_tool").is_none());
         assert_eq!(
             missing.output["suggested_call"],
@@ -2817,7 +2815,7 @@ mod recovery_projection_tests {
             recovered_after_server_restart: true,
             reconciled_at: Some(3),
             recovery_reason_code: Some("runner_recovery_deadline_exceeded".to_string()),
-            observation_token: Some("wjob1:a:job-1:0123456789abcdef:4".to_string()),
+            observation_token: Some("wj3_abcdefghijklmnop.4.0.0".to_string()),
             last_update_seq: Some(4),
             stdout_retained_from_line: Some(1),
             stderr_retained_from_line: Some(1),

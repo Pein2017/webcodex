@@ -1359,11 +1359,6 @@ async fn http_mcp_2026_context_request_projects_post_tool_materials_nonfatally()
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["result"]["isError"], false);
     let output = stateless_tool_output(&body);
-    assert_eq!(output["context_projection"]["timing"], "post_tool");
-    assert_eq!(
-        output["context_projection"]["applies_to_current_effect"],
-        false
-    );
     let materials = output["context_projection"]["materials"]
         .as_array()
         .unwrap();
@@ -2123,7 +2118,7 @@ async fn http_mcp_2026_observe_session_messages_preserves_stateless_delta_contra
         .as_str()
         .expect("baseline observation token")
         .to_string();
-    assert!(token0.starts_with("wsm1_"));
+    assert!(token0.starts_with("wsm2_"));
     assert!(token0.len() <= 192);
 
     let worker_summary = runtime.sessions.summary(&worker_id, Some(100)).unwrap();

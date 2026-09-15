@@ -54,7 +54,7 @@ pub fn work_on_project_input_schema() -> Value {
             },
             "session_id": {
                 "type": "string",
-                "pattern": "^wc_sess_[A-Za-z0-9_]+$",
+                "pattern": "^wc_sess_([A-Za-z0-9_-]{16}|[0-9a-f]{32})$",
                 "description": "Optional explicit Workflow Session to continue exactly. It must be active and accessible and remains bound to its exact final Project; in worktree mode the Runner re-observes that registered managed Project and its source provenance instead of creating a second worktree. Failure never guesses or creates a replacement Session. Supplying session_id does not change the caller-explicit instruction, workflow-guidance, or extension projections. This business input is distinct from wrapper recording_session_id."
             }
         },

@@ -30,16 +30,22 @@ fn builtin_coding_workflow_defaults_are_required_and_bounded() {
         invalid["guidance"] = guidance;
         assert!(validate_schema_instance_for_test(&invalid, &schema).is_err());
     }
+
+    let mut legacy_role = workflow.clone();
+    let review_role = legacy_role["roles"]["independent_review"].clone();
+    legacy_role["roles"]["implementation_owner"] = review_role;
+    assert!(validate_schema_instance_for_test(&legacy_role, &schema).is_err());
 }
 
 #[test]
 fn builtin_coding_workflow_defaults_cover_unnamed_tasks_without_granting_authority() {
     let workflow = builtin_coding_workflow_projection();
     assert_eq!(workflow["authority"], "model_guidance_only");
-    assert!(workflow["role_selection"]
-        .as_str()
-        .unwrap()
-        .contains("Default guidance always applies"));
+    let role_selection = workflow["role_selection"].as_str().unwrap();
+    assert!(role_selection.contains("Ordinary implementation uses default guidance"));
+    assert!(role_selection
+        .contains("Use independent_review only for an explicit independent review pass"));
+    assert!(role_selection.contains("Roles never grant authority"));
     let defaults = workflow["guidance"]
         .as_array()
         .unwrap()
@@ -48,26 +54,35 @@ fn builtin_coding_workflow_defaults_cover_unnamed_tasks_without_granting_authori
         .collect::<Vec<_>>()
         .join("\n");
     for boundary in [
+        "concrete, reviewable completion",
         "guidance grants no authority",
-        "explicit action and target",
-        "nested rules for changed paths",
-        "recover truncated instructions",
-        "highest expected correctness and reliability",
-        "apply_text_edits for small precise local edits",
-        "bounded deterministic Python transformation through run_shell",
-        "first-class option",
-        "do not bypass permission/path policy",
-        "avoid network unless required and authorized",
-        "inspect the resulting diff and validate final source",
-        "only where the exposed schema supports it",
-        "unknown outcome",
-        "independent read-only inspection",
-        "short sync_wait_secs",
-        "same-execution Job handoff",
-        "do not fan out heavy validations",
-        "stale/cache-warmup",
-        "final source needs fresh validation",
-        "advisory evidence, not proof",
+        "Recovery/compaction/exact Session resume is continuation",
+        "reuse still-current Git/read/validation/Job facts",
+        "explicit action/target",
+        "user answer/Job/validation/result",
+        "continue independent work",
+        "wait only on real dependencies",
+        "Ordinary implementation is default",
+        "map cross-layer changes end to end",
+        "compiler/schema/exhaustiveness failures",
+        "avoid speculative redesign",
+        "simplest sufficient primitive",
+        "correctness/authority/evidence/durability/recovery/portability",
+        "Native commands are first-class",
+        "bounded deterministic Python/run_shell",
+        "Batch predetermined observations",
+        "adaptive follow-ups stay sequential",
+        "bounded targeted reads",
+        "files/count/small-context search",
+        "native rg is first-class",
+        "Validation failure is evidence, not queue cleanliness",
+        "Reuse assertion_name",
+        "outcome_unknown fails closed",
+        "one execution/Job",
+        "exact continuation",
+        "wait_secs=100,wake_on=terminal",
+        "not for visibility",
+        "sufficient fresh validation",
     ] {
         assert!(defaults.contains(boundary), "missing guidance: {boundary}");
     }
@@ -81,11 +96,12 @@ fn builtin_coding_workflow_routes_persistent_shell_to_ssh_state_not_local_comman
         .expect("persistent shell guidance");
 
     for boundary in [
-        "primarily for repeated remote commands",
-        "one named SSH resource",
-        "remote cwd/env/exports/functions/umask",
-        "structured tools -> run_process/run_script -> run_shell",
-        "local persistent shell only when same-process state is required",
+        "run_process=literal argv",
+        "run_shell=shell grammar/short chains",
+        "run_script=program-like scripts",
+        "specialize for added semantics",
+        "repeated named-SSH state",
+        "local same-process state",
     ] {
         assert!(
             guidance.contains(boundary),
@@ -93,11 +109,15 @@ fn builtin_coding_workflow_routes_persistent_shell_to_ssh_state_not_local_comman
         );
     }
     assert!(!guidance.contains("For repeated commands in one Workflow Session"));
+    assert!(!guidance.contains("structured tools -> run_process/run_script -> run_shell"));
 }
 
 #[test]
 fn builtin_coding_workflow_review_does_not_implicitly_authorize_edits() {
     let workflow = builtin_coding_workflow_projection();
+    assert!(workflow["roles"]
+        .as_object()
+        .is_some_and(|roles| !roles.contains_key("implementation_owner")));
     let review = workflow["roles"]["independent_review"]["guidance"]
         .as_array()
         .unwrap();

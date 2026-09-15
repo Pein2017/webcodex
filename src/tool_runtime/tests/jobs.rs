@@ -1726,7 +1726,7 @@ fn assert_unknown_job(result: ToolResult) {
     assert_eq!(result.output["error_kind"], "unknown_job");
     assert_eq!(result.output["failure_kind"], "job_not_found");
     assert_eq!(result.output["state_changed"], false);
-    assert_eq!(result.output["recovery_kind"], "reobserve");
+    assert!(result.output.get("recovery_kind").is_none());
     assert!(result.output.get("recovery_tool").is_none());
     assert_eq!(
         result.output["suggested_call"],
@@ -2561,7 +2561,7 @@ async fn job_log_wait_accepts_canonical_max_before_job_lookup() {
 #[test]
 fn retired_job_log_parser_rejects_former_inputs() {
     let token =
-        crate::job_observation::JobObservationToken::new_legacy("abc", "0123456789abcdef", 7)
+        crate::job_observation::JobObservationToken::new_baseline("abc", "0123456789abcdef", 7)
             .unwrap()
             .encode();
     for args in [

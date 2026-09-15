@@ -2040,7 +2040,6 @@ fn skill_error_dynamic(
         let target = output
             .as_object_mut()
             .expect("Skill store error projection is always an object");
-        target.insert("recovery_kind".to_string(), json!("reconcile"));
         if !project.is_empty() {
             if let Some(skill_key) = recovery_skill_key.as_deref() {
                 target.insert(
@@ -2052,9 +2051,11 @@ fn skill_error_dynamic(
                     .to_value(),
                 );
             } else {
+                target.insert("recovery_kind".to_string(), json!("reconcile"));
                 target.insert("reconcile_with".to_string(), json!("skill_versions"));
             }
         } else {
+            target.insert("recovery_kind".to_string(), json!("reconcile"));
             target.insert("reconcile_with".to_string(), json!("skill_versions"));
         }
         if outcome_unknown {
@@ -2199,11 +2200,10 @@ fn valid_package_name(name: &str) -> bool {
 }
 
 fn valid_skill_id(value: &str) -> bool {
-    value.len() == "wc_skill_".len() + 32
-        && value.starts_with("wc_skill_")
-        && value["wc_skill_".len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    value
+        .strip_prefix("wc_skill_")
+        .and_then(webcodex_core::compact::decode::<16>)
+        .is_some()
 }
 
 fn is_lower_sha256(value: &str) -> bool {
@@ -2216,7 +2216,8 @@ fn is_lower_sha256(value: &str) -> bool {
 fn valid_catalog_revision(value: &str) -> bool {
     value
         .strip_prefix("wc_skillcat_")
-        .is_some_and(is_lower_sha256)
+        .and_then(webcodex_core::compact::decode::<32>)
+        .is_some()
 }
 
 fn skill_id(project: &str, package_name: &str) -> String {
@@ -2227,8 +2228,10 @@ fn skill_id(project: &str, package_name: &str) -> String {
     hasher.update(SKILL_ROOT.as_bytes());
     hasher.update(b"/");
     hasher.update(package_name.as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
-    format!("wc_skill_{}", &digest[..32])
+    format!(
+        "wc_skill_{}",
+        webcodex_core::compact::encode(&hasher.finalize()[..16])
+    )
 }
 
 fn catalog_revision(
@@ -2265,7 +2268,10 @@ fn catalog_revision(
         }
     }
     hasher.update([u8::from(discovery_truncated)]);
-    format!("wc_skillcat_{:x}", hasher.finalize())
+    format!(
+        "wc_skillcat_{}",
+        webcodex_core::compact::encode(hasher.finalize())
+    )
 }
 
 fn push_diagnostic(diagnostics: &mut Vec<Value>, reason_code: &str) {
@@ -2349,7 +2355,10 @@ mod tests {
         for index in 0..64usize {
             skills.push(CatalogSkill {
                 descriptor: SkillDescriptor {
-                    skill_id: format!("wc_skill_{index:032x}"),
+                    skill_id: format!(
+                        "wc_skill_{}",
+                        webcodex_core::compact::encode(&(index as u128).to_be_bytes()[0..])
+                    ),
                     name: format!("skill-{index:02}"),
                     description: format!("descriptor-{index:02}-{}", "d".repeat(420)),
                     definition_revision: format!("{index:064x}"),
@@ -2451,6 +2460,7 @@ mod tests {
             .is_ok());
             assert!(result.output.get("recovery_tool").is_none());
             assert!(result.output.get("reconcile_with").is_none());
+            assert!(result.output.get("recovery_kind").is_none());
         };
 
         let unknown = skill_error_dynamic(
@@ -2460,7 +2470,6 @@ mod tests {
             true,
         );
         assert_eq!(unknown.output["outcome_unknown"], true);
-        assert_eq!(unknown.output["recovery_kind"], "reconcile");
         assert_actionable(&unknown);
         assert_eq!(unknown.output["retry_same_idempotency_key"], true);
         assert!(!unknown.output.to_string().contains("new key"));
@@ -2499,7 +2508,6 @@ mod tests {
             false,
         );
         assert_eq!(claimed.output["outcome_unknown"], false);
-        assert_eq!(claimed.output["recovery_kind"], "reconcile");
         assert_actionable(&claimed);
         assert!(claimed.output.get("retry_same_idempotency_key").is_none());
 

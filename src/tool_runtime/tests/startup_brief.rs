@@ -108,7 +108,7 @@ fn instruction_source<'a>(output: &'a Value, path: &str) -> &'a Value {
 fn assert_builtin_workflow(output: &Value) {
     let workflow = &output["workflow"];
     assert_eq!(workflow["contract"], "webcodex.coding_workflow");
-    assert_eq!(workflow["version"], 10);
+    assert_eq!(workflow["version"], 11);
     assert_eq!(workflow["authority"], "model_guidance_only");
     assert!(workflow["role_selection"]
         .as_str()
@@ -172,67 +172,71 @@ fn assert_builtin_workflow(output: &Value) {
         .collect::<Vec<_>>()
         .join("\n");
     for phrase in [
-        "cargo_fmt(check=false)",
-        "instead of reproducing rustfmt edits manually",
-        "highest expected correctness and reliability",
-        "bounded deterministic Python transformation through run_shell",
-        "first-class option",
-        "do not bypass permission/path policy",
-        "Always inspect the resulting diff and validate final source",
-        "independent read-only inspection",
-        "short sync_wait_secs",
-        "same-execution Job handoff",
-        "do not fan out heavy validations",
-        "stale/cache-warmup",
-        "final source needs fresh validation",
+        "concrete, reviewable completion",
+        "Recovery/compaction/exact Session resume is continuation",
+        "reuse still-current Git/read/validation/Job facts",
+        "continue independent work",
+        "Ordinary implementation is default",
+        "map cross-layer changes end to end",
+        "compiler/schema/exhaustiveness failures",
+        "simplest sufficient primitive",
+        "Native commands are first-class",
+        "bounded deterministic Python/run_shell",
+        "Batch predetermined observations",
+        "adaptive follow-ups stay sequential",
+        "bounded targeted reads",
+        "files/count/small-context search",
+        "Validation failure is evidence, not queue cleanliness",
+        "Reuse assertion_name",
+        "outcome_unknown fails closed",
+        "exact continuation",
+        "wait_secs=100,wake_on=terminal",
+        "not for visibility",
+        "sufficient fresh validation",
     ] {
         assert!(defaults.contains(phrase), "workflow guidance: {phrase}");
     }
     let persistent_shell_guidance = workflow["model_protocol"]["persistent_shell"]
         .as_str()
         .expect("persistent shell guidance");
-    assert!(persistent_shell_guidance.contains("primarily for repeated remote commands"));
-    assert!(persistent_shell_guidance.contains("one named SSH resource"));
-    assert!(persistent_shell_guidance.contains("remote cwd/env/exports/functions/umask"));
-    assert!(persistent_shell_guidance
+    for phrase in [
+        "run_process=literal argv",
+        "run_shell=shell grammar/short chains",
+        "run_script=program-like scripts",
+        "specialize for added semantics",
+        "repeated named-SSH state",
+        "local same-process state",
+    ] {
+        assert!(
+            persistent_shell_guidance.contains(phrase),
+            "persistent shell guidance: {phrase}"
+        );
+    }
+    assert!(!persistent_shell_guidance
         .contains("structured tools -> run_process/run_script -> run_shell"));
-    assert!(persistent_shell_guidance
-        .contains("local persistent shell only when same-process state is required"));
     assert!(!persistent_shell_guidance.contains("For repeated commands in one Workflow Session"));
     let closeout_guidance = workflow["model_protocol"]["normal_closeout"]
         .as_str()
         .expect("normal closeout guidance");
     assert!(closeout_guidance.contains("finish_coding_task(summary_only=true)"));
     assert!(closeout_guidance.contains("full closeout only"));
-    for role in ["implementation_owner", "independent_review"] {
-        let role = &workflow["roles"][role];
-        assert!(role["purpose"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
-        let guidance = role["guidance"]
-            .as_array()
-            .expect("workflow guidance array");
-        assert!(!guidance.is_empty());
-        assert!(
-            guidance.len()
-                <= crate::tool_runtime::startup_brief::BUILTIN_CODING_WORKFLOW_MAX_GUIDANCE_ITEMS
-        );
-    }
-    let implementation_guidance = workflow["roles"]["implementation_owner"]["guidance"]
+    let roles = workflow["roles"]
+        .as_object()
+        .expect("workflow roles object");
+    assert!(!roles.contains_key("implementation_owner"));
+    assert_eq!(roles.len(), 1);
+    let review = &roles["independent_review"];
+    assert!(review["purpose"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let review_guidance = review["guidance"]
         .as_array()
-        .unwrap();
-    assert!(implementation_guidance.iter().any(|item| {
-        item.as_str().is_some_and(|value| {
-            value.contains("intentionally rerunning the same logical validation")
-                && value.contains("reuse the same assertion_name")
-                && value
-                    .contains("do not rerun solely to clear stale historical validation evidence")
-        })
-    }));
-    assert!(!implementation_guidance.iter().any(|item| {
-        item.as_str()
-            .is_some_and(|value| value.contains("resolve that validation identity"))
-    }));
+        .expect("workflow guidance array");
+    assert!(!review_guidance.is_empty());
+    assert!(
+        review_guidance.len()
+            <= crate::tool_runtime::startup_brief::BUILTIN_CODING_WORKFLOW_MAX_GUIDANCE_ITEMS
+    );
     let serialized = workflow.to_string();
     for forbidden in ["ChatGPT", "browser", "another window", "online", "offline"] {
         assert!(

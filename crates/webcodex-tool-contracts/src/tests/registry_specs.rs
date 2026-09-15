@@ -43,14 +43,22 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let read_files_desc = desc("read_files");
     for phrase in [
-        "adaptive runtime preferred batch-capable inspect tool",
-        "only one known range",
+        "batch/snapshot-aware project inspect",
+        "read_revision",
+        "snapshot-bound continuation",
+        "protected-path policy",
+        "range normalization",
+        "target symbol/test/implementation region is known",
+        "bounded targeted ranges",
+        "batch related ranges already known to be needed",
+        "do not read an entire large file merely because the budget permits it",
+        "small known one-off observation",
+        "without downstream snapshot dependency",
+        "native file commands",
         "no fake continuation",
         "512 kib",
         "exact resolved project",
         "business session_id",
-        "read_revision",
-        "single output-level suggested_call",
         "continued ranges are fenced",
         "runtime rejects a continuation",
     ] {
@@ -61,11 +69,36 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     }
 
     let batch_search_desc = desc("search_project_texts");
+    for obsolete in [
+        "adaptive runtime preferred batch-capable inspect tool",
+        "including when only one known range is needed",
+    ] {
+        assert!(
+            !read_files_desc.contains(obsolete),
+            "obsolete read ritual: {read_files_desc}"
+        );
+    }
+
     for phrase in [
+        "batch-capable project-text search",
+        "bounded structured results",
+        "protected-path policy",
+        "isolated failures",
+        "portable runtime search semantics",
+        "broad discovery",
+        "files_with_matches/count",
+        "small bounded match set with little context",
+        "target read_files/native reads",
+        "small known-scope search",
+        "native rg via run_process or a shell command is first-class",
+        "batch only queries already known to be needed",
+        "result-dependent follow-ups sequential",
         "pattern_mode=literal",
         "request context explicitly",
         "whole-query",
-        "authoritative next_index",
+        "parser-ready suggested_call",
+        "fits the model result budget",
+        "without a raw cursor or fake call",
         "no safe match cursor",
         "refined",
     ] {
@@ -74,13 +107,13 @@ fn tool_specs_describe_default_coding_loop_preferences() {
             "search_project_texts description should mention {phrase}: {batch_search_desc}"
         );
     }
-    for phrase in [
+    for obsolete in [
         "adaptive runtime preferred batch-capable project-text search",
-        "only one query",
+        "including when only one query is needed",
     ] {
         assert!(
-            batch_search_desc.contains(phrase),
-            "search_project_texts description should mention {phrase}: {batch_search_desc}"
+            !batch_search_desc.contains(obsolete),
+            "obsolete search ritual returned: {batch_search_desc}"
         );
     }
 
@@ -121,6 +154,10 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     let read_artifact_desc = desc("read_project_artifact");
     for phrase in [
         "bounded chunk inspection api",
+        "parser-ready suggested_call",
+        "expected_sha256",
+        "snapshot_changed",
+        "do not manually translate",
         "do not loop over base64 chunks",
         "export_project_artifact",
     ] {
@@ -174,9 +211,11 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let show_changes_desc = desc("show_changes");
     for phrase in [
-        "default inspect/review tool",
-        "before final response",
-        "bounded hunks",
+        "canonical bounded workspace-wide review",
+        "worktree overview",
+        "compact session signals",
+        "structured closeout evidence",
+        "tiny targeted git observations need not call it first",
         "diff_review_handoff",
         "git_diff_hunks",
     ] {
@@ -187,10 +226,27 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     }
 
     let git_diff_hunks = spec_named(&specs, "git_diff_hunks");
+    assert!(!show_changes_desc.contains("default inspect/review tool before final response"));
+
+    let git_review_summary_desc = desc("git_review_summary");
+    for phrase in [
+        "broad or unknown ranges",
+        "file/change map",
+        "targeted git_diff_hunks/read_files",
+        "small bounded understood committed diffs may use native git directly",
+        "never mutates",
+    ] {
+        assert!(
+            git_review_summary_desc.contains(phrase),
+            "git_review_summary description should mention {phrase}: {git_review_summary_desc}"
+        );
+    }
+
     let git_diff_hunks_desc = git_diff_hunks.description.to_lowercase();
     for phrase in [
         "targeted/paged",
-        "scope/fence-bound",
+        "scope/fence-bound opaque continuation",
+        "safe bounded traversal",
         "max_page_bytes",
         "raw producer page",
         "shared safe producer maximum",
@@ -349,13 +405,47 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     for name in ["cargo_check", "cargo_test"] {
         let validation_desc = desc(name);
         assert!(
-            validation_desc.contains("preferred structured"),
-            "{name} should be described as preferred structured validation: {validation_desc}"
+            validation_desc.contains("structured") && validation_desc.contains("common supported"),
+            "{name} should explain the structured option's supported semantics: {validation_desc}"
+        );
+        for phrase in ["validation identity", "same execution job handoff"] {
+            assert!(
+                validation_desc.contains(phrase),
+                "{name} should explain structured evidence semantics {phrase}: {validation_desc}"
+            );
+        }
+        assert!(
+            !validation_desc.contains("preferred structured"),
+            "{name} must not encode structure as an unconditional preference: {validation_desc}"
         );
         assert!(
             !validation_desc.contains("run_shell"),
-            "{name} should express structured preference without sibling-tool name pollution: {validation_desc}"
+            "{name} should stay focused on its own differentiating semantics: {validation_desc}"
         );
+    }
+    let cargo_test_desc = desc("cargo_test");
+    for phrase in [
+        "executed-test evidence",
+        "min_tests/require_tests",
+        "bounded output",
+    ] {
+        assert!(cargo_test_desc.contains(phrase), "cargo_test: {phrase}");
+    }
+    let go_test_desc = desc("go_test");
+    for phrase in [
+        "structured option for common supported",
+        "go json test-count evidence",
+    ] {
+        assert!(go_test_desc.contains(phrase), "go_test: {phrase}");
+    }
+    assert!(!go_test_desc.contains("preferred structured"));
+    let cargo_fmt_desc = desc("cargo_fmt");
+    for phrase in [
+        "ensure rust formatting",
+        "precheck",
+        "changed/state_changed",
+    ] {
+        assert!(cargo_fmt_desc.contains(phrase), "cargo_fmt: {phrase}");
     }
 
     let workspace_hygiene_desc = desc("workspace_hygiene_check");
@@ -376,23 +466,25 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let run_shell_desc = desc("run_shell");
     for phrase in [
-        "bounded shell command or short tightly related shell command chain",
+        "bounded shell command or short tightly related chain",
         "shell semantics",
         "model/tool round trips",
-        "run_process preferred for one native executable with literal argv",
-        "independent effects or failure/permission boundaries",
-        "validation, commit, push, deploy, or restart",
+        "predetermined related observations may share one call",
+        "adaptive/result-dependent follow-ups stay sequential",
+        "prefer run_process for one native executable with literal argv",
         "bounded deterministic python heredoc",
-        "first-class programmatic source-transformation path",
-        "do not use it to bypass project/path/permission policy",
-        "avoid network unless the task requires and authorizes it",
-        "inspect the diff and validate the final source",
-        "run_script does not imply python support",
-        "run_script for its supported program-like script languages",
-        "same-process cwd/env/export/function/umask state",
+        "one small program expresses a coherent transformation more reliably",
+        "project/path/permission policy",
+        "avoid unauthorized network",
+        "inspect diff",
+        "validate final source",
+        "run_script handles supported program-like languages",
+        "does not imply python",
+        "failure/permission/validation boundaries",
+        "commit, push, deploy, restart",
+        "same-process state",
         "one named ssh resource",
         "runner-owned",
-        "outlive the current runner process",
         "run_detached_process",
     ] {
         assert!(
@@ -962,6 +1054,9 @@ fn observe_jobs_wake_policy_schema_is_closed_and_compatible() {
         "wake_on=change",
         "wake_on=terminal",
         "wait_secs=100",
+        "useful progress is blocked on terminal outcome",
+        "independent work remains",
+        "do not poll for visibility",
         "changed=true",
     ] {
         assert!(spec.description.contains(phrase), "missing {phrase}");
@@ -971,4 +1066,9 @@ fn observe_jobs_wake_policy_schema_is_closed_and_compatible() {
         .unwrap();
     assert!(wait_description.contains("above 100 seconds"));
     assert!(wait_description.contains("clamped to 100"));
+    assert!(wait_description.contains("further useful progress depends on terminal outcome"));
+    assert!(wait_description.contains("independent work continues"));
+    let wake_description = wake["description"].as_str().unwrap();
+    assert!(wake_description.contains("dependent progress is blocked"));
+    assert!(wake_description.contains("not as an unconditional next call"));
 }

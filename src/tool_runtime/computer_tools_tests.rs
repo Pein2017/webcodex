@@ -58,8 +58,8 @@ fn application(id: &str, name: &str) -> Value {
     json!({"application_id": id, "display_name": name})
 }
 
-const APPLICATION_ID: &str = "application_0123456789abcdef0123456789abcdef";
-const APPLICATION_ID_2: &str = "application_fedcba9876543210fedcba9876543210";
+const APPLICATION_ID: &str = "application_iavN7wEjRWeJq83v";
+const APPLICATION_ID_2: &str = "application_dlQyEP7cuph2VDIQ";
 
 fn assert_computer_suggested_call(result: &ToolResult, tool: &str, arguments: Value) {
     let suggested = &result.output["suggested_call"];
@@ -83,7 +83,7 @@ fn computer_application_id_and_public_argument_shape_are_closed() {
         "application_",
         "application_0123456789ABCDEF0123456789ABCDEF",
         "application_0123456789abcdef0123456789abcdeg",
-        "surface_0123456789abcdef0123456789abcdef",
+        "surface_iavN7wEjRWeJq83v",
     ] {
         assert!(!valid_application_id(invalid), "{invalid}");
     }
@@ -218,7 +218,7 @@ fn computer_application_launch_lifecycle_is_exact_and_never_blindly_retryable() 
     );
     assert_eq!(unknown.output["error_kind"], "outcome_unknown");
     assert_eq!(unknown.output["execution_state"], "outcome_unknown");
-    assert_eq!(unknown.output["recovery_kind"], "reobserve");
+    assert!(unknown.output.get("recovery_kind").is_none());
     assert_computer_suggested_call(
         &unknown,
         "computer_list_windows",
@@ -263,7 +263,7 @@ fn computer_application_launch_lifecycle_is_exact_and_never_blindly_retryable() 
         assert_eq!(result.output["state_changed"], false);
         let serialized = serde_json::to_string(&result.output).unwrap();
         if error.starts_with("stale_application") {
-            assert_eq!(result.output["recovery_kind"], "reobserve");
+            assert!(result.output.get("recovery_kind").is_none());
             assert_computer_suggested_call(
                 &result,
                 "computer_list_applications",
@@ -289,7 +289,7 @@ fn computer_application_launch_lifecycle_is_exact_and_never_blindly_retryable() 
     assert_eq!(malformed.output["execution_state"], "not_started");
 }
 
-const DISPLAY_ID: &str = "display_0123456789abcdef0123456789abcdef";
+const DISPLAY_ID: &str = "display_iavN7wEjRWeJq83v";
 
 #[test]
 fn computer_pointer_public_shape_and_effect_lifecycle_are_closed() {
@@ -450,7 +450,7 @@ fn computer_pointer_public_shape_and_effect_lifecycle_are_closed() {
     for invalid_output in [
         json!({
             "platform": "macos",
-            "display_id": "display_ffffffffffffffffffffffffffffffff",
+            "display_id": "display_________________",
             "snapshot_generation": 7,
             "x": 123,
             "y": 456,
@@ -1632,7 +1632,7 @@ fn computer_save_snapshot_lifecycle_distinguishes_not_started_from_unknown() {
     assert!(!unknown.success);
     assert_eq!(unknown.output["error_kind"], "outcome_unknown");
     assert_eq!(unknown.output["execution_state"], "outcome_unknown");
-    assert_eq!(unknown.output["recovery_kind"], "reconcile");
+    assert!(unknown.output.get("recovery_kind").is_none());
     assert_computer_suggested_call(
         &unknown,
         "read_project_artifact_metadata",
