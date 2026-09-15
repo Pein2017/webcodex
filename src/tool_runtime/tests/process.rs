@@ -182,6 +182,7 @@ async fn update_process_job(
             error: error.map(str::to_string),
             command_execution_state: state,
             validation_progress: None,
+            test_count_evidence: None,
             activity,
             finished: state.is_some(),
         })
@@ -209,6 +210,8 @@ async fn complete_process_lifecycle(
                 exit_code,
                 stdout: Some(stdout.to_string()),
                 stderr: Some(stderr.to_string()),
+                stdout_truncated: false,
+                stderr_truncated: false,
                 duration_ms: Some(7),
                 error: error.map(str::to_string),
             },
@@ -236,6 +239,208 @@ async fn dispatch_process_until_request(
     });
     let request = wait_for_patch_agent_request(runtime, client_id).await;
     (task, request)
+}
+
+async fn dispatch_typed_process_until_request(
+    runtime: &ToolRuntime,
+    client_id: &str,
+    arguments: serde_json::Value,
+    auth: crate::auth::AuthContext,
+) -> (
+    tokio::task::JoinHandle<ToolResult>,
+    crate::runner_protocol::RunnerRequest,
+) {
+    let (call, metadata) =
+        ToolCall::from_tool_name_with_recorder_metadata("run_process", arguments).unwrap();
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .dispatch_with_auth_transport_options_and_metadata(
+                    call,
+                    Some(&auth),
+                    crate::tool_runtime::sessions::SessionTransport::Mcp,
+                    metadata,
+                )
+                .await
+        }
+    });
+    let request = wait_for_patch_agent_request(runtime, client_id).await;
+    (task, request)
+}
+
+fn typed_process_arguments(project: &str) -> serde_json::Value {
+    json!({
+        "project": project,
+        "executable": "argv-helper",
+        "args": ["probe"],
+        "timeout_secs": 30,
+        "sync_wait_secs": 30,
+        "purpose": "diagnostic"
+    })
+}
+
+#[tokio::test]
+async fn run_process_projects_explicit_expectation_truth_without_changing_execution_truth() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = test_runtime();
+    let client_id = "process-expectation-presentation";
+    let project = register_process_agent(&runtime, client_id, temp.path(), true).await;
+    let auth = auth_context(None, true);
+
+    for (label, expectation, exit_code, expected_success, expected_satisfied) in [
+        (
+            "accepted nonzero",
+            json!({"accepted_exit_codes": [0, 1]}),
+            1,
+            false,
+            true,
+        ),
+        (
+            "accepted mismatch",
+            json!({"accepted_exit_codes": [0, 1]}),
+            2,
+            false,
+            false,
+        ),
+        (
+            "accepted zero",
+            json!({"accepted_exit_codes": [0, 1]}),
+            0,
+            true,
+            true,
+        ),
+        (
+            "observe nonzero",
+            json!({"result_expectation": "observe"}),
+            1,
+            false,
+            true,
+        ),
+    ] {
+        let mut arguments = typed_process_arguments(&project);
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(expectation.as_object().unwrap().clone());
+        let (task, request) =
+            dispatch_typed_process_until_request(&runtime, client_id, arguments, auth.clone())
+                .await;
+        complete_process_lifecycle(
+            &runtime,
+            client_id,
+            request.request_id,
+            ShellCommandExecutionState::Completed,
+            Some(exit_code),
+            "",
+            "",
+            None,
+        )
+        .await;
+        let result = task.await.unwrap();
+        assert_eq!(result.success, expected_success, "{label}");
+        assert!(result.output.get("execution_success").is_none(), "{label}");
+        assert_eq!(
+            result.output["expectation_satisfied"], expected_satisfied,
+            "{label}: {}",
+            result.output
+        );
+        let schema = crate::tool_runtime::registry::output_schema_for_tool("run_process");
+        let instance = json!({
+            "success": result.success,
+            "output": result.output.clone(),
+            "error": result.error.clone(),
+        });
+        crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&instance, &schema)
+            .unwrap_or_else(|error| panic!("{label} immediate result schema mismatch: {error}"));
+        if exit_code != 0 {
+            assert_eq!(result.output["execution_state"], "completed", "{label}");
+            assert_eq!(result.output["exit_code"], exit_code, "{label}");
+            assert_eq!(result.output["command_ok"], false, "{label}");
+            assert_eq!(
+                result.output["failure_kind"], "command_exit_nonzero",
+                "{label}"
+            );
+        }
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("accepted_exit_codes"), "{label}");
+        assert!(!serialized.contains("result_expectation"), "{label}");
+    }
+
+    let (task, request) = dispatch_typed_process_until_request(
+        &runtime,
+        client_id,
+        typed_process_arguments(&project),
+        auth.clone(),
+    )
+    .await;
+    complete_process_lifecycle(
+        &runtime,
+        client_id,
+        request.request_id,
+        ShellCommandExecutionState::Completed,
+        Some(1),
+        "",
+        "",
+        None,
+    )
+    .await;
+    let ordinary = task.await.unwrap();
+    assert!(!ordinary.success);
+    assert!(ordinary.output.get("execution_success").is_none());
+    assert!(ordinary.output.get("expectation_satisfied").is_none());
+}
+
+#[tokio::test]
+async fn run_process_expectation_projection_fails_closed_for_unknown_and_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = test_runtime();
+    let client_id = "process-expectation-fail-closed";
+    let project = register_process_agent(&runtime, client_id, temp.path(), true).await;
+    let auth = auth_context(None, true);
+
+    for (label, state, error) in [
+        (
+            "outcome unknown",
+            ShellCommandExecutionState::OutcomeUnknown,
+            "process result lost after spawn",
+        ),
+        (
+            "timeout",
+            ShellCommandExecutionState::TimedOut,
+            "process timed out",
+        ),
+    ] {
+        let mut arguments = typed_process_arguments(&project);
+        arguments["accepted_exit_codes"] = json!([0, 1]);
+        let (task, request) =
+            dispatch_typed_process_until_request(&runtime, client_id, arguments, auth.clone())
+                .await;
+        complete_process_lifecycle(
+            &runtime,
+            client_id,
+            request.request_id,
+            state,
+            None,
+            "",
+            "",
+            Some(error),
+        )
+        .await;
+        let result = task.await.unwrap();
+        assert!(!result.success, "{label}");
+        assert!(result.output.get("execution_success").is_none(), "{label}");
+        assert_eq!(
+            result.output["execution_state"],
+            if label == "timeout" {
+                "timed_out"
+            } else {
+                "outcome_unknown"
+            },
+            "{label}"
+        );
+        assert_eq!(result.output["expectation_satisfied"], false, "{label}");
+    }
 }
 
 #[tokio::test]
@@ -703,6 +908,7 @@ async fn detached_process_lost_initiation_after_server_restart_recovers_same_job
                     stdout: Default::default(),
                     stderr: Default::default(),
                     validation_progress: None,
+                    test_count_evidence: None,
                     activity: Some(ShellJobActivity {
                         state: ShellJobActivityState::Working,
                         phase: ShellJobActivityPhase::ProcessRunning,
@@ -805,6 +1011,7 @@ async fn detached_process_uses_existing_job_identity_and_typed_runner_request() 
     assert!(result.success, "{:?}", result.error);
     let job_id = result.output["job_id"].as_str().unwrap().to_string();
     assert_eq!(result.output["execution_source"], "run_detached_process");
+    assert_observe_job_continuation(&result.output);
 
     let request = wait_for_patch_agent_request(&runtime, "detached-product-path").await;
     assert_eq!(request.kind, "start_detached_process_job");
@@ -879,6 +1086,7 @@ async fn run_process_fast_terminal_jobs_project_back_without_visible_duplicates(
                 "job_status",
                 "observation_token",
                 "effective_timeout_secs",
+                "continuation",
                 "sync_wait_secs",
                 "async_handoff_available",
                 "failure_kind",
@@ -902,6 +1110,7 @@ async fn run_process_fast_terminal_jobs_project_back_without_visible_duplicates(
             assert!(result.output["job_id"].is_null());
             assert!(result.output["job_status"].is_null());
             assert_eq!(result.output["async_handoff_available"], true);
+            assert!(result.output.get("continuation").is_none());
             assert_eq!(result.output["failure_kind"], "command_exit_nonzero");
             assert_eq!(result.output["tool_failure"], false);
         }
@@ -1194,7 +1403,7 @@ async fn run_process_slow_handoff_is_queryable_once_and_keeps_the_original_budge
     let handoff = task.await.unwrap();
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(handoff.success, "{:?}", handoff.error);
-    assert_eq!(handoff.output["promoted_to_job"], true);
+    assert!(handoff.output.get("promoted_to_job").is_none());
     assert_eq!(handoff.output["terminal"], false);
     assert_eq!(handoff.output["execution_state"], "running");
     assert_eq!(handoff.output["command_started"], true);
@@ -1222,15 +1431,10 @@ async fn run_process_slow_handoff_is_queryable_once_and_keeps_the_original_budge
     );
     let job_id = handoff.output["job_id"].as_str().unwrap().to_string();
     assert_eq!(request.job_id.as_deref(), Some(job_id.as_str()));
+    assert_observe_job_continuation(&handoff.output);
 
     let status = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: job_id.clone(),
-                include_command_preview: false,
-            },
-            Some(&auth),
-        )
+        .job_status_for_auth(job_id.clone(), false, Some(&auth))
         .await;
     assert!(status.success, "{:?}", status.error);
     assert_eq!(status.output["job_id"], job_id);
@@ -1276,13 +1480,7 @@ async fn run_process_slow_handoff_is_queryable_once_and_keeps_the_original_budge
     )
     .await;
     let terminal = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: job_id.clone(),
-                include_command_preview: false,
-            },
-            Some(&auth),
-        )
+        .job_status_for_auth(job_id.clone(), false, Some(&auth))
         .await;
     assert!(terminal.success, "{:?}", terminal.error);
     assert_eq!(terminal.output["status"], "completed");
@@ -1298,13 +1496,13 @@ async fn run_process_slow_handoff_is_queryable_once_and_keeps_the_original_budge
 }
 
 #[tokio::test]
-async fn run_process_sync_wait_validation_fails_before_execution_start() {
+async fn run_process_zero_sync_wait_fails_before_execution_start() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = test_runtime();
     let project =
         register_process_job_agent(&runtime, "process-sync-wait-bounds", temp.path()).await;
 
-    for (timeout_secs, sync_wait_secs) in [(60, 0), (60, 61), (5, 6)] {
+    for (timeout_secs, sync_wait_secs) in [(60, 0)] {
         let result = runtime
             .dispatch_with_auth(
                 ToolCall::RunProcess {
@@ -1410,7 +1608,7 @@ async fn stop_job_stops_the_promoted_process_without_starting_a_replacement() {
     .await;
     let handoff = task.await.unwrap();
     let job_id = handoff.output["job_id"].as_str().unwrap().to_string();
-    assert_eq!(handoff.output["promoted_to_job"], true);
+    assert!(handoff.output.get("promoted_to_job").is_none());
 
     let stopped = runtime
         .dispatch_with_auth(
@@ -1661,6 +1859,7 @@ async fn run_process_transport_uncertainty_and_timeout_preserve_phase_a_truth() 
     assert_eq!(uncertain.output["execution_state"], "outcome_unknown");
     assert_eq!(uncertain.output["command_started"], true);
     assert_eq!(uncertain.output["command_completed"], false);
+    assert!(uncertain.output.get("continuation").is_none());
     assert!(uncertain
         .error
         .as_deref()

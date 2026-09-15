@@ -1,10 +1,10 @@
 use crate::tool_runtime::git::{
-    collect_show_changes_untracked_previews_for_root, git_log_command, parse_porcelain_summary,
-    parse_show_changes_output, show_changes_command, split_show_changes_stdout,
+    collect_show_changes_untracked_previews_for_root, git_log_command, parse_show_changes_output,
+    show_changes_command, split_show_changes_stdout,
 };
 use crate::tool_runtime::helpers::run_command_sync;
 use crate::tool_runtime::{
-    ApplyFileChangeInput, ApplyFileChangeKind, ApplyTextEditInput, ApplyTextEditKind,
+    ApplyFileChangeInput, ApplyFileChangeKind, ApplyTextEditInput, ApplyTextEditKind, ToolRuntime,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -100,7 +100,13 @@ pub(in crate::tool_runtime::tests) fn show_changes_output_from_command(
         &stderr,
     );
     if include_diff {
-        let untracked_paths = parse_porcelain_summary(&frames.status).untracked_files;
+        let untracked_paths = output["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|file| file["status"] == "untracked")
+            .filter_map(|file| file["path"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
         let (previews, truncated) =
             collect_show_changes_untracked_previews_for_root(root, &untracked_paths);
         output["untracked_previews"] = json!(previews);
@@ -155,7 +161,7 @@ pub(in crate::tool_runtime::tests) fn text_edit(
 
 pub(in crate::tool_runtime::tests) fn edit_change(
     path: &str,
-    expected_sha256: &str,
+    _historical_sha256: &str,
     edits: Vec<ApplyTextEditInput>,
 ) -> ApplyFileChangeInput {
     ApplyFileChangeInput {
@@ -164,6 +170,31 @@ pub(in crate::tool_runtime::tests) fn edit_change(
         to_path: None,
         content: None,
         edits,
-        expected_sha256: Some(expected_sha256.to_string()),
+        expected_read_revision: None,
     }
+}
+
+pub(in crate::tool_runtime::tests) async fn seed_read_revision(
+    runtime: &ToolRuntime,
+    project: &str,
+    path: &str,
+    sha256: &str,
+) -> u64 {
+    let resolved = runtime.resolve_project_input(project).await.unwrap();
+    let runner = runtime
+        .runner_registry
+        .get_runner_view(&resolved.config.client_id)
+        .await
+        .expect("owning Runner");
+    runtime.read_revisions.observe(
+        super::super::super::read_revisions::ReadRevisionTarget {
+            project_id: resolved.resolved_id,
+            path: path.to_string(),
+            client_id: resolved.config.client_id,
+            runner_instance_id: runner.runner_instance_id,
+            project_root: resolved.config.path,
+            root_fingerprint: resolved.root_fingerprint,
+        },
+        sha256.to_string(),
+    )
 }

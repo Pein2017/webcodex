@@ -6,21 +6,35 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let desc = |name: &str| spec_named(&specs, name).description.to_lowercase();
 
-    let read_file_desc = desc("read_file");
+    let work_on_project_desc = desc("work_on_project");
     for phrase in [
-        "simple single-range utf-8 read primitive",
-        "local-coding contract",
-        "adaptive runtime prefer batch-capable read_files even for one known range",
-        "line numbers",
-        "read_range",
-        "not snapshot-stable",
-        "sha256",
-        "exact resolved project",
-        "business session_id",
+        "canonical bootstrap",
+        "ordinary coding/review",
+        "omit session_id",
+        "fresh workflow session",
+        "does not imply a fresh model context",
+        "fresh or uncertain model context",
+        "re-observes instruction files",
+        "exact resume",
+        "active accessible session",
+        "never guesses prior session",
+        "project instructions",
+        "workflow guidance",
+        "skills",
+        "plugin",
+        "selection metadata",
+        "current model context",
+        "does not require git",
+        "never proves retention",
+        "skill_read_file",
+        "plugin_tool describe",
+        "mode=worktree",
+        "exact git base",
+        "project authority",
     ] {
         assert!(
-            read_file_desc.contains(phrase),
-            "read_file description should mention {phrase}: {read_file_desc}"
+            work_on_project_desc.contains(phrase),
+            "work_on_project description should mention {phrase}: {work_on_project_desc}"
         );
     }
 
@@ -28,40 +42,18 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     for phrase in [
         "adaptive runtime preferred batch-capable inspect tool",
         "only one known range",
-        "read_range",
-        "batch_items",
-        "next_index",
-        "not a read_files input",
-        "increase_result_budget",
         "no fake continuation",
-        "complete a current partial item",
-        "256 kib",
+        "512 kib",
         "exact resolved project",
         "business session_id",
+        "read_revision",
+        "single output-level suggested_call",
+        "continued ranges are fenced",
+        "runtime rejects a continuation",
     ] {
         assert!(
             read_files_desc.contains(phrase),
             "read_files description should mention {phrase}: {read_files_desc}"
-        );
-    }
-
-    let search_desc = desc("search_project_text");
-    for phrase in [
-        "simple single-query project-text search primitive",
-        "local-coding contract",
-        "adaptive runtime prefer batch-capable search_project_texts even for one query",
-        "rg-first",
-        "grep fallback",
-        "pattern_mode=literal",
-        "matches",
-        "context",
-        "truncated",
-        "no safe match cursor",
-        "refine",
-    ] {
-        assert!(
-            search_desc.contains(phrase),
-            "search_project_text description should mention {phrase}: {search_desc}"
         );
     }
 
@@ -146,6 +138,37 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         );
     }
 
+    let git_log_desc = desc("git_log");
+    for phrase in ["next_skip", "parser-ready", "10000 skip bound"] {
+        assert!(git_log_desc.contains(phrase), "git_log: {phrase}");
+    }
+    let list_files_desc = desc("list_project_files");
+    for phrase in [
+        "deterministic page",
+        "next_offset",
+        "complete directory source",
+        "retained-tail truncation fails closed",
+    ] {
+        assert!(
+            list_files_desc.contains(phrase),
+            "list_project_files: {phrase}"
+        );
+    }
+    let tracked_files_desc = desc("list_project_tracked_files");
+    for phrase in [
+        "bounded producer source",
+        "source acquisition is complete",
+        "list_truncated=true",
+        "next_offset is null",
+        "narrow path",
+        "retained-tail source truncation fails closed",
+    ] {
+        assert!(
+            tracked_files_desc.contains(phrase),
+            "list_project_tracked_files: {phrase}"
+        );
+    }
+
     let show_changes_desc = desc("show_changes");
     for phrase in [
         "default inspect/review tool",
@@ -164,34 +187,58 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     let git_diff_hunks_desc = git_diff_hunks.description.to_lowercase();
     for phrase in [
         "targeted/paged",
-        "scope-bound",
-        "replay",
-        "scope",
-        "paging inputs",
-        "later records",
-        "hunk_line_limit",
-        "larger max_hunk_lines",
-        "narrower paths",
+        "scope/fence-bound",
+        "max_page_bytes",
+        "raw producer page",
+        "shared safe producer maximum",
+        "512 kib",
+        "final model-facing",
+        "parser-ready next_call",
+        "recovery.later_hunks.next_call",
+        "next logical diff record",
+        "never an intra-hunk cursor",
+        "recovery.current_hunk.next_call",
+        "bounded refinement",
+        "exact hunk-fragment token",
+        "next complete diff line",
+        "line-budget and page-byte-budget truncation",
+        "positive complete-line progress",
+        "safe forward progress is not proven",
     ] {
         assert!(
             git_diff_hunks_desc.contains(phrase),
             "git_diff_hunks description should mention {phrase}: {git_diff_hunks_desc}"
         );
     }
+    let default_page_bytes = git_diff_hunks.input_schema["properties"]["max_page_bytes"]["default"]
+        .as_u64()
+        .expect("git_diff_hunks max_page_bytes default");
+    assert_eq!(
+        default_page_bytes as usize,
+        webcodex_core::runtime_contract::DEFAULT_GIT_DIFF_HUNKS_PAGE_BYTES
+    );
+    assert_eq!(
+        webcodex_core::runtime_contract::DEFAULT_GIT_DIFF_HUNKS_PAGE_BYTES,
+        webcodex_core::runtime_contract::MAX_GIT_DIFF_HUNKS_PAGE_BYTES
+    );
     let continuation_desc = git_diff_hunks.input_schema["properties"]["continuation"]
         ["description"]
         .as_str()
         .expect("git_diff_hunks continuation description")
         .to_lowercase();
     for phrase in [
-        "repeat the exact original",
+        "later-record page cursor",
+        "next complete-line fragment",
+        "scope/fence-bound",
+        "parser-ready suggested_call",
+        "exact original effective scope/paging inputs",
         "base_commit/head_commit",
         "cached/worktree mode",
         "paths",
         "max_hunks",
         "max_hunk_lines",
-        "scope-bound",
-        "does not reconstruct",
+        "max_page_bytes",
+        "later-record and hunk-fragment continuations remain distinct identities",
     ] {
         assert!(
             continuation_desc.contains(phrase),
@@ -199,31 +246,22 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         );
     }
 
-    // Contextual patch remains a guarded alternative, not a line-count heuristic.
+    // Patch input remains available without becoming the default recovery path.
     let apply_patch_desc = desc("apply_patch");
     for phrase in [
-        "contextual patch path",
-        "guarded exact edits",
-        "line count alone is not a reason to patch",
-        "contextual or multi-hunk form is clearer",
+        "naturally patch-shaped",
+        "genuinely the clearest reliable representation",
+        "not the default recovery",
         "stable unique context",
         "function/impl/type/test/module",
-        "not repeated lines/short fragments",
         "transactional",
-        "sha rechecks",
         "rollback",
         "dry_run",
-        "matching_mode=unique default",
+        "matching_mode=unique",
         "matching_mode_rejected",
-        "never weaken guard",
-        "switch to first_match",
-        "use apply_text_edits if easy",
-        "bounded read_files recovery",
-        "context_mismatch",
-        "regenerate from current source",
-        "matching_mode=exact_unique",
-        "stale-context/concurrency fence",
-        "first_match is compatibility, not recovery",
+        "weakening the guard",
+        "first_match",
+        "preserve unique/exact_unique",
         "outcome_unknown",
     ] {
         assert!(
@@ -231,44 +269,44 @@ fn tool_specs_describe_default_coding_loop_preferences() {
             "apply_patch description should mention {phrase}: {apply_patch_desc}"
         );
     }
-    assert!(!apply_patch_desc.contains("retry with matching_mode=first_match"));
+    assert!(!apply_patch_desc.contains("prefer apply_patch"));
 
-    // Default read-paired guarded edit path.
     let apply_text_edits_desc = desc("apply_text_edits");
     for phrase in [
-        "canonical default guarded edit path",
-        "after read_file/read_files",
-        "current worktree",
-        "ordinary model-generated changes",
-        "many changed lines alone are not a reason to choose apply_patch",
-        "transactional",
-        "sha-guarded",
-        "expected_sha256",
-        "unique by default",
-        "occurrence",
-        "line_scope",
-        "transactional multi-file edits",
-        "use apply_patch only when",
-        "contextual",
-        "large multi-hunk",
-        "external raw diff",
+        "transactional structured option",
+        "small/local exact edits",
+        "globally unique",
+        "may omit expected_read_revision",
+        "occurrence or line_scope",
+        "requires expected_read_revision",
+        "stronger whole-file stale-context fence",
+        "model input never needs a digest",
+        "preflighted transactionally",
+        "conflicts fail closed",
+        "rechecks planned source content before mutation",
+        "expected correctness and reliability",
+        "minimal error facts",
+        "one parser-ready read_files recovery call",
+        "inspect the resulting diff",
+        "validate the final source",
     ] {
         assert!(
             apply_text_edits_desc.contains(phrase),
             "apply_text_edits description should mention {phrase}: {apply_text_edits_desc}"
         );
     }
+    assert!(!apply_text_edits_desc.contains("canonical default guarded edit path"));
+    assert!(!apply_text_edits_desc.contains("expected_sha256"));
+    assert!(!apply_text_edits_desc.contains("prefer apply_patch"));
 
-    // Raw/external unified-diff path owns its own preflight and recovery semantics.
     let unified_diff_desc = desc("apply_unified_diff");
     for phrase in [
         "external raw unified-diff mutation path",
         "input is already a standard unified diff",
-        "ordinary model-generated edits",
-        "read_file/read_files followed by apply_text_edits",
-        "contextual or large patch-shaped changes use apply_patch",
+        "clearest reliable mutation",
         "bounded preflight",
         "never needs a separate validation call",
+        "rather than converting model-generated work into unified diff by default",
     ] {
         assert!(
             unified_diff_desc.contains(phrase),
@@ -276,26 +314,26 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         );
     }
 
-    // Whole-file write is not the ordinary local-edit default.
     let write_file_desc = desc("write_project_file");
     for phrase in [
-        "create new files",
-        "whole-file rewrites",
-        "ordinary model-generated changes",
-        "after read_file/read_files",
-        "prefer apply_text_edits",
-        "returned current sha",
-        "use apply_patch only when",
-        "not merely because many lines change",
-        "contextual or multi-hunk patch form",
-        "inspect current content",
-        "expected_sha256",
+        "create a new file",
+        "intentional whole-file replacement",
+        "expected_read_revision",
+        "model-facing snapshot handle",
+        "model does not copy a digest",
+        "minimal error facts",
+        "one parser-ready read_files recovery call",
+        "clearest reliable mutation",
+        "inspect the resulting diff",
+        "validate the final source",
     ] {
         assert!(
             write_file_desc.contains(phrase),
             "write_project_file description should mention {phrase}: {write_file_desc}"
         );
     }
+    assert!(!write_file_desc.contains("expected_sha256"));
+    assert!(!write_file_desc.contains("prefer apply_text_edits"));
 
     // The legacy single-purpose edit tools (replace_line_range, insert_at_line,
     // delete_line_range, replace_in_file, replace_exact_block,
@@ -341,7 +379,13 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "run_process preferred for one native executable with literal argv",
         "independent effects or failure/permission boundaries",
         "validation, commit, push, deploy, or restart",
-        "run_script for program-like loops",
+        "bounded deterministic python heredoc",
+        "first-class programmatic source-transformation path",
+        "do not use it to bypass project/path/permission policy",
+        "avoid network unless the task requires and authorizes it",
+        "inspect the diff and validate the final source",
+        "run_script does not imply python support",
+        "run_script for its supported program-like script languages",
         "same-process cwd/env/export/function/umask state",
         "one named ssh resource",
         "runner-owned",
@@ -378,14 +422,27 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let run_script_desc = desc("run_script");
     for phrase in [
-        "program-like shell content",
-        "loops",
-        "if/else branches",
-        "functions",
-        "traps",
-        "multi-stage scripts",
-        "owned by the current runner",
-        "outlive the current runner process",
+        "sh, bash, powershell, javascript, or typescript",
+        "node.js-backed",
+        ".mjs",
+        "native erasable type stripping",
+        ".mts",
+        "node.js 22.6+",
+        "does not type-check",
+        "enum",
+        "runner owns runtime selection/flags",
+        "does not install npm dependencies",
+        "relative esm imports resolve from the runner-owned temporary module",
+        "bun",
+        "deno",
+        "tsx",
+        "run tsc",
+        "run_process for native argv",
+        "run_script for program-like scripts",
+        "run_shell when shell grammar is required",
+        "same execution / same job",
+        "never restarted",
+        "outlive the runner",
         "run_detached_process",
     ] {
         assert!(
@@ -418,6 +475,8 @@ fn tool_specs_describe_default_coding_loop_preferences() {
         "replacement",
         "ownership is handed off before payload start",
         "expired keys are not retry tokens",
+        "workflow will restart, upgrade, stop, or replace this runner",
+        "duration alone is not a reason to detach",
     ] {
         assert!(
             detached_desc.contains(phrase),
@@ -536,7 +595,88 @@ fn removed_legacy_edit_tools_are_not_known_tools() {
 }
 
 #[test]
-fn edit_tool_surface_keeps_canonical_tools_visible_and_schemas_stable() {
+fn model_preference_upper_bounds_are_clamped_by_runtime_not_rejected_by_schema() {
+    let specs = registered_tool_specs();
+    let cases: &[(&str, &[&str])] = &[
+        ("run_process", &["timeout_secs", "sync_wait_secs"]),
+        ("run_detached_process", &["timeout_secs"]),
+        ("run_script", &["timeout_secs", "sync_wait_secs"]),
+        ("run_shell", &["timeout_secs"]),
+        ("session_shell_exec", &["timeout_secs"]),
+        ("observe_jobs", &["tail_lines", "wait_secs"]),
+        ("list_jobs", &["limit"]),
+        ("cargo_fmt", &["timeout_secs", "sync_wait_secs"]),
+        ("cargo_check", &["timeout_secs", "sync_wait_secs"]),
+        ("cargo_test", &["timeout_secs", "sync_wait_secs"]),
+        ("go_test", &["timeout_secs", "sync_wait_secs"]),
+        ("session_discussion_summary", &["limit"]),
+        ("workspace_hygiene_check", &["max_findings"]),
+        ("list_projects", &["limit"]),
+        ("list_session_messages", &["limit"]),
+        ("observe_session_messages", &["wait_secs", "limit"]),
+        ("validation_summary", &["limit"]),
+        ("session_handoff_summary", &["limit"]),
+        ("document_symbols", &["limit"]),
+        ("document_diagnostics", &["limit"]),
+        ("workspace_symbols", &["limit"]),
+        ("goto_definition", &["limit"]),
+        ("find_references", &["limit"]),
+        ("call_hierarchy", &["limit"]),
+        ("computer_list_windows", &["limit"]),
+        ("computer_list_displays", &["limit"]),
+        ("computer_list_applications", &["limit"]),
+        ("computer_accessibility_tree", &["max_depth", "max_nodes"]),
+        ("computer_find_elements", &["limit"]),
+        ("coding_agent_observe", &["wait_secs"]),
+        ("list_agent_tasks", &["limit"]),
+        ("list_agent_identities", &["limit"]),
+        ("list_conversations", &["limit"]),
+        ("read_conversation", &["limit"]),
+        ("list_agent_inbox", &["limit"]),
+    ];
+
+    for (tool_name, fields) in cases {
+        let spec = spec_named(&specs, tool_name);
+        for field in *fields {
+            let property = &spec.input_schema["properties"][*field];
+            assert!(
+                property.get("maximum").is_none(),
+                "{tool_name}.{field} must let the runtime clamp oversized preferences: {property}"
+            );
+            let description = property["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            assert!(
+                description.contains("clamp"),
+                "{tool_name}.{field} should document runtime clamping: {description}"
+            );
+        }
+    }
+}
+
+#[test]
+fn call_hierarchy_schema_keeps_traversal_strict_and_result_budget_clamped() {
+    let specs = registered_tool_specs();
+    let spec = spec_named(&specs, "call_hierarchy");
+    let properties = spec.input_schema["properties"].as_object().unwrap();
+
+    assert_eq!(properties["depth"]["minimum"], 1);
+    assert_eq!(properties["depth"]["maximum"], 2);
+    assert_eq!(properties["depth"]["default"], 1);
+
+    assert_eq!(properties["limit"]["minimum"], 1);
+    assert!(properties["limit"].get("maximum").is_none());
+    assert_eq!(properties["limit"]["default"], 50);
+    let description = properties["limit"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(description.contains("above 100"), "{description}");
+    assert!(description.contains("clamped to 100"), "{description}");
+}
+
+#[test]
+fn edit_tool_surface_keeps_mutation_options_visible_and_schemas_stable() {
     let specs = registered_tool_specs();
     let names: std::collections::BTreeSet<&str> =
         specs.iter().map(|spec| spec.name.as_str()).collect();
@@ -596,14 +736,11 @@ fn edit_tool_surface_keeps_canonical_tools_visible_and_schemas_stable() {
         "legacy strict_matching must not remain model-facing"
     );
     let patch_spec = spec_named(&specs, "apply_patch");
-    assert!(patch_spec.description.contains("preserves requested guard"));
-    assert!(patch_spec.description.contains("unique stays unique"));
+    assert!(patch_spec.description.contains("naturally patch-shaped"));
     assert!(patch_spec
         .description
-        .contains("exact_unique stays exact_unique"));
-    assert!(patch_spec
-        .description
-        .contains("never relax the stale-context/concurrency fence"));
+        .contains("preserve unique/exact_unique"));
+    assert!(patch_spec.description.contains("not the default recovery"));
     let patch_output = &patch_spec.output_schema["properties"]["output"]["properties"];
     assert!(
         patch_output.get("match_diagnostic").is_some(),
@@ -691,9 +828,9 @@ fn edit_tool_surface_keeps_canonical_tools_visible_and_schemas_stable() {
             "apply_patch edit summary must expose {field}"
         );
     }
-    assert!(patch_spec.description.contains("multiple chunks"));
-    assert!(patch_spec.description.contains("duplicate file operations"));
-    assert!(patch_spec.description.contains("never relax"));
+    assert!(patch_spec.description.contains("Transactional"));
+    assert!(patch_spec.description.contains("matching_mode_rejected"));
+    assert!(patch_spec.description.contains("weakening the guard"));
     let unified_diff = &spec_named(&specs, "apply_unified_diff").input_schema["properties"];
     for field in ["project", "diff", "deny_sensitive_paths"] {
         assert!(
@@ -741,6 +878,22 @@ fn session_tool_specs_describe_explicit_targeting() {
             .is_some(),
         "update_session_context must expose the named SSH resource field"
     );
+
+    let work = spec_named(&specs, "work_on_project");
+    let session_id_description = work.input_schema["properties"]["session_id"]["description"]
+        .as_str()
+        .expect("work_on_project session_id description")
+        .to_lowercase();
+    for phrase in [
+        "does not prove",
+        "fresh model context",
+        "include_* defaults true",
+    ] {
+        assert!(
+            session_id_description.contains(phrase),
+            "work_on_project session_id description should mention {phrase}: {session_id_description}"
+        );
+    }
     let update_desc = update.description.to_lowercase();
     for phrase in [
         "authorized project",
@@ -784,4 +937,39 @@ fn session_tool_specs_describe_explicit_targeting() {
             "removed Session tool leaked into specs: {removed}"
         );
     }
+}
+
+#[test]
+fn observe_jobs_wake_policy_schema_is_closed_and_compatible() {
+    let specs = registered_tool_specs();
+    let spec = specs
+        .iter()
+        .find(|spec| spec.name == "observe_jobs")
+        .unwrap();
+    let wake = &spec.input_schema["properties"]["wake_on"];
+    assert_eq!(
+        webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS,
+        100
+    );
+    assert_eq!(wake["enum"], serde_json::json!(["change", "terminal"]));
+    assert_eq!(wake["default"], "change");
+    assert!(!spec.input_schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("wake_on")));
+    for phrase in [
+        "No token",
+        "no wait_secs",
+        "wake_on=change",
+        "wake_on=terminal",
+        "wait_secs=100",
+        "changed=true",
+    ] {
+        assert!(spec.description.contains(phrase), "missing {phrase}");
+    }
+    let wait_description = spec.input_schema["properties"]["wait_secs"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(wait_description.contains("above 100 seconds"));
+    assert!(wait_description.contains("clamped to 100"));
 }

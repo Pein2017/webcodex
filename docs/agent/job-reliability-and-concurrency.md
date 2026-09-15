@@ -16,10 +16,10 @@ Three identities have different lifetimes:
 | Thing | Meaning | Expected across Control Server restart |
 |---|---|---|
 | MCP / HTTP request | One transport request or bounded wait | No. The connection/request may fail immediately. |
-| `job_id` | Identity of one already-dispatched execution | Yes, when the same reconciliation-capable Runner process survives and reports the Job in inventory. |
+| `job_id` | Identity of one already-dispatched execution | Active: when the same reconciliation-capable Runner process survives and reports inventory. Terminal public ordinary Jobs: also via the Server receipt within its original bounded retention window. |
 | `after_observation_token` | Opaque lifecycle and bounded log-delta state for one observed Job snapshot | No. Its Server epoch is process-local; a surviving Job should return a reset baseline and fresh token immediately after restart. |
 
-A dropped `observe_jobs`, `job_log`, or other MCP request therefore does **not**
+A dropped `observe_jobs`, `job_tail`, or other observation request therefore does **not**
 mean that the underlying Job was lost. The caller should keep the original
 `job_id` and observe authoritative Job state again before considering any retry.
 
@@ -59,6 +59,22 @@ the original command.
 
 A command that finishes while the Server is down is also recoverable when its
 terminal snapshot is still in the Runner's bounded retained inventory.
+
+The production Server also hydrates accepted public ordinary terminal receipts
+from `wc_job_receipts` before accepting traffic. Receipt writes happen after the
+registry lock is released and cannot change a terminal verdict. The receipt
+reuses the safe Job snapshot, excludes executable validation metadata, and fixes
+`terminal_observed_at` / `expires_at` at the first accepted terminal observation.
+SQLite retains at most 64 receipts per logical Runner for 15 minutes. Expired
+receipts are pruned on database open, writes, reads, and the existing recovery
+sweep. Historical owner attribution is independent of replacement registration.
+A new observation epoch resets old tokens without granting execution authority.
+
+Only Server-admitted Jobs with proven public visibility are receipt candidates.
+Inventory-only reconstruction retains its existing reconciliation behavior; it
+cannot prove whether an unknown Job was previously a hidden synchronous result,
+so it does not independently create a durable receipt. Receipt hydration never
+creates a pending request, execution mapping, waiter, or stop/retry/adopt lease.
 
 ### What is expected and what is a bug
 
@@ -208,8 +224,8 @@ consulting structured lifecycle state.
 
 ### Job observation tools
 
-For `job_status`, `job_log`, `job_tail`, and `observe_jobs`, the top-level
-description plus observation-field schemas should make clear that:
+For `job_tail` and `observe_jobs`, the top-level description plus
+observation-field schemas should make clear that:
 
 - observation never launches or retries the Job;
 - `wait_secs` is one bounded wait, not a subscription;
@@ -225,6 +241,28 @@ description plus observation-field schemas should make clear that:
   reconciled;
 - `unknown_job` after same-process reconciliation is a diagnostic signal, not an
   automatic instruction to create a replacement Job.
+
+`observe_jobs` adds an optional `wake_on` policy: `change` is the compatible
+wire default and wakes on any observable update. `terminal` coalesces ordinary
+stdout/stderr/progress/activity changes until any watched Job is terminal, an
+item errors, or one shared absolute deadline expires. It never returns an
+`updated` wake reason: at the deadline `wait.outcome=timeout` can coexist with
+`changed=true`. Item errors take precedence over terminal, then timeout.
+
+Canonical execution handoffs suggest `wait_secs=100, wake_on=terminal`. This is
+a maximum wait, so terminal completion wakes immediately. Any missing token
+still gives an immediate baseline, and omitting `wait_secs` gives an immediate
+observation. Each Job waiter advances a private opaque cursor on non-terminal
+updates; final bounded deltas always use the caller's original token. Waiters
+use canonical Notify/revision rechecks, without a periodic polling heartbeat;
+updates neither recreate other Jobs' waiters nor extend the batch deadline.
+
+Workflow Session records retain every `observe_jobs` interaction for audit and
+validation evidence. Runtime Console treats these calls as observation
+transport: they are excluded from current/last Activity, the detail timeline,
+and work run counts. `running_call` still reports an unfinished transport call.
+Original Job handoff Activities remain historical snapshots; observing a
+terminal Job does not rewrite them or join live Registry state into Activity.
 
 ### Runtime/operator observation tools
 

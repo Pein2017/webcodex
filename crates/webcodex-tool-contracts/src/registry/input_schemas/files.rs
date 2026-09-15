@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use super::common::{object_schema, with_optional_session_id};
 
 pub fn list_project_files_input_schema() -> Value {
-    object_schema(with_optional_session_id(vec![
+    let mut schema = object_schema(with_optional_session_id(vec![
         ("project", "string", "Runner-registered project id.", true),
         (
             "path",
@@ -14,10 +14,20 @@ pub fn list_project_files_input_schema() -> Value {
         (
             "limit",
             "integer",
-            "Maximum number of entries to return.",
+            "Maximum number of entries to return; runtime clamps to 1..500 (default 200).",
             false,
         ),
-    ]))
+        (
+            "offset",
+            "integer",
+            "Zero-based entry offset for deterministic paging; use next_offset from the previous page.",
+            false,
+        ),
+    ]));
+    schema["properties"]["limit"]["default"] = json!(200);
+    schema["properties"]["offset"]["minimum"] = json!(0);
+    schema["properties"]["offset"]["default"] = json!(0);
+    schema
 }
 
 pub fn list_project_tracked_files_input_schema() -> Value {
@@ -91,7 +101,7 @@ pub fn project_overview_input_schema() -> Value {
     schema
 }
 
-pub fn search_project_text_input_schema() -> Value {
+fn search_project_text_query_schema() -> Value {
     let mut schema = object_schema(with_optional_session_id(vec![
         ("project", "string", "Runner-registered project id.", true),
         (
@@ -179,7 +189,7 @@ pub fn search_project_text_input_schema() -> Value {
 }
 
 pub fn search_project_texts_input_schema() -> Value {
-    let single = search_project_text_input_schema();
+    let single = search_project_text_query_schema();
     let mut query_properties = single["properties"]
         .as_object()
         .expect("search_project_text properties")
@@ -201,7 +211,7 @@ pub fn search_project_texts_input_schema() -> Value {
         (
             "max_result_bytes",
             "integer",
-            "Optional primary model-facing batch projection budget in bytes. Defaults to 64 KiB and caps at 256 KiB. Continuation is whole-query via next_index; if the first remaining query cannot fit, raise this budget or narrow that query's limit/context/path. Independently bounded Session/continuity overlays remain outside this budget.",
+            "Optional primary model-facing batch projection budget in bytes. Defaults to 64 KiB. Any recognized nonnegative integer is accepted and runtime-clamped to the fixed 8..512 KiB inspection bounds. Continuation is whole-query via next_index; if the first remaining query cannot fit, raise this budget or narrow that query's limit/context/path. Independently bounded Session/continuity overlays remain outside this budget.",
             false,
         ),
     ]));
@@ -217,28 +227,10 @@ pub fn search_project_texts_input_schema() -> Value {
             "properties": query_properties,
         }
     });
-    schema["properties"]["max_result_bytes"]["minimum"] =
-        json!(webcodex_core::runtime_contract::MIN_SEARCH_PROJECT_TEXTS_RESULT_BYTES);
-    schema["properties"]["max_result_bytes"]["maximum"] =
-        json!(webcodex_core::runtime_contract::FILE_READ_MAX_SERIALIZED_OUTPUT_BYTES);
+    schema["properties"]["max_result_bytes"]["minimum"] = json!(0);
     schema["properties"]["max_result_bytes"]["default"] =
         json!(webcodex_core::runtime_contract::DEFAULT_SEARCH_PROJECT_TEXTS_RESULT_BYTES);
     schema
-}
-
-pub fn read_file_input_schema() -> Value {
-    object_schema(with_optional_session_id(vec![
-        ("project", "string", "Configured project id.", true),
-        ("path", "string", "Project-relative file path.", true),
-        ("start_line", "integer", "1-based line offset.", false),
-        ("limit", "integer", "Maximum line count.", false),
-        (
-            "with_line_numbers",
-            "boolean",
-            "When true, return the single text field in numbered format instead of plain format.",
-            false,
-        ),
-    ]))
 }
 
 pub fn read_files_input_schema() -> Value {
@@ -259,7 +251,7 @@ pub fn read_files_input_schema() -> Value {
         (
             "max_result_bytes",
             "integer",
-            "Optional primary model-facing batch projection budget in bytes. Defaults to 64 KiB; raise only for explicit broad/deep reads, up to 256 KiB. If the current budget cannot return any part of the first remaining item, the result supplies a bounded increase_result_budget suggested call; otherwise batch continuation reuses the current budget. Independently bounded Session/continuity protocol overlays are preserved outside this budget.",
+            "Optional primary model-facing batch projection budget in bytes. Defaults to 64 KiB. Any recognized nonnegative integer is accepted and runtime-clamped to the fixed 8..512 KiB inspection bounds; raise the effective budget only for explicit broad/deep reads. If the current budget cannot return any part of the first remaining item, the result supplies a bounded increase_result_budget suggested call; otherwise batch continuation reuses the current effective budget. Independently bounded Session/continuity protocol overlays are preserved outside this budget.",
             false,
         ),
     ]));
@@ -280,19 +272,22 @@ pub fn read_files_input_schema() -> Value {
                 },
                 "start_line": {
                     "type": "integer",
-                    "description": "Optional 1-based line offset; normalized exactly like read_file."
+                    "description": "Optional 1-based line offset; normalized by the canonical file-read range rules."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Optional maximum line count; normalized exactly like read_file."
+                    "description": "Optional maximum line count; normalized by the canonical file-read range rules."
+                },
+                "expected_read_revision": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991_u64,
+                    "description": "Optional full-file snapshot fence for this exact Project/path. Normal callers should not invent or manually transfer this value: Runtime places it in parser-ready read_files suggested_call items when a partial range must continue. If supplied, Runtime rejects the item when that snapshot is no longer current."
                 }
             }
         }
     });
-    schema["properties"]["max_result_bytes"]["minimum"] =
-        json!(webcodex_core::runtime_contract::MIN_READ_FILES_RESULT_BYTES);
-    schema["properties"]["max_result_bytes"]["maximum"] =
-        json!(webcodex_core::runtime_contract::FILE_READ_MAX_SERIALIZED_OUTPUT_BYTES);
+    schema["properties"]["max_result_bytes"]["minimum"] = json!(0);
     schema["properties"]["max_result_bytes"]["default"] =
         json!(webcodex_core::runtime_contract::DEFAULT_READ_FILES_RESULT_BYTES);
     schema

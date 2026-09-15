@@ -41,6 +41,83 @@ fn from_tool_name_parses_unit_tools_with_empty_object() {
 }
 
 #[test]
+fn heartbeat_agent_task_attempt_parses_optional_active_turn_proof() {
+    let base = json!({
+        "task_id": format!("wc_agent_task_{}", "1".repeat(32)),
+        "attempt_id": format!("wc_agent_task_attempt_{}", "2".repeat(32)),
+        "assignee_agent_id": format!("wc_dagent_{}", "3".repeat(32)),
+        "attempt_fence": format!("wc_agent_task_fence_{}", "4".repeat(32)),
+        "attempt_controller_generation": 7,
+    });
+    let ordinary = ToolCall::from_tool_name("heartbeat_agent_task_attempt", base.clone()).unwrap();
+    assert!(matches!(
+        ordinary,
+        ToolCall::HeartbeatAgentTaskAttempt {
+            active_turn_wake_id: None,
+            active_turn_consume_token: None,
+            ..
+        }
+    ));
+
+    let mut with_proof = base;
+    with_proof["active_turn_wake_id"] = json!(format!("wc_wake_{}", "5".repeat(32)));
+    with_proof["active_turn_consume_token"] = json!(format!("wc_wake_consume_{}", "6".repeat(32)));
+    let renewed = ToolCall::from_tool_name("heartbeat_agent_task_attempt", with_proof).unwrap();
+    assert!(matches!(
+        renewed,
+        ToolCall::HeartbeatAgentTaskAttempt {
+            active_turn_wake_id: Some(ref wake_id),
+            active_turn_consume_token: Some(ref consume_token),
+            ..
+        } if wake_id.starts_with("wc_wake_") && consume_token.starts_with("wc_wake_consume_")
+    ));
+}
+
+#[test]
+fn agent_wait_calls_parse_closed_selectors_and_keep_audit_payload_free() {
+    const PRIVATE_TASK: &str = "wc_agent_task_abcdefabcdefabcdefabcdefabcdefab";
+    const PRIVATE_KEY: &str = "PRIVATE_WAIT_KEY_MUST_NOT_PERSIST";
+    let call = ToolCall::from_tool_name(
+        "wait_for_agent_events",
+        json!({
+            "agent_id": "wc_dagent_0123456789abcdef0123456789abcdef",
+            "endpoint_id": "wc_endpoint_0123456789abcdef0123456789abcdef",
+            "expected_controller_generation": 4,
+            "events": [{"kind":"agent_task_terminal","task_id":PRIVATE_TASK}],
+            "idempotency_key": PRIVATE_KEY,
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        call,
+        ToolCall::WaitForAgentEvents {
+            expected_controller_generation: 4,
+            ref events,
+            ..
+        } if events.len() == 1 && events[0].kind == "agent_task_terminal" && events[0].task_id == PRIVATE_TASK
+    ));
+    let audit = call.session_log_arguments();
+    assert_eq!(audit["event_count"], 1);
+    assert_eq!(audit["idempotency_key_present"], true);
+    let audit_text = audit.to_string();
+    assert!(!audit_text.contains(PRIVATE_TASK));
+    assert!(!audit_text.contains(PRIVATE_KEY));
+
+    let read = ToolCall::from_tool_name(
+        "read_agent_wait",
+        json!({"wait_id": format!("wc_agent_wait_{}", "6".repeat(32))}),
+    )
+    .unwrap();
+    assert!(matches!(read, ToolCall::ReadAgentWait { .. }));
+    let state = ToolCall::from_tool_name(
+        "agent_wait_state",
+        json!({"wait_id": format!("wc_agent_wait_{}", "6".repeat(32))}),
+    )
+    .unwrap();
+    assert!(matches!(state, ToolCall::AgentWaitState { .. }));
+}
+
+#[test]
 fn runner_config_tools_parse_closed_contracts_and_keep_governance_split() {
     use webcodex_tool_contracts::{
         RunnerCapabilityRequirement, ToolApprovalPolicy, ToolEffect, ToolIdempotency, ToolRisk,
@@ -223,24 +300,58 @@ fn from_tool_name_parses_bounded_list_tools_options() {
 }
 
 #[test]
+fn call_hierarchy_parser_preserves_default_and_oversized_positive_limit_for_runtime_normalization()
+{
+    let omitted = ToolCall::from_tool_name(
+        "call_hierarchy",
+        json!({
+            "project": "agent:test:demo",
+            "path": "src/main.rs",
+            "line": 1,
+            "column": 1
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        omitted,
+        ToolCall::CallHierarchy {
+            direction: webcodex_core::lsp_bridge::CallHierarchyDirection::Both,
+            depth: 1,
+            limit: 50,
+            ..
+        }
+    ));
+
+    let oversized = ToolCall::from_tool_name(
+        "call_hierarchy",
+        json!({
+            "project": "agent:test:demo",
+            "path": "src/main.rs",
+            "line": 1,
+            "column": 1,
+            "limit": 500
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        oversized,
+        ToolCall::CallHierarchy { limit: 500, .. }
+    ));
+}
+
+#[test]
 fn from_tool_name_records_and_strips_testing_metadata_before_parsing() {
     let (call, metadata) = ToolCall::from_tool_name_with_recorder_metadata(
-        "job_status",
+        "list_jobs",
         json!({
-            "job_id": "abc",
+            "status": "failed",
             "expected_failure": true,
             "expected_failure_kind": "job_not_found",
             "assertion_name": "missing job negative path"
         }),
     )
     .unwrap();
-    assert!(matches!(
-        call,
-        ToolCall::JobStatus {
-            ref job_id,
-            include_command_preview: false,
-        } if job_id == "abc"
-    ));
+    assert!(matches!(call, ToolCall::ListJobs { .. }));
     assert!(metadata.expectation.expected_failure);
     assert_eq!(
         metadata.expectation.expected_failure_kind.as_deref(),
@@ -292,6 +403,72 @@ fn from_tool_name_records_public_result_expectations_before_parsing() {
 }
 
 #[test]
+fn cargo_test_lib_false_canonicalizes_to_omission_and_true_is_preserved() {
+    for arguments in [
+        json!({"project": "demo"}),
+        json!({"project": "demo", "lib": false}),
+    ] {
+        let call = ToolCall::from_tool_name("cargo_test", arguments).unwrap();
+        assert!(matches!(call, ToolCall::CargoTest { lib: None, .. }));
+    }
+
+    let call =
+        ToolCall::from_tool_name("cargo_test", json!({"project": "demo", "lib": true})).unwrap();
+    assert!(matches!(
+        call,
+        ToolCall::CargoTest {
+            lib: Some(true),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn tool_manifest_default_flows_follow_discovery_shape() {
+    for arguments in [
+        json!({"tool_name": "cargo_test"}),
+        json!({"tool_name": "cargo_test", "include_recommended_flows": false}),
+    ] {
+        let call = ToolCall::from_tool_name("tool_manifest", arguments).unwrap();
+        assert!(matches!(
+            call,
+            ToolCall::ToolManifest {
+                include_recommended_flows: false,
+                ..
+            }
+        ));
+    }
+
+    let exact_opt_in = ToolCall::from_tool_name(
+        "tool_manifest",
+        json!({"tool_name": "cargo_test", "include_recommended_flows": true}),
+    )
+    .unwrap();
+    assert!(matches!(
+        exact_opt_in,
+        ToolCall::ToolManifest {
+            include_recommended_flows: true,
+            ..
+        }
+    ));
+
+    for arguments in [
+        json!({}),
+        json!({"category": "validation"}),
+        json!({"intent": "coding"}),
+    ] {
+        let call = ToolCall::from_tool_name("tool_manifest", arguments).unwrap();
+        assert!(matches!(
+            call,
+            ToolCall::ToolManifest {
+                include_recommended_flows: true,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
 fn from_tool_name_rejects_unsafe_result_expectation_combinations() {
     let invalid = [
         (
@@ -334,9 +511,8 @@ fn from_tool_name_rejects_unsafe_result_expectation_combinations() {
             }),
         ),
         (
-            "job_status",
+            "list_jobs",
             json!({
-                "job_id": "job-1",
                 "result_expectation": "observe"
             }),
         ),
@@ -354,24 +530,18 @@ fn from_tool_name_rejects_unsafe_result_expectation_combinations() {
 }
 
 #[test]
-fn from_tool_name_does_not_treat_removed_failure_kind_alias_as_metadata() {
-    let (call, metadata) = ToolCall::from_tool_name_with_recorder_metadata(
-        "job_status",
+fn from_tool_name_rejects_removed_failure_kind_alias_as_tool_input() {
+    let error = ToolCall::from_tool_name_with_recorder_metadata(
+        "list_jobs",
         json!({
-            "job_id": "abc",
             "expected_failure": true,
             "test_expect_failure_kind": "job_not_found",
             "assertion_name": "removed alias"
         }),
     )
-    .unwrap();
-    assert!(matches!(call, ToolCall::JobStatus { .. }));
-    assert!(metadata.expectation.expected_failure);
-    assert_eq!(metadata.expectation.expected_failure_kind, None);
-    assert_eq!(
-        metadata.expectation.assertion_name.as_deref(),
-        Some("removed alias")
-    );
+    .unwrap_err();
+    assert!(error.contains("test_expect_failure_kind"), "{error}");
+    assert!(error.contains("unknown field"), "{error}");
 }
 
 #[test]
@@ -447,7 +617,7 @@ fn from_tool_name_parses_run_shell_with_required_fields() {
 fn from_tool_name_parses_run_shell_with_optional_fields() {
     let call = ToolCall::from_tool_name(
         "run_shell",
-        json!({"project": "demo", "command": "ls", "timeout_secs": 5, "cwd": "sub"}),
+        json!({"project": "demo", "command": "ls", "timeout_secs": 180, "cwd": "sub"}),
     )
     .unwrap();
     match call {
@@ -460,7 +630,7 @@ fn from_tool_name_parses_run_shell_with_optional_fields() {
         } => {
             assert_eq!(project, "demo");
             assert_eq!(command, "ls");
-            assert_eq!(timeout_secs, Some(5));
+            assert_eq!(timeout_secs, Some(180));
             assert_eq!(cwd, Some("sub".to_string()));
         }
         other => panic!("expected RunShell, got {:?}", other),
@@ -486,15 +656,13 @@ fn structured_validation_sync_wait_parser_enforces_lifecycle_bounds() {
             "cargo_fmt",
             json!({"project": "demo", "check": true, "timeout_secs": 60, "sync_wait_secs": 60}),
         ),
-    ] {
-        ToolCall::from_tool_name(name, arguments)
-            .unwrap_or_else(|error| panic!("{name} valid sync wait should parse: {error}"));
-    }
-
-    for (name, arguments) in [
         (
-            "cargo_check",
-            json!({"project": "demo", "timeout_secs": 600, "sync_wait_secs": 0}),
+            "cargo_fmt",
+            json!({"project": "demo", "check": false, "timeout_secs": 60, "sync_wait_secs": 1}),
+        ),
+        (
+            "cargo_fmt",
+            json!({"project": "demo", "timeout_secs": 60, "sync_wait_secs": 60}),
         ),
         (
             "cargo_test",
@@ -504,17 +672,54 @@ fn structured_validation_sync_wait_parser_enforces_lifecycle_bounds() {
             "go_test",
             json!({"project": "demo", "timeout_secs": 30, "sync_wait_secs": 31}),
         ),
+    ] {
+        ToolCall::from_tool_name(name, arguments)
+            .unwrap_or_else(|error| panic!("{name} valid sync wait should parse: {error}"));
+    }
+
+    let check = ToolCall::from_tool_name(
+        "cargo_fmt",
+        json!({"project": "demo", "check": true, "timeout_secs": 60, "sync_wait_secs": 60}),
+    )
+    .unwrap();
+    assert!(matches!(
+        check,
+        ToolCall::CargoFmt {
+            check: Some(true),
+            sync_wait_secs: Some(60),
+            ..
+        }
+    ));
+    for arguments in [
+        json!({"project": "demo", "check": false, "timeout_secs": 60, "sync_wait_secs": 1}),
+        json!({"project": "demo", "timeout_secs": 60, "sync_wait_secs": 60}),
+    ] {
+        let ensure = ToolCall::from_tool_name("cargo_fmt", arguments).unwrap();
+        assert!(matches!(
+            ensure,
+            ToolCall::CargoFmt {
+                sync_wait_secs: None,
+                ..
+            }
+        ));
+    }
+
+    for (name, arguments) in [
         (
-            "cargo_fmt",
-            json!({"project": "demo", "check": false, "timeout_secs": 60, "sync_wait_secs": 1}),
+            "cargo_check",
+            json!({"project": "demo", "timeout_secs": 600, "sync_wait_secs": 0}),
         ),
         (
             "cargo_fmt",
-            json!({"project": "demo", "timeout_secs": 60, "sync_wait_secs": 1}),
+            json!({"project": "demo", "check": false, "timeout_secs": 60, "sync_wait_secs": 0}),
+        ),
+        (
+            "cargo_fmt",
+            json!({"project": "demo", "timeout_secs": 60, "sync_wait_secs": 0}),
         ),
     ] {
-        let error = ToolCall::from_tool_name(name, arguments)
-            .expect_err("invalid structured validation sync wait must fail closed");
+        let error =
+            ToolCall::from_tool_name(name, arguments).expect_err("zero sync wait must fail closed");
         assert!(error.contains("sync_wait_secs"), "{name}: {error}");
     }
 }
@@ -583,45 +788,13 @@ fn from_tool_name_parses_structured_run_process_boundaries() {
 }
 
 #[test]
-fn from_tool_name_parses_job_status_and_job_log() {
-    let call = ToolCall::from_tool_name("job_status", json!({"job_id": "abc"})).unwrap();
-    assert!(matches!(
-        call,
-        ToolCall::JobStatus {
-            ref job_id,
-            include_command_preview: false,
-        } if job_id == "abc"
-    ));
-
-    let call = ToolCall::from_tool_name(
-        "job_status",
-        json!({"job_id": "abc", "include_command_preview": true}),
-    )
-    .unwrap();
-    assert!(matches!(
-        call,
-        ToolCall::JobStatus {
-            ref job_id,
-            include_command_preview: true,
-        } if job_id == "abc"
-    ));
-
-    let call = ToolCall::from_tool_name("job_log", json!({"job_id": "abc", "offset": 10})).unwrap();
-    match call {
-        ToolCall::JobLog {
-            job_id,
-            offset,
-            tail_lines,
-            after_observation_token,
-            wait_secs,
-        } => {
-            assert_eq!(job_id, "abc");
-            assert_eq!(offset, Some(10));
-            assert_eq!(tail_lines, None);
-            assert_eq!(after_observation_token, None);
-            assert_eq!(wait_secs, None);
-        }
-        other => panic!("expected JobLog, got {:?}", other),
+fn from_tool_name_rejects_retired_job_status_and_job_log() {
+    for (name, args) in [
+        ("job_status", json!({"job_id": "abc"})),
+        ("job_log", json!({"job_id": "abc", "offset": 10})),
+    ] {
+        let error = ToolCall::from_tool_name(name, args).unwrap_err();
+        assert!(error.contains("unknown tool"), "{name}: {error}");
     }
 }
 
@@ -661,47 +834,19 @@ fn from_tool_name_parses_stop_job_with_default_confirmation_false() {
 }
 
 #[test]
-fn from_tool_name_parses_read_file_and_git_tools() {
-    let call =
+fn from_tool_name_rejects_retired_inspection_tools_and_parses_retained_git_tools() {
+    let error =
         ToolCall::from_tool_name("read_file", json!({"project": "demo", "path": "README.md"}))
-            .unwrap();
-    assert!(matches!(call, ToolCall::ReadFile { .. }));
-
-    let call = ToolCall::from_tool_name(
-        "read_file",
-        json!({
-            "project": "demo",
-            "path": "src/main.rs",
-            "start_line": 10,
-            "limit": 3,
-            "with_line_numbers": true
-        }),
-    )
-    .unwrap();
-    match call {
-        ToolCall::ReadFile {
-            project,
-            path,
-            start_line,
-            limit,
-            with_line_numbers,
-            ..
-        } => {
-            assert_eq!(project, "demo");
-            assert_eq!(path, "src/main.rs");
-            assert_eq!(start_line, Some(10));
-            assert_eq!(limit, Some(3));
-            assert_eq!(with_line_numbers, Some(true));
-        }
-        other => panic!("expected ReadFile, got {:?}", other),
-    }
+            .unwrap_err();
+    assert!(error.contains("unknown tool"), "{error}");
 
     let call = ToolCall::from_tool_name("git_status", json!({"project": "demo"})).unwrap();
     assert!(matches!(call, ToolCall::GitStatus { .. }));
 
-    let call = ToolCall::from_tool_name("git_diff", json!({"project": "demo", "args": ["--stat"]}))
-        .unwrap();
-    assert!(matches!(call, ToolCall::GitDiff { .. }));
+    for name in ["git_diff", "git_diff_summary"] {
+        let error = ToolCall::from_tool_name(name, json!({"project": "demo"})).unwrap_err();
+        assert!(error.contains("unknown tool"), "{name}: {error}");
+    }
 
     let call = ToolCall::from_tool_name(
         "apply_unified_diff",
@@ -713,6 +858,28 @@ fn from_tool_name_parses_read_file_and_git_tools() {
     let call =
         ToolCall::from_tool_name("run_job", json!({"project": "demo", "command": "make"})).unwrap();
     assert!(matches!(call, ToolCall::RunJob { .. }));
+}
+
+#[test]
+fn continuation_endpoint_rotation_has_canonical_and_legacy_tool_names() {
+    let args = json!({
+        "agent_id": format!("wc_dagent_{}", "a".repeat(32)),
+        "host": "ChatGPT",
+        "client_attachment_id": "window-a",
+        "idempotency_key": "rotate-endpoint-1"
+    });
+
+    let canonical =
+        ToolCall::from_tool_name("rotate_agent_continuation_endpoint", args.clone()).unwrap();
+    assert_eq!(canonical.tool_name(), "rotate_agent_continuation_endpoint");
+    assert!(matches!(
+        canonical,
+        ToolCall::RotateAgentContinuationEndpoint { .. }
+    ));
+
+    let legacy = ToolCall::from_tool_name("attach_agent_endpoint", args).unwrap();
+    assert_eq!(legacy.tool_name(), "attach_agent_endpoint");
+    assert!(matches!(legacy, ToolCall::AttachAgentEndpoint { .. }));
 }
 
 #[test]
@@ -730,7 +897,7 @@ fn from_tool_name_rejects_missing_required_field() {
         err
     );
 
-    let err = ToolCall::from_tool_name("job_status", json!({})).unwrap_err();
+    let err = ToolCall::from_tool_name("job_tail", json!({})).unwrap_err();
     assert!(err.contains("job_id"));
 }
 
@@ -835,12 +1002,12 @@ fn from_tool_name_unknown_tool_lists_available_tools_and_hint() {
     let err = ToolCall::from_tool_name("definitely_not_a_tool", Value::Null).unwrap_err();
     assert!(err.contains("definitely_not_a_tool"));
     assert!(
-        err.contains("listRuntimeTools") || err.contains("list_tools"),
-        "unknown-tool error should hint at discovery: {}",
+        err.contains("tool_manifest") && err.contains("tool_name"),
+        "unknown-tool error should hint at canonical discovery: {}",
         err
     );
     // Should list at least a couple of known tool names.
-    assert!(err.contains("git_diff_summary"));
+    assert!(err.contains("show_changes"));
     assert!(err.contains("apply_unified_diff"));
     // Must not leak secret/config artifacts.
     let lower = err.to_lowercase();
@@ -1240,87 +1407,64 @@ fn project_overview_tool_call_parses() {
 
 #[test]
 fn from_tool_name_parses_phase_a_tools() {
-    let call = ToolCall::from_tool_name("list_project_files", json!({"project": "demo"})).unwrap();
+    let call = ToolCall::from_tool_name(
+        "list_project_files",
+        json!({"project": "demo", "limit": 50, "offset": 75}),
+    )
+    .unwrap();
     match call {
         ToolCall::ListProjectFiles {
             project,
             path,
             limit,
+            offset,
             ..
         } => {
             assert_eq!(project, "demo");
             assert_eq!(path, None);
-            assert_eq!(limit, None);
+            assert_eq!(limit, Some(50));
+            assert_eq!(offset, Some(75));
         }
         other => panic!("expected ListProjectFiles, got {:?}", other),
     }
 
-    let call = ToolCall::from_tool_name(
+    let error = ToolCall::from_tool_name(
         "search_project_text",
+        json!({"project": "demo", "pattern": "fn main"}),
+    )
+    .unwrap_err();
+    assert!(error.contains("unknown tool"), "{error}");
+
+    let call = ToolCall::from_tool_name(
+        "search_project_texts",
         json!({
             "project": "demo",
-            "pattern": "fn main",
-            "limit": 5,
-            "context_before": 3,
-            "context_after": 8,
-            "include_globs": ["**/*.rs"],
-            "exclude_globs": ["vendor/**"],
-            "result_mode": "count",
-            "timeout_secs": 45
+            "queries": [{
+                "pattern": "fn main",
+                "limit": 5,
+                "context_before": 3,
+                "context_after": 8,
+                "include_globs": ["**/*.rs"],
+                "exclude_globs": ["vendor/**"],
+                "result_mode": "count",
+                "timeout_secs": 45
+            }]
         }),
     )
     .unwrap();
-    match call {
-        ToolCall::SearchProjectText {
-            project,
-            pattern,
-            path,
-            limit,
-            context_before,
-            context_after,
-            include_globs,
-            exclude_globs,
-            result_mode,
-            timeout_secs,
-            ..
-        } => {
-            assert_eq!(project, "demo");
-            assert_eq!(pattern, "fn main");
-            assert_eq!(path, None);
-            assert_eq!(limit, Some(5));
-            assert_eq!(context_before, Some(3));
-            assert_eq!(context_after, Some(8));
-            assert_eq!(include_globs, Some(vec!["**/*.rs".to_string()]));
-            assert_eq!(exclude_globs, Some(vec!["vendor/**".to_string()]));
-            assert_eq!(result_mode, Some(SearchResultMode::Count));
-            assert_eq!(timeout_secs, Some(45));
-        }
-        other => panic!("expected SearchProjectText, got {:?}", other),
-    }
+    assert!(matches!(
+        call,
+        ToolCall::SearchProjectTexts { ref project, ref queries, .. }
+            if project == "demo"
+                && queries.len() == 1
+                && queries[0].result_mode == Some(SearchResultMode::Count)
+                && queries[0].timeout_secs == Some(45)
+    ));
 
-    let legacy_call = ToolCall::from_tool_name(
-        "search_project_text",
-        json!({"project": "demo", "pattern": "ToolManifest"}),
-    )
-    .unwrap();
-    match legacy_call {
-        ToolCall::SearchProjectText {
-            result_mode,
-            include_globs,
-            exclude_globs,
-            timeout_secs,
-            ..
-        } => {
-            assert_eq!(result_mode, None);
-            assert_eq!(include_globs, None);
-            assert_eq!(exclude_globs, None);
-            assert_eq!(timeout_secs, None);
-        }
-        other => panic!("expected legacy SearchProjectText, got {other:?}"),
+    for name in ["job_status", "job_log", "git_diff", "git_diff_summary"] {
+        let error = ToolCall::from_tool_name(name, json!({})).unwrap_err();
+        assert!(error.contains("unknown tool"), "{name}: {error}");
     }
-
-    let call = ToolCall::from_tool_name("git_diff_summary", json!({"project": "demo"})).unwrap();
-    assert!(matches!(call, ToolCall::GitDiffSummary { project, .. } if project == "demo"));
 
     // list_jobs has only optional fields; null arguments must still parse.
     let call = ToolCall::from_tool_name("list_jobs", Value::Null).unwrap();
@@ -1465,12 +1609,12 @@ fn from_tool_name_parses_write_project_file() {
     .unwrap();
     assert!(matches!(
         write,
-        ToolCall::WriteProjectFile { project, path, content, overwrite, expected_sha256, .. }
+        ToolCall::WriteProjectFile { project, path, content, overwrite, expected_read_revision, .. }
             if project == "agent:c:p"
             && path == "new.txt"
             && content == "hello"
             && overwrite.is_none()
-            && expected_sha256.is_none()
+            && expected_read_revision.is_none()
     ));
 }
 
@@ -1483,14 +1627,14 @@ fn from_tool_name_rejects_retired_write_prefix_guard() {
             "path": "existing.txt",
             "content": "replacement",
             "overwrite": true,
-            "expected_sha256": "a".repeat(64),
+            "expected_read_revision": 3817291045227_u64,
             "expected_content_prefix": "legacy"
         }),
     )
     .expect_err("retired prefix guard must fail before dispatch");
     assert!(error.contains("expected_content_prefix"), "{error}");
     assert!(error.contains("no longer supported"), "{error}");
-    assert!(error.contains("expected_sha256"), "{error}");
+    assert!(error.contains("expected_read_revision"), "{error}");
 }
 
 #[test]
@@ -1620,4 +1764,57 @@ fn create_project_rejects_retired_allow_existing_empty_with_migration_hint() {
     .expect_err("retired empty-directory adoption field must fail closed");
     assert!(error.contains("allow_existing_empty"), "{error}");
     assert!(error.contains("adopt_existing_empty"), "{error}");
+}
+
+#[test]
+fn agent_continuation_bind_parses_required_view_fence_and_omits_it_from_audit() {
+    let binding_id = format!("wc_host_binding_{}", "a0".repeat(16));
+    let mut args = json!({
+        "agent_id": format!("wc_dagent_{}", "a".repeat(32)),
+        "endpoint_id": format!("wc_endpoint_{}", "b".repeat(32)),
+        "expected_controller_generation": 1,
+        "binding_id": binding_id,
+    });
+    let call = ToolCall::from_tool_name("agent_continuation_bind", args.clone()).unwrap();
+    assert!(
+        matches!(&call, ToolCall::AgentContinuationBind { binding_id: parsed, .. } if parsed == &binding_id)
+    );
+    let audit =
+        crate::tool_audit::session_log_arguments_for_tool_request("agent_continuation_bind", &args)
+            .to_string();
+    assert!(!audit.contains("binding_id"));
+    assert!(!audit.contains(&binding_id));
+    args.as_object_mut().unwrap().remove("binding_id");
+    assert!(ToolCall::from_tool_name("agent_continuation_bind", args).is_err());
+}
+
+#[test]
+fn observe_jobs_wake_policy_defaults_validates_and_audits_safely() {
+    for (policy, expected) in [
+        (None, ObserveJobsWakeOn::Change),
+        (Some("change"), ObserveJobsWakeOn::Change),
+        (Some("terminal"), ObserveJobsWakeOn::Terminal),
+    ] {
+        let mut args = json!({
+            "items": [{"job_id": "job", "after_observation_token": "private-observation-cursor"}],
+            "wait_secs": 1
+        });
+        if let Some(policy) = policy {
+            args["wake_on"] = json!(policy);
+        }
+        let call = ToolCall::from_tool_name("observe_jobs", args.clone()).unwrap();
+        assert!(matches!(&call, ToolCall::ObserveJobs { wake_on, .. } if *wake_on == expected));
+        let audit = call.session_log_arguments();
+        assert_eq!(audit["wake_on"], serde_json::to_value(expected).unwrap());
+        assert!(!audit.to_string().contains("private-observation-cursor"));
+    }
+    for policy in [
+        json!("unknown-private-value"),
+        json!(null),
+        json!(1),
+        json!({"bad": true}),
+    ] {
+        let args = json!({"items": [{"job_id": "job"}], "wake_on": policy});
+        assert!(ToolCall::from_tool_name("observe_jobs", args.clone()).is_err());
+    }
 }

@@ -40,6 +40,15 @@ const DEFAULT_PERSISTENT_SHELL_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 const MIN_PERSISTENT_SHELL_IDLE_TIMEOUT_SECS: u64 = 1;
 const MAX_PERSISTENT_SHELL_IDLE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
+pub(crate) const MAX_CONFIGURED_SKILL_ROOTS: usize = 16;
+pub(crate) const MAX_CONFIGURED_SKILL_ROOT_PATH_BYTES: usize = 4096;
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct SkillsConfig {
+    #[serde(default)]
+    pub(crate) roots: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RunnerConfig {
     pub(crate) server_url: String,
@@ -72,6 +81,8 @@ pub(crate) struct RunnerConfig {
     pub(crate) max_concurrent_jobs: Option<usize>,
     #[serde(default)]
     pub(crate) policy: RunnerPolicy,
+    #[serde(default)]
+    pub(crate) skills: SkillsConfig,
     /// Transport selection: `"websocket"` (default), `"polling"`, `"quic"`,
     /// or explicit `"auto"` fallback mode.
     #[serde(default)]
@@ -180,7 +191,9 @@ pub(crate) struct McpGatewayProviderConfig {
     #[serde(default)]
     pub(crate) cwd: Option<String>,
     /// Explicit provider-env-key -> Runner-process-env-key mapping. Values are
-    /// resolved only immediately before first spawn and are never advertised.
+    /// resolved only immediately before spawn and are never advertised. On
+    /// Windows, the Runner separately supplies only the non-secret SYSTEMROOT
+    /// bootstrap unless the operator explicitly maps that destination.
     #[serde(default)]
     pub(crate) env_from_env: BTreeMap<String, String>,
     /// Optional per-provider request deadline. When absent, inherit
@@ -335,6 +348,8 @@ pub(crate) struct RunnerPolicy {
     pub(crate) allowed_roots: Vec<PathBuf>,
     #[serde(default = "default_max_timeout_secs")]
     pub(crate) max_timeout_secs: u64,
+    /// Per-stream Runner capture/presentation policy for stdout and stderr.
+    /// Independent from transport envelope sizes and model-facing result caps.
     #[serde(default = "default_max_output_bytes")]
     pub(crate) max_output_bytes: usize,
 }
@@ -494,6 +509,7 @@ pub(crate) struct HotRunnerConfig {
     pub(crate) generation: u64,
     pub(crate) policy: RunnerPolicy,
     pub(crate) shell: ShellConfig,
+    pub(crate) skills: SkillsConfig,
     /// Static/manual `[ssh.resources]` from the current runner.toml generation.
     pub(crate) static_ssh: SshConfig,
     /// Effective process-local resources: current static resources plus the
@@ -515,6 +531,7 @@ impl HotRunnerConfig {
             generation,
             policy: cfg.policy.clone(),
             shell: cfg.shell.clone(),
+            skills: cfg.skills.clone(),
             static_ssh: cfg.ssh.clone(),
             ssh,
             external_tools: Arc::new(ExternalToolRouter::new(&cfg.tool_providers)),
@@ -594,6 +611,10 @@ impl ReloadableRunnerConfig {
     }
 
     pub(crate) fn begin_shutdown(&self) {
+        // Serialize shutdown with authoritative config activation. Once this
+        // guard is held, a successful reload cannot commit Plugin/MCP state
+        // after their managers have entered stopping state.
+        let _reload_guard = lock_unpoison(&self.reload_lock);
         self.stopping.store(true, Ordering::SeqCst);
         self.mcp_gateway.shutdown();
         self.plugins.shutdown();
@@ -804,6 +825,17 @@ impl ReloadableRunnerConfig {
         match self
             .plugins
             .apply_config_candidate_and_then(&candidate, || {
+                let mcp_reload = self
+                    .mcp_gateway
+                    .apply_config_candidate(&candidate.mcp_gateway)
+                    .expect("config reload lock serializes MCP activation with shutdown");
+                tracing::debug!(
+                    preserved = mcp_reload.preserved,
+                    replaced = mcp_reload.replaced,
+                    added = mcp_reload.added,
+                    removed = mcp_reload.removed,
+                    "webcodex-runner MCP provider config activated"
+                );
                 {
                     let mut routers = lock_unpoison(&self.external_routers);
                     routers.retain(|router| router.strong_count() > 0);
@@ -909,6 +941,11 @@ fn reload_error_code(error: &str) -> &'static str {
 
 fn reload_error_diagnostic(error: &str) -> (Option<&'static str>, Option<&'static str>) {
     const OUT_OF_RANGE_FIELDS: &[(&str, &str)] = &[
+        ("skills.roots may contain at most ", "skills.roots"),
+        (
+            "skills.roots entries must be non-empty paths of at most ",
+            "skills.roots",
+        ),
         (
             "max_concurrent_jobs must be between ",
             "max_concurrent_jobs",
@@ -934,6 +971,12 @@ fn reload_error_diagnostic(error: &str) -> (Option<&'static str>, Option<&'stati
             "mcp.request_timeout_secs",
         ),
     ];
+    if error.starts_with("skills.roots entries must be absolute paths")
+        || error.starts_with("skills.roots contains an unsupported Windows path namespace")
+        || error.starts_with("skills.roots contains duplicate path identities")
+    {
+        return (Some("skills.roots"), Some("invalid_path"));
+    }
     OUT_OF_RANGE_FIELDS
         .iter()
         .find_map(|(prefix, field)| {
@@ -988,7 +1031,7 @@ pub(crate) fn restart_required_fields(
     macro_rules! classify {
         ($($field:ident),+ $(,)?) => {{
             let RunnerConfig {
-                policy: _, shell: _, ssh: _, plugins: _, tool_providers: _, legacy_projects_dir: _,
+                policy: _, shell: _, skills: _, ssh: _, plugins: _, tool_providers: _, mcp_gateway: _, legacy_projects_dir: _,
                 $($field: _),+
             } = candidate;
             [$((stringify!($field), startup.$field != candidate.$field)),+]
@@ -1005,7 +1048,6 @@ pub(crate) fn restart_required_fields(
         host_context,
         max_concurrent_jobs,
         acp,
-        mcp_gateway,
         owner,
         poll_interval_ms,
         project_registry_dir,
@@ -1443,6 +1485,7 @@ pub(crate) fn load_config(path: &Path) -> Result<RunnerConfig, String> {
         return Err("websocket_connect_timeout_secs must be > 0".to_string());
     }
     validate_max_concurrent_jobs(cfg.max_concurrent_jobs)?;
+    validate_skills_config(&cfg.skills)?;
     if let Some(host_context) = cfg.host_context.take() {
         cfg.host_context = Some(host_context.normalized()?);
     }
@@ -1513,6 +1556,51 @@ pub(crate) fn load_config(path: &Path) -> Result<RunnerConfig, String> {
     validate_plugin_config(&cfg.plugins, &cfg.shell)?;
     validate_acp_config(&cfg.acp)?;
     Ok(cfg)
+}
+
+pub(crate) fn configured_skill_root_identity(root: &Path) -> String {
+    let lexical = root.components().collect::<PathBuf>();
+    crate::runner_config::paths::normalize_path_identity(&lexical)
+}
+
+fn validate_skills_config(config: &SkillsConfig) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    if config.roots.len() > MAX_CONFIGURED_SKILL_ROOTS {
+        return Err(format!(
+            "skills.roots may contain at most {MAX_CONFIGURED_SKILL_ROOTS} entries"
+        ));
+    }
+    let mut identities = HashSet::with_capacity(config.roots.len());
+    for root in &config.roots {
+        let text = root.to_string_lossy();
+        if text.is_empty()
+            || text.len() > MAX_CONFIGURED_SKILL_ROOT_PATH_BYTES
+            || text.contains('\0')
+        {
+            return Err(format!(
+                "skills.roots entries must be non-empty paths of at most {MAX_CONFIGURED_SKILL_ROOT_PATH_BYTES} bytes"
+            ));
+        }
+        if !root.is_absolute()
+            || crate::runner_config::paths::project_path_has_parent_traversal(root)
+        {
+            return Err(
+                "skills.roots entries must be absolute paths without parent traversal".to_string(),
+            );
+        }
+        #[cfg(windows)]
+        if crate::runner_config::paths::windows_project_path_kind(root)
+            == Some(crate::runner_config::paths::WindowsProjectPathKind::UnsupportedNamespace)
+        {
+            return Err("skills.roots contains an unsupported Windows path namespace".to_string());
+        }
+        let identity = configured_skill_root_identity(root);
+        if !identities.insert(identity) {
+            return Err("skills.roots contains duplicate path identities".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn validate_acp_env_name(value: &str) -> Result<(), ()> {
@@ -1615,7 +1703,7 @@ fn validate_acp_config(config: &AcpConfig) -> Result<(), String> {
                 || super::shell::is_sensitive_env_key(source)
             {
                 return Err(format!(
-                    "ACP agent '{}' env_from_env may not map WebCodex transport credentials",
+                    "ACP agent '{}' env_from_env may not map WebCodex-sensitive environment variables",
                     agent.id
                 ));
             }
@@ -1852,6 +1940,56 @@ fn validate_plugin_config(config: &PluginConfig, shell: &ShellConfig) -> Result<
 }
 
 #[cfg(test)]
+mod acp_config_tests {
+    use super::*;
+
+    fn agent() -> AcpAgentConfig {
+        AcpAgentConfig {
+            id: "agent".to_string(),
+            name: "Agent".to_string(),
+            executable: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: Vec::new(),
+            env_from_env: BTreeMap::new(),
+            allowed_config_options: Vec::new(),
+        }
+    }
+
+    fn validate(agent: AcpAgentConfig) -> Result<(), String> {
+        validate_acp_config(&AcpConfig {
+            agents: vec![agent],
+            ..AcpConfig::default()
+        })
+    }
+
+    #[test]
+    fn acp_env_mapping_rejects_webcodex_pat() {
+        for (destination, source) in [("WEBCODEX_PAT", "SOURCE"), ("DEST", "WEBCODEX_PAT")] {
+            let mut sensitive = agent();
+            sensitive
+                .env_from_env
+                .insert(destination.to_string(), source.to_string());
+            assert!(validate(sensitive)
+                .unwrap_err()
+                .contains("WebCodex-sensitive"));
+        }
+
+        #[cfg(windows)]
+        {
+            let mut mixed_case = agent();
+            mixed_case
+                .env_from_env
+                .insert("DEST".to_string(), "WebCodex_Pat".to_string());
+            assert!(validate(mixed_case)
+                .unwrap_err()
+                .contains("WebCodex-sensitive"));
+        }
+    }
+}
+
+#[cfg(test)]
 mod plugin_config_tests {
     use super::*;
 
@@ -1983,6 +2121,8 @@ mod mcp_gateway_config_tests {
     fn mcp_gateway_execution_context_rejects_sensitive_and_platform_duplicate_names() {
         for (destination, source) in [
             ("WEBCODEX_TOKEN", "SOURCE"),
+            ("WEBCODEX_PAT", "SOURCE"),
+            ("DEST", "WEBCODEX_PAT"),
             ("DEST", "WEBCODEX_AGENT_TOKEN"),
             ("WEBCODEX_USER_TOKEN", "SOURCE"),
             ("DEST", "AUTHORIZATION"),
@@ -1992,6 +2132,17 @@ mod mcp_gateway_config_tests {
                 .env_from_env
                 .insert(destination.to_string(), source.to_string());
             assert!(validate(sensitive)
+                .unwrap_err()
+                .contains("WebCodex-sensitive"));
+        }
+
+        #[cfg(windows)]
+        {
+            let mut mixed_case_pat = provider();
+            mixed_case_pat
+                .env_from_env
+                .insert("DEST".to_string(), "WebCodex_Pat".to_string());
+            assert!(validate(mixed_case_pat)
                 .unwrap_err()
                 .contains("WebCodex-sensitive"));
         }

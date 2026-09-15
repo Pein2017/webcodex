@@ -260,6 +260,8 @@ async fn run_shell_via_agent_lifecycle_error(
                 exit_code: None,
                 stdout: None,
                 stderr: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
                 duration_ms: Some(1),
                 error: Some(error.to_string()),
             },
@@ -305,6 +307,7 @@ async fn update_agent_shell_job(
             error: error.map(str::to_string),
             command_execution_state,
             validation_progress: None,
+            test_count_evidence: None,
             activity: None,
             finished,
         })
@@ -346,17 +349,23 @@ fn project_execution_output_schemas_do_not_advertise_server_local_executor() {
         "run_script",
         "run_shell",
         "run_job",
-        "job_log",
-        "cargo_fmt",
-        "cargo_check",
-        "cargo_test",
-        "go_test",
+        "job_tail",
     ] {
         let schema = super::super::registry::output_schema_for_tool(name);
         let executor = &schema["properties"]["output"]["properties"]["executor"];
         assert_eq!(
             executor["const"], "agent",
             "{name} must publish the Runner-only Project execution contract"
+        );
+    }
+
+    for name in ["cargo_fmt", "cargo_check", "cargo_test", "go_test"] {
+        let schema = super::super::registry::output_schema_for_tool(name);
+        assert!(
+            schema["properties"]["output"]["properties"]
+                .get("executor")
+                .is_none(),
+            "{name} tool identity already determines the Runner-backed executor"
         );
     }
 }
@@ -419,7 +428,7 @@ async fn long_run_shell_hands_off_same_job_once_and_status_log_stop_observe_it()
 
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
-    assert_eq!(result.output["promoted_to_job"], true);
+    assert!(result.output.get("promoted_to_job").is_none());
     assert_eq!(result.output["terminal"], false);
     assert_eq!(result.output["execution_state"], "running");
     assert_eq!(result.output["command_started"], true);
@@ -430,7 +439,7 @@ async fn long_run_shell_hands_off_same_job_once_and_status_log_stop_observe_it()
     assert_eq!(result.output["purpose"], "diagnostic");
     assert_eq!(result.output["shell"], "bash");
     assert_eq!(result.output["cwd"], ".");
-    assert!(result.output["observation_token"].is_string());
+    assert_observe_job_continuation(&result.output);
     assert!(result.output.as_object().unwrap().contains_key("activity"));
     assert!(result.output["activity"].is_null());
     assert_run_shell_result_matches_schema(&result);
@@ -454,13 +463,7 @@ async fn long_run_shell_hands_off_same_job_once_and_status_log_stop_observe_it()
     assert!(finished.failure_kind.is_none());
 
     let status = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: job_id.clone(),
-                include_command_preview: false,
-            },
-            Some(&auth),
-        )
+        .job_status_for_auth(job_id.clone(), false, Some(&auth))
         .await;
     assert!(status.success, "{:?}", status.error);
     assert_eq!(status.output["job_id"], job_id);
@@ -501,6 +504,7 @@ async fn long_run_shell_hands_off_same_job_once_and_status_log_stop_observe_it()
             }],
             40,
             None,
+            ObserveJobsWakeOn::Change,
             Some(&auth),
         )
         .await;
@@ -754,6 +758,7 @@ async fn long_run_shell_job_timeout_is_terminal_and_never_becomes_fake_outcome_u
     let handoff = task.await.unwrap();
     assert!(handoff.success, "{:?}", handoff.error);
     assert_eq!(handoff.output["job_id"], job_id);
+    // This direct Runtime call retains the internal receipt before model projection.
     assert_eq!(handoff.output["promoted_to_job"], true);
 
     update_agent_shell_job(
@@ -1083,6 +1088,8 @@ async fn run_shell_runner_timeout_preserves_known_timeout_state() {
                 exit_code: Some(-1),
                 stdout: Some("partial output".to_string()),
                 stderr: Some("runner stopped the process at its deadline".to_string()),
+                stdout_truncated: false,
+                stderr_truncated: false,
                 duration_ms: Some(1_000),
                 error: Some("runner timeout".to_string()),
             },
@@ -1104,7 +1111,8 @@ async fn run_shell_runner_timeout_preserves_known_timeout_state() {
     let error = result.error.as_deref().unwrap_or_default();
     assert!(error.contains("Command timed out after 1s"));
     assert!(error.contains("do not blindly retry"));
-    assert!(error.contains("First inspect the actual process, service, and target state"));
+    assert!(error.contains("First inspect the actual Job, process, service, and target state"));
+    assert!(error.contains("use run_detached_process from the start"));
 }
 
 #[tokio::test]
@@ -1368,6 +1376,7 @@ async fn model_facing_stop_job_stops_agent_job_with_same_session() {
         .await;
     assert!(run.success, "{:?}", run.error);
     let job_id = run.output["job_id"].as_str().unwrap().to_string();
+    assert_observe_job_continuation(&run.output);
 
     let result = runtime
         .dispatch_with_auth(
@@ -1388,13 +1397,7 @@ async fn model_facing_stop_job_stops_agent_job_with_same_session() {
     assert_eq!(result.output["permission"]["status"], "auto_approved");
     assert_eq!(result.output["permission"]["risk"], "job");
     let status = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id,
-                include_command_preview: false,
-            },
-            Some(&auth),
-        )
+        .job_status_for_auth(job_id, false, Some(&auth))
         .await;
     assert!(status.success, "{:?}", status.error);
     assert_eq!(status.output["status"], "stopped");
@@ -1455,13 +1458,7 @@ async fn model_facing_stop_job_reports_requested_and_already_stop_requested() {
     assert_eq!(result.output["stop_effect"], "requested");
 
     let status = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: job_id.clone(),
-                include_command_preview: false,
-            },
-            Some(&auth),
-        )
+        .job_status_for_auth(job_id.clone(), false, Some(&auth))
         .await;
     assert!(status.success, "{:?}", status.error);
     assert_eq!(status.output["status"], "stop_requested");
@@ -1705,6 +1702,7 @@ async fn mark_next_agent_job_running(runtime: &ToolRuntime, client_id: &str) -> 
             error: None,
             command_execution_state: None,
             validation_progress: None,
+            test_count_evidence: None,
             activity: None,
             finished: false,
         })
@@ -1729,7 +1727,28 @@ fn assert_unknown_job(result: ToolResult) {
     assert_eq!(result.output["failure_kind"], "job_not_found");
     assert_eq!(result.output["state_changed"], false);
     assert_eq!(result.output["recovery_kind"], "reobserve");
-    assert_eq!(result.output["recovery_tool"], "list_jobs");
+    assert!(result.output.get("recovery_tool").is_none());
+    assert_eq!(
+        result.output["suggested_call"],
+        json!({"tool": "list_jobs", "arguments": {}})
+    );
+    let suggested = &result.output["suggested_call"];
+    let parsed = ToolCall::from_tool_name(
+        suggested["tool"].as_str().unwrap(),
+        suggested["arguments"].clone(),
+    )
+    .expect("unknown Job recovery must parse");
+    match parsed {
+        ToolCall::ListJobs {
+            project,
+            session_id,
+            ..
+        } => {
+            assert!(project.is_none());
+            assert!(session_id.is_none());
+        }
+        other => panic!("unexpected recovery call: {}", other.tool_name()),
+    }
     assert!(
         result.error.unwrap_or_default().contains("unknown job"),
         "unauthorized job lookup should be hidden as unknown"
@@ -1744,15 +1763,13 @@ async fn agent_job_log_invalid_token_is_fix_input_not_unknown_job() {
     let job_id = start_agent_runtime_job(&runtime, "client-token", "proj-token", &auth).await;
 
     let result = runtime
-        .dispatch_with_auth(
-            ToolCall::JobLog {
-                job_id,
-                offset: None,
-                tail_lines: None,
-                after_observation_token: Some("bad".to_string()),
-                wait_secs: Some(1),
-            },
+        .job_log_for_auth(
+            job_id,
+            None,
+            None,
             Some(&auth),
+            Some("bad".to_string()),
+            Some(1),
         )
         .await;
 
@@ -1762,6 +1779,7 @@ async fn agent_job_log_invalid_token_is_fix_input_not_unknown_job() {
     assert_eq!(result.output["state_changed"], false);
     assert_eq!(result.output["recovery_kind"], "fix_input");
     assert!(result.output.get("recovery_tool").is_none());
+    assert!(result.output.get("suggested_call").is_none());
     assert!(result.error.unwrap_or_default().contains("malformed"));
 }
 
@@ -1794,13 +1812,7 @@ async fn managed_user_job_inventory_and_counts_do_not_cross_owner() {
     assert!(!alice_list.output.to_string().contains(&bob_job));
 
     let hidden_bob_job = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: bob_job.clone(),
-                include_command_preview: false,
-            },
-            Some(&alice),
-        )
+        .job_status_for_auth(bob_job.clone(), false, Some(&alice))
         .await;
     assert_unknown_job(hidden_bob_job);
 
@@ -1936,49 +1948,22 @@ async fn shared_key_runtime_job_tools_filter_agent_jobs_by_auth_group_body() {
 
     assert_unknown_job(
         runtime
-            .dispatch_with_auth(
-                ToolCall::JobStatus {
-                    job_id: job_b.clone(),
-                    include_command_preview: false,
-                },
-                Some(&shared_a),
-            )
+            .job_status_for_auth(job_b.clone(), false, Some(&shared_a))
             .await,
     );
     assert_unknown_job(
         runtime
-            .dispatch_with_auth(
-                ToolCall::JobStatus {
-                    job_id: job_a.clone(),
-                    include_command_preview: false,
-                },
-                Some(&bridge_b),
-            )
+            .job_status_for_auth(job_a.clone(), false, Some(&bridge_b))
             .await,
     );
     assert_unknown_job(
         runtime
-            .dispatch_with_auth(
-                ToolCall::JobStatus {
-                    job_id: job_b.clone(),
-                    include_command_preview: false,
-                },
-                Some(&bridge_a),
-            )
+            .job_status_for_auth(job_b.clone(), false, Some(&bridge_a))
             .await,
     );
     assert_unknown_job(
         runtime
-            .dispatch_with_auth(
-                ToolCall::JobLog {
-                    job_id: job_b.clone(),
-                    offset: None,
-                    tail_lines: None,
-                    after_observation_token: None,
-                    wait_secs: None,
-                },
-                Some(&shared_a),
-            )
+            .job_log_for_auth(job_b.clone(), None, None, Some(&shared_a), None, None)
             .await,
     );
     assert_unknown_job(
@@ -1996,26 +1981,14 @@ async fn shared_key_runtime_job_tools_filter_agent_jobs_by_auth_group_body() {
     );
 
     let status_b = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: job_b.clone(),
-                include_command_preview: false,
-            },
-            Some(&shared_b),
-        )
+        .job_status_for_auth(job_b.clone(), false, Some(&shared_b))
         .await;
     assert!(status_b.success, "{:?}", status_b.error);
     assert_eq!(status_b.output["job_id"], job_b);
     assert!(status_b.output.get("command_preview").is_none());
 
     let status_b_debug = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: job_b.clone(),
-                include_command_preview: true,
-            },
-            Some(&shared_b),
-        )
+        .job_status_for_auth(job_b.clone(), true, Some(&shared_b))
         .await;
     assert!(status_b_debug.success, "{:?}", status_b_debug.error);
     assert!(status_b_debug.output["command_preview"]
@@ -2024,16 +1997,7 @@ async fn shared_key_runtime_job_tools_filter_agent_jobs_by_auth_group_body() {
         .contains("echo client-b"));
 
     let log_b = runtime
-        .dispatch_with_auth(
-            ToolCall::JobLog {
-                job_id: job_b.clone(),
-                offset: None,
-                tail_lines: None,
-                after_observation_token: None,
-                wait_secs: None,
-            },
-            Some(&shared_b),
-        )
+        .job_log_for_auth(job_b.clone(), None, None, Some(&shared_b), None, None)
         .await;
     assert!(log_b.success, "{:?}", log_b.error);
     assert_eq!(log_b.output["stdout_tail"], "b-out\n");
@@ -2176,7 +2140,12 @@ async fn list_jobs_filters_visible_jobs_by_project_session_and_status_before_lim
             Some(&auth_a),
         )
         .await;
-    let mut a1_ids = listed_job_ids(&a1);
+    let ordered_a1_ids = listed_job_ids(&a1);
+    let expected_first_a1 = ordered_a1_ids
+        .first()
+        .cloned()
+        .expect("session A1 should have visible jobs");
+    let mut a1_ids = ordered_a1_ids;
     a1_ids.sort();
     let mut expected_a1 = vec![job_a1_running.clone(), job_a1_completed.clone()];
     expected_a1.sort();
@@ -2223,13 +2192,14 @@ async fn list_jobs_filters_visible_jobs_by_project_session_and_status_before_lim
     assert_eq!(limited.output["matched_count"], 2);
     assert_eq!(limited.output["count"], 1);
     assert_eq!(limited.output["truncated"], true);
+    assert_eq!(listed_job_ids(&limited), vec![expected_first_a1]);
 
     let mismatched = runtime
         .dispatch_with_auth(
             ToolCall::ListJobs {
                 limit: None,
                 status: None,
-                project: Some(project_a),
+                project: Some(project_a.clone()),
                 session_id: Some(session_b1.session_id.clone()),
             },
             Some(&auth_a),
@@ -2249,7 +2219,7 @@ async fn list_jobs_filters_visible_jobs_by_project_session_and_status_before_lim
             limit: None,
             status: None,
             project: None,
-            session_id: Some(session_b1.session_id),
+            session_id: Some(session_b1.session_id.clone()),
         },
     ] {
         let hidden = runtime
@@ -2260,14 +2230,48 @@ async fn list_jobs_filters_visible_jobs_by_project_session_and_status_before_lim
         assert_eq!(hidden.output["matched_count"], 0);
     }
 
-    let status = runtime
-        .dispatch_with_auth(
-            ToolCall::JobStatus {
-                job_id: job_a1_running,
-                include_command_preview: false,
-            },
+    let unique = runtime
+        .active_jobs_summary(
+            Some(&project_a),
+            Some(&session_a1.session_id),
             Some(&auth_a),
+            10,
         )
+        .await;
+    assert_eq!(unique["active_job"]["job_id"], job_a1_running);
+    assert_eq!(unique["active_job"]["status"], "running");
+    assert!(unique["active_job"].get("project").is_none());
+
+    let no_exact_session = runtime
+        .active_jobs_summary(
+            Some(&project_a),
+            Some(&session_b1.session_id),
+            Some(&auth_a),
+            10,
+        )
+        .await;
+    assert!(no_exact_session.get("active_job").is_none());
+
+    let _second_a1 = start_agent_runtime_job_in_session(
+        &runtime,
+        "target-a",
+        "proj-a",
+        Some(&session_a1.session_id),
+        &auth_a,
+    )
+    .await;
+    let ambiguous = runtime
+        .active_jobs_summary(
+            Some(&project_a),
+            Some(&session_a1.session_id),
+            Some(&auth_a),
+            10,
+        )
+        .await;
+    assert!(ambiguous.get("active_job").is_none());
+
+    let status = runtime
+        .job_status_for_auth(job_a1_running, false, Some(&auth_a))
         .await;
     assert_eq!(status.output["status"], "running");
 }
@@ -2516,17 +2520,15 @@ async fn job_tail_reaches_job_logic_without_agent_auth() {
 #[tokio::test]
 async fn job_log_wait_rejects_invalid_wait_secs_before_execution() {
     let runtime = test_runtime();
-    for invalid in [0u64, 61u64] {
+    for invalid in [0u64, 101u64] {
         let result = runtime
-            .dispatch_with_auth(
-                ToolCall::JobLog {
-                    job_id: "11111111-2222-3333-4444-555555555555".to_string(),
-                    offset: None,
-                    tail_lines: None,
-                    after_observation_token: Some("bad".to_string()),
-                    wait_secs: Some(invalid),
-                },
+            .job_log_for_auth(
+                "11111111-2222-3333-4444-555555555555".to_string(),
                 None,
+                None,
+                None,
+                Some("bad".to_string()),
+                Some(invalid),
             )
             .await;
         assert!(!result.success);
@@ -2539,32 +2541,82 @@ async fn job_log_wait_rejects_invalid_wait_secs_before_execution() {
     }
 }
 
+#[tokio::test]
+async fn job_log_wait_accepts_canonical_max_before_job_lookup() {
+    let runtime = test_runtime();
+    let result = runtime
+        .job_log_for_auth(
+            "11111111-2222-3333-4444-555555555555".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some(webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS),
+        )
+        .await;
+    assert!(!result.success);
+    assert_eq!(result.output["error_kind"], "unknown_job");
+}
+
 #[test]
-fn job_log_parses_opaque_observation_token_and_rejects_non_string_values() {
+fn retired_job_log_parser_rejects_former_inputs() {
     let token =
         crate::job_observation::JobObservationToken::new_legacy("abc", "0123456789abcdef", 7)
             .unwrap()
             .encode();
-    let parsed = ToolCall::from_tool_name(
-        "job_log",
+    for args in [
         json!({"job_id": "abc", "after_observation_token": token, "wait_secs": 5}),
-    )
-    .unwrap();
-    match parsed {
-        ToolCall::JobLog {
-            after_observation_token,
-            wait_secs,
-            ..
-        } => {
-            assert_eq!(after_observation_token.as_deref(), Some(token.as_str()));
-            assert_eq!(wait_secs, Some(5));
-        }
-        other => panic!("expected JobLog, got {other:?}"),
-    }
-
-    let result = ToolCall::from_tool_name(
-        "job_log",
         json!({"job_id": "abc", "after_observation_token": 1, "wait_secs": 5}),
+    ] {
+        let error = ToolCall::from_tool_name("job_log", args).unwrap_err();
+        assert!(error.contains("unknown tool"), "{error}");
+    }
+}
+
+#[test]
+fn job_handoff_model_projection_keeps_identity_and_exceptional_receipts() {
+    let receipt = json!({
+        "execution_state": "running", "job_id": "job-one", "job_status": "running", "terminal": false,
+        "promoted_to_job": true, "async_handoff_available": true,
+        "observation_token": "job-token-one",
+        "continuation_semantics": {"kind": "observe", "carrier": "observation_token"},
+        "continuation": super::super::jobs::observe_job_continuation("job-one", Some("job-token-one")),
+        "stdout_truncated": true, "stderr_truncated": false,
+    });
+    let mut model = ToolResult::ok(receipt.clone());
+    super::super::jobs::sparsify_job_handoff_model_result(&mut model);
+    for key in [
+        "promoted_to_job",
+        "async_handoff_available",
+        "observation_token",
+        "continuation_semantics",
+    ] {
+        assert!(model.output.get(key).is_none());
+        assert!(
+            receipt.get(key).is_some(),
+            "internal receipt stays complete"
+        );
+    }
+    assert_eq!(model.output["terminal"], false);
+    assert_eq!(model.output["job_status"], "running");
+    assert_eq!(model.output["stdout_truncated"], true);
+    assert_observe_job_continuation(&model.output);
+    assert_eq!(
+        serde_json::to_string(&model.output)
+            .unwrap()
+            .matches("job-token-one")
+            .count(),
+        1
     );
-    assert!(result.is_err());
+    for (field, value) in [
+        ("execution_state", json!("outcome_unknown")),
+        ("observation_token", json!("another-snapshot")),
+        ("job_id", json!("another-job")),
+    ] {
+        let mut exceptional = receipt.clone();
+        exceptional[field] = value;
+        let mut model = ToolResult::ok(exceptional.clone());
+        super::super::jobs::sparsify_job_handoff_model_result(&mut model);
+        assert_eq!(model.output, exceptional);
+    }
 }

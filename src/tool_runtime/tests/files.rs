@@ -72,7 +72,8 @@ async fn windows_list_project_tracked_files_uses_internal_posix_and_preserves_sc
     assert!(root.success, "{:?}", root.error);
     assert!(script.contains("git ls-files -z --cached"));
     assert!(
-        script.contains("head_cmd") && script.contains("-c 1048576"),
+        script.contains("head_cmd")
+            && script.contains(&format!("-c {}", LIST_TRACKED_SOURCE_MAX_BYTES + 1)),
         "tracked listing lost its raw-output cap: {script}"
     );
     let root_paths = root.output["entries"]
@@ -164,6 +165,95 @@ async fn tracked_listing_failure_keeps_bounded_multiline_stderr() {
     );
 }
 
+async fn run_mocked_tracked_listing(
+    client_id: &str,
+    stdout: String,
+    depth: Option<usize>,
+    limit: usize,
+    offset: usize,
+) -> (ToolResult, String) {
+    let runtime = runtime_with_agent_project(client_id);
+    register_agent(
+        &runtime,
+        client_id,
+        None,
+        RunnerCapabilities {
+            shell: true,
+            internal_posix_script: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let project = agent_test_project_id(client_id);
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .list_project_tracked_files(project, None, None, depth, Some(limit), Some(offset))
+                .await
+        }
+    });
+    let request = wait_for_patch_agent_request(&runtime, client_id).await;
+    assert_eq!(request.kind, "run_internal_posix_script");
+    let script = request
+        .script
+        .as_ref()
+        .expect("tracked listing must use the typed internal POSIX path")
+        .script
+        .clone();
+    complete_patch_agent_request(&runtime, client_id, &request.request_id, 0, &stdout, "").await;
+    (task.await.unwrap(), script)
+}
+
+#[tokio::test]
+async fn tracked_listing_source_budget_is_below_default_retention_and_disables_fake_paging() {
+    const ORDINARY_RESULT_RETENTION_COMPATIBILITY_FLOOR_BYTES: usize = 256 * 1024;
+    assert!(
+        LIST_TRACKED_SOURCE_MAX_BYTES + 1 < ORDINARY_RESULT_RETENTION_COMPATIBILITY_FLOOR_BYTES,
+        "producer source probe must keep headroom below ordinary per-stream result retention"
+    );
+
+    let mut raw = String::new();
+    let mut index = 0usize;
+    while raw.len() <= LIST_TRACKED_SOURCE_MAX_BYTES + 4096 {
+        raw.push_str(&format!("src/file-{index:05}-{}.rs\0", "x".repeat(20)));
+        index += 1;
+    }
+    assert!(raw.len() < ORDINARY_RESULT_RETENTION_COMPATIBILITY_FLOOR_BYTES);
+
+    let (result, script) =
+        run_mocked_tracked_listing("tracked-source-budget", raw, Some(16), 10, 0).await;
+    assert!(result.success, "{:?}", result.error);
+    assert!(script.contains(&format!("-c {}", LIST_TRACKED_SOURCE_MAX_BYTES + 1)));
+    assert_eq!(result.output["list_truncated"], true);
+    assert_eq!(result.output["truncated"], false);
+    assert_eq!(result.output["next_offset"], Value::Null);
+    assert_eq!(result.output["returned"], 10);
+    assert!(result.output["total_files"].as_u64().unwrap() >= 10);
+}
+
+#[tokio::test]
+async fn tracked_listing_fails_closed_when_server_retains_only_stdout_tail() {
+    let mut raw = String::new();
+    let mut index = 0usize;
+    while raw.len() <= 300 * 1024 {
+        raw.push_str(&format!("src/file-{index:05}-{}.rs\0", "y".repeat(32)));
+        index += 1;
+    }
+
+    let (result, _) =
+        run_mocked_tracked_listing("tracked-retained-tail", raw, Some(16), 10, 0).await;
+    assert!(!result.success);
+    assert_eq!(result.output["code"], "source_incomplete");
+    assert!(result.output.get("next_offset").is_none());
+    assert!(result.output.get("total_files").is_none());
+    assert!(result
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("ordinary result retention"));
+}
+
 #[tokio::test]
 async fn write_project_file_with_session_id_records_changed_path_without_content() {
     let runtime = runtime_with_agent_project("telemetry-write");
@@ -191,7 +281,7 @@ async fn write_project_file_with_session_id_records_changed_path_without_content
                         content: "do-not-log-this-content\n".to_string(),
                         session_id: Some(session_id),
                         overwrite: None,
-                        expected_sha256: None,
+                        expected_read_revision: None,
                     },
                     Some(&bootstrap),
                 )
@@ -532,6 +622,8 @@ async fn delete_project_files_replacement_after_poll_reports_outcome_unknown() {
             exit_code: Some(0),
             stdout: Some(r#"{"deleted_paths":["tmp.txt"]}"#.to_string()),
             stderr: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(1),
             error: None,
         })
@@ -984,7 +1076,7 @@ async fn conversation_import_durable_session_events_do_not_store_host_file_refs(
         .error
         .as_deref()
         .unwrap_or_default()
-        .contains("explicitly trusted OAuth MCP client"));
+        .contains("explicitly trusted OAuth MCP host-file rewrite"));
 
     let summary = runtime
         .sessions
@@ -1112,39 +1204,160 @@ async fn artifact_upload_begin_policy_rejection_is_classified() {
     assert!(event.permission.is_none());
 }
 
-#[test]
-fn parse_file_list_entries_is_bounded_and_marks_truncation() {
-    // Simulate agent file_list stdout: dirs suffixed with '/'.
-    let stdout = "Cargo.toml\nsrc/\nREADME.md\ntarget/\nCargo.lock\n";
-    // First, without truncation, verify kinds and project-relative paths.
-    let (all, truncated_full) = parse_file_list_entries(stdout, ".", 10);
-    assert!(!truncated_full);
-    assert_eq!(all.len(), 5);
-    let src = all.iter().find(|e| e["path"] == "src").expect("src entry");
-    assert_eq!(src["kind"], "dir");
-    let cargo = all
-        .iter()
-        .find(|e| e["path"] == "Cargo.toml")
-        .expect("Cargo.toml entry");
-    assert_eq!(cargo["kind"], "file");
+async fn run_list_project_files_page(
+    client_id: &str,
+    stdout: &str,
+    limit: usize,
+    offset: usize,
+) -> ToolResult {
+    let runtime = runtime_with_agent_project(client_id);
+    register_agent(
+        &runtime,
+        client_id,
+        None,
+        RunnerCapabilities {
+            file_read: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let project = agent_test_project_id(client_id);
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .list_project_files(project, None, Some(limit), Some(offset))
+                .await
+        }
+    });
+    let request = wait_for_patch_agent_request(&runtime, client_id).await;
+    assert_eq!(request.kind, "file_list");
+    assert_eq!(request.path.as_deref(), Some("."));
+    complete_patch_agent_request(&runtime, client_id, &request.request_id, 0, stdout, "").await;
+    task.await.unwrap()
+}
 
-    // With a tight bound, output is truncated and sorted alphabetically.
-    let (bounded, truncated) = parse_file_list_entries(stdout, ".", 3);
-    assert_eq!(bounded.len(), 3);
-    assert!(truncated);
-    let paths: Vec<&str> = bounded
+#[tokio::test]
+async fn list_project_files_pages_complete_source_without_gap_or_duplicate() {
+    let stdout = "zeta.txt\nsrc/\nREADME.md\nCargo.toml\n.alpha\n";
+
+    let first = run_list_project_files_page("list-files-pages", stdout, 2, 0).await;
+    assert!(first.success, "{:?}", first.error);
+    assert_eq!(first.output["returned"], 2);
+    assert_eq!(first.output["total_entries"], 5);
+    assert_eq!(first.output["offset"], 0);
+    assert_eq!(first.output["next_offset"], 2);
+    assert_eq!(first.output["truncated"], true);
+
+    let second = run_list_project_files_page(
+        "list-files-pages",
+        stdout,
+        2,
+        first.output["next_offset"].as_u64().unwrap() as usize,
+    )
+    .await;
+    assert_eq!(second.output["returned"], 2);
+    assert_eq!(second.output["next_offset"], 4);
+
+    let final_page = run_list_project_files_page(
+        "list-files-pages",
+        stdout,
+        2,
+        second.output["next_offset"].as_u64().unwrap() as usize,
+    )
+    .await;
+    assert_eq!(final_page.output["returned"], 1);
+    assert_eq!(final_page.output["next_offset"], Value::Null);
+    assert_eq!(final_page.output["truncated"], false);
+
+    let reconstructed = first.output["entries"]
+        .as_array()
+        .unwrap()
         .iter()
-        .map(|e| e["path"].as_str().unwrap())
-        .collect();
-    // Sorted: Cargo.lock, Cargo.toml, README.md come first.
-    assert_eq!(paths, vec!["Cargo.lock", "Cargo.toml", "README.md"]);
+        .chain(second.output["entries"].as_array().unwrap())
+        .chain(final_page.output["entries"].as_array().unwrap())
+        .map(|entry| entry["path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reconstructed,
+        vec![".alpha", "Cargo.toml", "README.md", "src", "zeta.txt"]
+    );
+
+    let past_end = run_list_project_files_page("list-files-pages", stdout, 2, 99).await;
+    assert!(past_end.success);
+    assert_eq!(past_end.output["returned"], 0);
+    assert_eq!(past_end.output["total_entries"], 5);
+    assert_eq!(past_end.output["offset"], 99);
+    assert_eq!(past_end.output["next_offset"], Value::Null);
+    assert_eq!(past_end.output["truncated"], false);
+}
+
+#[tokio::test]
+async fn list_project_files_fails_closed_when_runner_retained_source_is_incomplete() {
+    let stdout = "[output truncated to last 262144 bytes]\nzeta.txt\nsrc/\n";
+    let result = run_list_project_files_page("list-files-retained-tail", stdout, 200, 0).await;
+    assert!(!result.success);
+    assert_eq!(result.output["error_kind"], "source_incomplete");
+    assert_eq!(
+        result.output["reason_code"],
+        "runner_result_retention_truncated"
+    );
+    assert!(result.output.get("next_offset").is_none());
+    assert!(result.output.get("total_entries").is_none());
+}
+
+#[test]
+fn parse_and_page_file_list_entries_is_sorted_gap_free_and_unicode_safe() {
+    let long_name = format!("long-{}-终.rs", "x".repeat(180));
+    let stdout = format!(
+        "zeta.txt\nsrc/\nREADME [draft].md\n{}\n.alpha\n目录/\n",
+        long_name
+    );
+    let all = parse_file_list_entries(&stdout, ".");
+    assert_eq!(all.len(), 6);
+    assert_eq!(
+        all.iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            ".alpha",
+            "README [draft].md",
+            long_name.as_str(),
+            "src",
+            "zeta.txt",
+            "目录",
+        ]
+    );
+    assert_eq!(all[3]["kind"], "dir");
+    assert_eq!(all[5]["kind"], "dir");
+
+    let (first, next) = page_file_list_entries(&all, 0, 2);
+    assert_eq!(next, Some(2));
+    let (middle, next) = page_file_list_entries(&all, next.unwrap(), 2);
+    assert_eq!(next, Some(4));
+    let (final_page, next) = page_file_list_entries(&all, next.unwrap(), 2);
+    assert_eq!(next, None);
+    let reconstructed = first
+        .into_iter()
+        .chain(middle)
+        .chain(final_page)
+        .map(|entry| entry["path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reconstructed,
+        all.iter()
+            .map(|entry| entry["path"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    );
+    let (past_end, next) = page_file_list_entries(&all, 99, 2);
+    assert!(past_end.is_empty());
+    assert_eq!(next, None);
 }
 
 #[test]
 fn parse_file_list_entries_prepends_subpath_for_relative_paths() {
     let stdout = "main.rs\nlib.rs\n";
-    let (entries, truncated) = parse_file_list_entries(stdout, "src", 10);
-    assert!(!truncated);
+    let entries = parse_file_list_entries(stdout, "src");
     let paths: Vec<&str> = entries
         .iter()
         .map(|e| e["path"].as_str().unwrap())
@@ -1689,38 +1902,72 @@ fn raw_search_request() -> SearchRequest {
 }
 
 fn search_call(project: String, request: SearchRequest) -> ToolCall {
-    ToolCall::SearchProjectText {
-        project,
-        pattern: request.pattern,
-        pattern_mode: None,
+    ToolCall::SearchProjectTexts {
+        project: project,
+        queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+            pattern: request.pattern,
+            pattern_mode: None,
+            path: request.path,
+            limit: request.limit,
+            context_before: request.context_before,
+            context_after: request.context_after,
+            include_globs: request.include_globs,
+            exclude_globs: request.exclude_globs,
+            result_mode: request.result_mode,
+            timeout_secs: request.timeout_secs,
+        }],
         session_id: None,
-        path: request.path,
-        limit: request.limit,
-        context_before: request.context_before,
-        context_after: request.context_after,
-        include_globs: request.include_globs,
-        exclude_globs: request.exclude_globs,
-        result_mode: request.result_mode,
-        timeout_secs: request.timeout_secs,
+        max_result_bytes: None,
+    }
+}
+
+fn extract_single_search_batch_result(batch: ToolResult) -> ToolResult {
+    if !batch.success {
+        return batch;
+    }
+    let items = batch.output["items"]
+        .as_array()
+        .expect("one-query search batch items");
+    assert_eq!(items.len(), 1, "one-query search batch: {}", batch.output);
+    let item = &items[0];
+    ToolResult {
+        success: item["success"]
+            .as_bool()
+            .expect("one-query search item success"),
+        output: item.get("output").cloned().unwrap_or(Value::Null),
+        error: item
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
 fn assert_search_output_keys_are_declared(output: &Value) {
-    let properties = registered_tool_specs()
-        .into_iter()
-        .find(|spec| spec.name == "search_project_text")
-        .expect("search_project_text spec")
-        .output_schema["properties"]["output"]["properties"]
-        .as_object()
-        .expect("search_project_text output properties")
-        .clone();
+    if output.get("code").is_some() {
+        return;
+    }
+    let schema = crate::tool_runtime::registry::output_schema_for_tool("search_project_texts");
+    let item_output = &schema["properties"]["output"]["anyOf"][0]["anyOf"][0]["properties"]
+        ["items"]["items"]["properties"]["output"];
+    let mut declared = std::collections::BTreeSet::new();
+    for variant in item_output["anyOf"][0]["anyOf"]
+        .as_array()
+        .expect("search success variants")
+    {
+        if let Some(properties) = variant["properties"].as_object() {
+            declared.extend(properties.keys().cloned());
+        }
+    }
+    if let Some(properties) = item_output["anyOf"][1]["properties"].as_object() {
+        declared.extend(properties.keys().cloned());
+    }
     let Some(output) = output.as_object() else {
         return;
     };
     for key in output.keys() {
         assert!(
-            properties.contains_key(key),
-            "runtime search output key {key} is not declared in output schema"
+            declared.contains(key),
+            "runtime search output key {key} is not declared in search_project_texts item output schema"
         );
     }
 }
@@ -1743,7 +1990,7 @@ async fn execute_agent_search(
     let req = wait_for_patch_agent_request(runtime, client_id).await;
     let inspected = req.clone();
     complete_agent_request_by_running_locally(runtime, client_id, req).await;
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert_search_output_keys_are_declared(&result.output);
     (result, inspected)
 }
@@ -2044,6 +2291,57 @@ fn search_status_and_records_must_agree_before_empty_is_trusted() {
     assert!(proven_empty.success, "{:?}", proven_empty.error);
     assert_eq!(proven_empty.output["matches"], json!([]));
     assert_eq!(proven_empty.output["exit_code"], 1);
+}
+
+#[test]
+fn search_count_uses_backend_evidence_without_claiming_filtered_absence() {
+    let options = SearchOptions::normalize(SearchRequest {
+        result_mode: Some(SearchResultMode::Count),
+        limit: Some(10),
+        ..raw_search_request()
+    })
+    .unwrap();
+    let marker = "{\"webcodex_search\":{\"backend\":\"rg\",\"feature_unavailable\":false}}\n";
+
+    let no_match = search_project_text_output("demo", &options, marker, Some(1), "");
+    assert!(no_match.success, "{:?}", no_match.error);
+    assert_eq!(no_match.output["files"], json!([]));
+    assert_eq!(no_match.output["count_complete"], true);
+    assert_eq!(no_match.output["total_matches"], 0);
+
+    let safe_stdout = format!("{marker}src/lib.rs\u{0}2\n");
+    let safe = search_project_text_output("demo", &options, &safe_stdout, Some(0), "");
+    assert!(safe.success, "{:?}", safe.error);
+    assert_eq!(safe.output["count_complete"], true);
+    assert_eq!(safe.output["total_matches"], 2);
+    assert_eq!(safe.output["files"][0]["path"], "src/lib.rs");
+
+    let malformed_stdout = format!("{marker}src/lib.rs:not-a-number\n");
+    let malformed = search_project_text_output("demo", &options, &malformed_stdout, Some(0), "");
+    assert!(!malformed.success);
+    assert_eq!(
+        malformed.output["reason_code"],
+        "backend_output_inconsistent"
+    );
+
+    let filtered_stdout = format!("{marker}/private/absolute/secret.rs\u{0}2\n");
+    let filtered = search_project_text_output("demo", &options, &filtered_stdout, Some(0), "");
+    assert!(filtered.success, "{:?}", filtered.error);
+    assert_eq!(filtered.output["files"], json!([]));
+    assert_eq!(filtered.output["returned_match_count"], 0);
+    assert_eq!(filtered.output["count_complete"], false);
+    assert_eq!(filtered.output["total_matches"], Value::Null);
+    assert_eq!(filtered.output["truncated"], false);
+    assert!(!serde_json::to_string(&filtered)
+        .unwrap()
+        .contains("/private/absolute/secret.rs"));
+
+    let contradictory = search_project_text_output("demo", &options, &filtered_stdout, Some(1), "");
+    assert!(!contradictory.success);
+    assert_eq!(
+        contradictory.output["reason_code"],
+        "backend_output_inconsistent"
+    );
 }
 
 #[cfg(unix)]
@@ -2774,15 +3072,16 @@ async fn search_invalid_request_dispatch_returns_structured_error() {
             Some(&auth_context(None, true)),
         )
         .await;
+    let result = extract_single_search_batch_result(result);
 
     // Validation fails before any agent search request is enqueued.
     assert!(!result.success);
     assert_search_output_keys_are_declared(&result.output);
-    assert_eq!(result.output["code"], "invalid_search_request");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
     assert_eq!(result.output["failure_stage"], "request_validation");
     assert_eq!(result.output["reason_code"], "invalid_glob");
-    assert_eq!(result.output["field"], "include_globs");
-    assert_eq!(result.output["reason"], "negated");
+    assert_eq!(result.output["detail_code"], "invalid_glob");
+    assert_eq!(result.output["state_changed"], false);
     let rendered = serde_json::to_string(&result.output).unwrap();
     assert!(!rendered.contains("NEVER_ECHO_THIS_GLOB_VALUE"));
     assert!(!result.error.as_deref().unwrap_or("").contains("NEVER_ECHO"));
@@ -2828,17 +3127,21 @@ async fn search_agent_command_timeout_returns_search_timeout() {
                     .to_string(),
             ),
             stderr: Some("command timed out after 1 seconds".to_string()),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(1000),
             error: Some("command timed out".to_string()),
         })
         .await
         .unwrap();
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert!(!result.success);
-    assert_search_output_keys_are_declared(&result.output);
-    assert_eq!(result.output["code"], "search_timeout");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
     assert_eq!(result.output["failure_stage"], "backend_execution");
     assert_eq!(result.output["reason_code"], "timeout");
+    assert_eq!(result.output["detail_code"], "timeout");
+    assert_eq!(result.output["state_changed"], false);
+    assert_search_output_keys_are_declared(&result.output);
     assert_eq!(result.output["result_mode"], "matches");
     assert_eq!(result.output["effective_timeout_secs"], 1);
     assert_eq!(result.output["backend"], "rg");
@@ -2876,18 +3179,22 @@ async fn search_agent_execution_failure_is_structured_and_does_not_leak_diagnost
                     .to_string(),
             ),
             stderr: Some(private_diagnostic.to_string()),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(5),
             error: Some(private_diagnostic.to_string()),
         })
         .await
         .unwrap();
 
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert!(!result.success);
-    assert_search_output_keys_are_declared(&result.output);
-    assert_eq!(result.output["code"], "search_execution_failed");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
     assert_eq!(result.output["failure_stage"], "agent_execution");
-    assert_eq!(result.output["reason_code"], "agent_execution_failed");
+    assert_eq!(result.output["reason_code"], "search_execution_failed");
+    assert_eq!(result.output["detail_code"], "agent_execution_failed");
+    assert_eq!(result.output["state_changed"], false);
+    assert_search_output_keys_are_declared(&result.output);
     assert_eq!(result.output["backend"], "rg");
     assert_eq!(result.output["exit_code"], 9);
     let rendered = serde_json::to_string(&result).unwrap();
@@ -2930,18 +3237,22 @@ async fn search_agent_timeout_without_trusted_marker_cannot_return_partial_succe
             exit_code: Some(-1),
             stdout: Some("src/a.rs:1:needle\n".to_string()),
             stderr: Some("command timed out after 1 seconds".to_string()),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(1000),
             error: Some("command timed out".to_string()),
         })
         .await
         .unwrap();
 
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert!(!result.success);
-    assert_search_output_keys_are_declared(&result.output);
-    assert_eq!(result.output["code"], "search_timeout");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
     assert_eq!(result.output["failure_stage"], "agent_execution");
     assert_eq!(result.output["reason_code"], "timeout");
+    assert_eq!(result.output["detail_code"], "timeout");
+    assert_eq!(result.output["state_changed"], false);
+    assert_search_output_keys_are_declared(&result.output);
     assert!(result.output["backend"].is_null());
     assert!(result.output.get("matches").is_none());
 }
@@ -2988,12 +3299,14 @@ async fn search_agent_timeout_with_complete_records_returns_partial_success() {
                     .to_string(),
             ),
             stderr: Some("command timed out after 1 seconds".to_string()),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(1000),
             error: Some("command timed out".to_string()),
         })
         .await
         .unwrap();
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert!(result.success, "{:?}", result.error);
     assert_search_output_keys_are_declared(&result.output);
     assert_eq!(result.output["backend"], "rg");
@@ -3038,12 +3351,14 @@ async fn search_agent_outer_timeout_returns_search_timeout_and_cancels() {
     let request_id = req.request_id.clone();
     assert_eq!(req.timeout_secs, 1);
     // Do not complete the agent request; outer tokio timeout should fire.
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert!(!result.success);
-    assert_search_output_keys_are_declared(&result.output);
-    assert_eq!(result.output["code"], "search_timeout");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
     assert_eq!(result.output["failure_stage"], "agent_transport");
     assert_eq!(result.output["reason_code"], "timeout");
+    assert_eq!(result.output["detail_code"], "timeout");
+    assert_eq!(result.output["state_changed"], false);
+    assert_search_output_keys_are_declared(&result.output);
     assert_eq!(result.output["result_mode"], "matches");
     assert_eq!(result.output["effective_timeout_secs"], 1);
     assert!(
@@ -3061,6 +3376,8 @@ async fn search_agent_outer_timeout_returns_search_timeout_and_cancels() {
             exit_code: Some(0),
             stdout: Some(String::new()),
             stderr: Some(String::new()),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(1),
             error: None,
         })
@@ -3096,21 +3413,28 @@ async fn search_agent_request_dropped_returns_structured_error() {
                 .await
         }
     });
-    let req = wait_for_patch_agent_request(&runtime, "search-dropped").await;
-    // Drop the oneshot waiter without completing — agent disconnect / channel drop.
+    let first = wait_for_patch_agent_request(&runtime, "search-dropped").await;
+    // A one-query canonical batch retries one dropped Runner request once.
     runtime
         .runner_registry
-        .cancel_request(&req.request_id)
+        .cancel_request(&first.request_id)
         .await;
-    let result = task.await.unwrap();
+    let second = wait_for_patch_agent_request(&runtime, "search-dropped").await;
+    runtime
+        .runner_registry
+        .cancel_request(&second.request_id)
+        .await;
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert!(!result.success);
-    assert_search_output_keys_are_declared(&result.output);
-    assert_eq!(result.output["code"], "search_request_dropped");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
     assert_eq!(result.output["failure_stage"], "agent_transport");
     assert_eq!(result.output["reason_code"], "search_request_dropped");
+    assert_eq!(result.output["detail_code"], "search_request_dropped");
+    assert_eq!(result.output["state_changed"], false);
+    assert_search_output_keys_are_declared(&result.output);
     assert_eq!(result.output["result_mode"], "matches");
-    assert_eq!(result.output["effective_timeout_secs"], 30);
-    assert_ne!(result.output["code"], "search_timeout");
+    let effective_timeout = result.output["effective_timeout_secs"].as_u64().unwrap();
+    assert!((29..=30).contains(&effective_timeout));
     assert!(
         result.error.as_deref().unwrap_or("").contains("dropped"),
         "{:?}",
@@ -3165,7 +3489,7 @@ async fn search_timeout_only_without_rg_still_allows_grep_fallback() {
     );
     assert_eq!(req.timeout_secs, 5);
     complete_agent_request_by_running_locally(&runtime, "search-timeout-fallback", req).await;
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["backend"], "grep");
     assert_eq!(result.output["effective_timeout_secs"], 5);
@@ -3242,25 +3566,24 @@ fn search_glob_validation_enforces_count_and_byte_limits() {
 fn search_audit_arguments_record_bounded_feature_summary_without_pattern_or_globs() {
     let raw = json!({
         "project": "agent:demo:project",
-        "pattern": "NEVER_LOG_PATTERN_VALUE",
-        "path": "src",
-        "limit": 7,
-        "context_before": 1,
-        "context_after": 2,
-        "include_globs": ["private name/**/*.rs"],
-        "exclude_globs": ["generated secret name/**"],
-        "result_mode": "count",
-        "timeout_secs": 45
+        "queries": [{
+            "pattern": "NEVER_LOG_PATTERN_VALUE",
+            "path": "src",
+            "limit": 7,
+            "context_before": 1,
+            "context_after": 2,
+            "include_globs": ["private name/**/*.rs"],
+            "exclude_globs": ["generated secret name/**"],
+            "result_mode": "count",
+            "timeout_secs": 45
+        }]
     });
     let raw_summary = super::super::tool_audit::session_log_arguments_for_tool_request(
-        "search_project_text",
+        "search_project_texts",
         &raw,
     );
-    assert_eq!(raw_summary["pattern_present"], true);
-    assert_eq!(raw_summary["include_glob_count"], 1);
-    assert_eq!(raw_summary["exclude_glob_count"], 1);
-    assert_eq!(raw_summary["result_mode"], "count");
-    assert_eq!(raw_summary["timeout_secs"], 45);
+    assert_eq!(raw_summary["query_count"], 1);
+    assert_eq!(raw_summary["patterns_present"], true);
     let raw_json = serde_json::to_string(&raw_summary).unwrap();
     assert!(!raw_json.contains("NEVER_LOG_PATTERN_VALUE"));
     assert!(!raw_json.contains("private name"));
@@ -3278,10 +3601,8 @@ fn search_audit_arguments_record_bounded_feature_summary_without_pattern_or_glob
         },
     )
     .session_log_arguments();
-    assert_eq!(call_summary["include_glob_count"], 1);
-    assert_eq!(call_summary["exclude_glob_count"], 1);
-    assert_eq!(call_summary["result_mode"], "count");
-    assert_eq!(call_summary["timeout_secs"], 45);
+    assert_eq!(call_summary["query_count"], 1);
+    assert_eq!(call_summary["patterns_present"], true);
     let call_json = serde_json::to_string(&call_summary).unwrap();
     assert!(!call_json.contains("NEVER_LOG_PATTERN_VALUE"));
     assert!(!call_json.contains("private name"));
@@ -3559,8 +3880,9 @@ async fn search_project_text_reports_effective_clamped_timeout() {
     )
     .await;
     assert!(high.success, "{:?}", high.error);
-    assert_eq!(high_req.timeout_secs, 120);
-    assert_eq!(high.output["effective_timeout_secs"], 120);
+    assert!((29..=30).contains(&high_req.timeout_secs));
+    let high_effective_timeout = high.output["effective_timeout_secs"].as_u64().unwrap();
+    assert!((29..=30).contains(&high_effective_timeout));
 }
 
 #[tokio::test]
@@ -3598,19 +3920,23 @@ async fn advanced_search_without_rg_returns_structured_capability_error() {
         req.command
     );
     complete_agent_request_by_running_locally(&runtime, "search-no-rg", req).await;
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
 
     assert!(!result.success);
     assert_search_output_keys_are_declared(&result.output);
-    assert_eq!(result.output["code"], "search_backend_feature_unavailable");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
     assert_eq!(result.output["failure_stage"], "backend_selection");
-    assert_eq!(result.output["reason_code"], "backend_feature_unavailable");
-    assert_eq!(result.output["backend"], "grep");
     assert_eq!(
-        result.output["requested_features"],
-        json!(["result_mode=count"])
+        result.output["reason_code"],
+        "search_backend_feature_unavailable"
     );
-    assert!(result.error.unwrap().contains("ripgrep"));
+    assert_eq!(result.output["detail_code"], "backend_feature_unavailable");
+    assert_eq!(result.output["backend"], "grep");
+    assert_eq!(result.output["state_changed"], false);
+    assert!(result
+        .error
+        .unwrap()
+        .contains("search_backend_feature_unavailable"));
 }
 
 #[tokio::test]
@@ -3627,19 +3953,22 @@ async fn search_project_text_no_matches_returns_empty_matches() {
             let bootstrap = auth_context(None, true);
             runtime
                 .dispatch_with_auth(
-                    ToolCall::SearchProjectText {
-                        project,
-                        pattern: "absent_needle".to_string(),
-                        pattern_mode: None,
+                    ToolCall::SearchProjectTexts {
+                        project: project,
+                        queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+                            pattern: "absent_needle".to_string(),
+                            pattern_mode: None,
+                            path: None,
+                            limit: Some(5),
+                            context_before: None,
+                            context_after: None,
+                            include_globs: None,
+                            exclude_globs: None,
+                            result_mode: None,
+                            timeout_secs: None,
+                        }],
                         session_id: None,
-                        path: None,
-                        limit: Some(5),
-                        context_before: None,
-                        context_after: None,
-                        include_globs: None,
-                        exclude_globs: None,
-                        result_mode: None,
-                        timeout_secs: None,
+                        max_result_bytes: None,
                     },
                     Some(&bootstrap),
                 )
@@ -3647,9 +3976,9 @@ async fn search_project_text_no_matches_returns_empty_matches() {
         }
     });
     let req = wait_for_patch_agent_request(&runtime, "search-empty").await;
-    assert_eq!(req.timeout_secs, 30);
+    assert!((29..=30).contains(&req.timeout_secs));
     complete_agent_request_by_running_locally(&runtime, "search-empty", req).await;
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
 
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["matches"], json!([]));
@@ -3684,19 +4013,22 @@ async fn search_project_text_excludes_sensitive_and_build_dirs() {
             let bootstrap = auth_context(None, true);
             runtime
                 .dispatch_with_auth(
-                    ToolCall::SearchProjectText {
-                        project,
-                        pattern: "KEEP_SEARCH_NEEDLE".to_string(),
-                        pattern_mode: None,
+                    ToolCall::SearchProjectTexts {
+                        project: project,
+                        queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+                            pattern: "KEEP_SEARCH_NEEDLE".to_string(),
+                            pattern_mode: None,
+                            path: None,
+                            limit: Some(10),
+                            context_before: None,
+                            context_after: None,
+                            include_globs: None,
+                            exclude_globs: None,
+                            result_mode: None,
+                            timeout_secs: None,
+                        }],
                         session_id: None,
-                        path: None,
-                        limit: Some(10),
-                        context_before: None,
-                        context_after: None,
-                        include_globs: None,
-                        exclude_globs: None,
-                        result_mode: None,
-                        timeout_secs: None,
+                        max_result_bytes: None,
                     },
                     Some(&bootstrap),
                 )
@@ -3705,7 +4037,7 @@ async fn search_project_text_excludes_sensitive_and_build_dirs() {
     });
     let req = wait_for_patch_agent_request(&runtime, "search-excludes").await;
     complete_agent_request_by_running_locally(&runtime, "search-excludes", req).await;
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
 
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["matches"].as_array().unwrap().len(), 1);
@@ -3808,49 +4140,65 @@ async fn project_read_adapters_reject_out_of_project_paths_before_agent_dispatch
     let calls = vec![
         (
             "read_file parent traversal",
-            ToolCall::ReadFile {
+            ToolCall::ReadFiles {
                 project: project.clone(),
-                path: "../outside.txt".to_string(),
+                items: vec![crate::tool_runtime::ReadFilesItem {
+                    path: "../outside.txt".to_string(),
+                    start_line: None,
+                    limit: None,
+                    expected_read_revision: None,
+                }],
                 session_id: None,
-                start_line: None,
-                limit: None,
                 with_line_numbers: None,
+                max_result_bytes: None,
             },
             None,
         ),
         (
             "read_file nested parent traversal",
-            ToolCall::ReadFile {
+            ToolCall::ReadFiles {
                 project: project.clone(),
-                path: "src/../../outside.txt".to_string(),
+                items: vec![crate::tool_runtime::ReadFilesItem {
+                    path: "src/../../outside.txt".to_string(),
+                    start_line: None,
+                    limit: None,
+                    expected_read_revision: None,
+                }],
                 session_id: None,
-                start_line: None,
-                limit: None,
                 with_line_numbers: None,
+                max_result_bytes: None,
             },
             None,
         ),
         (
             "read_file absolute path",
-            ToolCall::ReadFile {
+            ToolCall::ReadFiles {
                 project: project.clone(),
-                path: "/etc/passwd".to_string(),
+                items: vec![crate::tool_runtime::ReadFilesItem {
+                    path: "/etc/passwd".to_string(),
+                    start_line: None,
+                    limit: None,
+                    expected_read_revision: None,
+                }],
                 session_id: None,
-                start_line: None,
-                limit: None,
                 with_line_numbers: None,
+                max_result_bytes: None,
             },
             None,
         ),
         (
             "read_file deep parent traversal",
-            ToolCall::ReadFile {
+            ToolCall::ReadFiles {
                 project: project.clone(),
-                path: "sub/../../../etc/passwd".to_string(),
+                items: vec![crate::tool_runtime::ReadFilesItem {
+                    path: "sub/../../../etc/passwd".to_string(),
+                    start_line: None,
+                    limit: None,
+                    expected_read_revision: None,
+                }],
                 session_id: None,
-                start_line: None,
-                limit: None,
                 with_line_numbers: None,
+                max_result_bytes: None,
             },
             None,
         ),
@@ -3861,6 +4209,7 @@ async fn project_read_adapters_reject_out_of_project_paths_before_agent_dispatch
                 session_id: None,
                 path: Some("/etc".to_string()),
                 limit: None,
+                offset: None,
             },
             None,
         ),
@@ -3871,6 +4220,7 @@ async fn project_read_adapters_reject_out_of_project_paths_before_agent_dispatch
                 session_id: None,
                 path: Some("../outside".to_string()),
                 limit: None,
+                offset: None,
             },
             None,
         ),
@@ -3898,44 +4248,59 @@ async fn project_read_adapters_reject_out_of_project_paths_before_agent_dispatch
         ),
         (
             "search_project_text absolute path",
-            ToolCall::SearchProjectText {
+            ToolCall::SearchProjectTexts {
                 project: project.clone(),
-                pattern: "needle".to_string(),
-                pattern_mode: None,
+                queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+                    pattern: "needle".to_string(),
+                    pattern_mode: None,
+                    path: Some("/etc".to_string()),
+                    limit: None,
+                    context_before: None,
+                    context_after: None,
+                    include_globs: None,
+                    exclude_globs: None,
+                    result_mode: None,
+                    timeout_secs: None,
+                }],
                 session_id: None,
-                path: Some("/etc".to_string()),
-                limit: None,
-                context_before: None,
-                context_after: None,
-                include_globs: None,
-                exclude_globs: None,
-                result_mode: None,
-                timeout_secs: None,
+                max_result_bytes: None,
             },
             Some("path"),
         ),
         (
             "search_project_text parent traversal",
-            ToolCall::SearchProjectText {
+            ToolCall::SearchProjectTexts {
                 project,
-                pattern: "needle".to_string(),
-                pattern_mode: None,
+                queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+                    pattern: "needle".to_string(),
+                    pattern_mode: None,
+                    path: Some("../outside".to_string()),
+                    limit: None,
+                    context_before: None,
+                    context_after: None,
+                    include_globs: None,
+                    exclude_globs: None,
+                    result_mode: None,
+                    timeout_secs: None,
+                }],
                 session_id: None,
-                path: Some("../outside".to_string()),
-                limit: None,
-                context_before: None,
-                context_after: None,
-                include_globs: None,
-                exclude_globs: None,
-                result_mode: None,
-                timeout_secs: None,
+                max_result_bytes: None,
             },
             Some("path"),
         ),
     ];
 
     for (case, call, structured_field) in calls {
+        let is_batch = matches!(
+            &call,
+            ToolCall::ReadFiles { .. } | ToolCall::SearchProjectTexts { .. }
+        );
         let result = runtime.dispatch_with_auth(call, Some(&bootstrap)).await;
+        let result = if is_batch {
+            extract_single_search_batch_result(result)
+        } else {
+            result
+        };
         assert!(!result.success, "{case} escaped the project boundary");
         let error = result.error.as_deref().unwrap_or("");
         assert!(
@@ -3944,9 +4309,17 @@ async fn project_read_adapters_reject_out_of_project_paths_before_agent_dispatch
                 || error.contains("path"),
             "{case}: {error}"
         );
-        if let Some(field) = structured_field {
-            assert_eq!(result.output["code"], "invalid_search_request", "{case}");
-            assert_eq!(result.output["field"], field, "{case}");
+        if structured_field.is_some() {
+            assert_eq!(
+                result.output["error_kind"], "search_project_text_failed",
+                "{case}"
+            );
+            assert_eq!(
+                result.output["failure_stage"], "request_validation",
+                "{case}"
+            );
+            assert_eq!(result.output["reason_code"], "invalid_path", "{case}");
+            assert_eq!(result.output["detail_code"], "invalid_path", "{case}");
         }
         assert!(
             probe_patch_agent_request(&runtime, "path-boundary")
@@ -3968,19 +4341,22 @@ async fn search_project_text_requires_shell_capability() {
     let bootstrap = auth_context(None, true);
     let result = runtime
         .dispatch_with_auth(
-            ToolCall::SearchProjectText {
+            ToolCall::SearchProjectTexts {
                 project: agent_test_project_id("oe"),
-                pattern: "fn".to_string(),
-                pattern_mode: None,
+                queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+                    pattern: "fn".to_string(),
+                    pattern_mode: None,
+                    path: None,
+                    limit: None,
+                    context_before: None,
+                    context_after: None,
+                    include_globs: None,
+                    exclude_globs: None,
+                    result_mode: None,
+                    timeout_secs: None,
+                }],
                 session_id: None,
-                path: None,
-                limit: None,
-                context_before: None,
-                context_after: None,
-                include_globs: None,
-                exclude_globs: None,
-                result_mode: None,
-                timeout_secs: None,
+                max_result_bytes: None,
             },
             Some(&bootstrap),
         )
@@ -4010,19 +4386,22 @@ async fn search_project_text_context_does_not_enqueue_python_helper() {
             let bootstrap = auth_context(None, true);
             runtime
                 .dispatch_with_auth(
-                    ToolCall::SearchProjectText {
-                        project,
-                        pattern: "needle".to_string(),
+                    ToolCall::SearchProjectTexts {
+                        project: project,
+                        queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+                            pattern: "needle".to_string(),
+                            pattern_mode: None,
+                            path: None,
+                            limit: Some(5),
+                            context_before: Some(1),
+                            context_after: Some(1),
+                            include_globs: None,
+                            exclude_globs: None,
+                            result_mode: None,
+                            timeout_secs: None,
+                        }],
                         session_id: None,
-                        path: None,
-                        limit: Some(5),
-                        context_before: Some(1),
-                        pattern_mode: None,
-                        context_after: Some(1),
-                        include_globs: None,
-                        exclude_globs: None,
-                        result_mode: None,
-                        timeout_secs: None,
+                        max_result_bytes: None,
                     },
                     Some(&bootstrap),
                 )
@@ -4040,7 +4419,7 @@ async fn search_project_text_context_does_not_enqueue_python_helper() {
     assert!(req.command.contains("rg --with-filename --null"));
     assert!(req.command.contains("grep -rnI --null"));
     complete_agent_request_by_running_locally(&runtime, "search-native", req).await;
-    let result = task.await.unwrap();
+    let result = extract_single_search_batch_result(task.await.unwrap());
 
     assert!(result.success, "{:?}", result.error);
     assert!(matches!(
@@ -4073,6 +4452,7 @@ async fn list_project_files_rejects_non_agent_project_id() {
             session_id: None,
             path: None,
             limit: None,
+            offset: None,
         })
         .await;
     assert!(!result.success);
@@ -4099,27 +4479,33 @@ async fn search_project_text_rejects_empty_pattern() {
     let bootstrap = auth_context(None, true);
     let result = runtime
         .dispatch_with_auth(
-            ToolCall::SearchProjectText {
+            ToolCall::SearchProjectTexts {
                 project: agent_test_project_id("oe"),
-                pattern: "   ".to_string(),
-                pattern_mode: None,
+                queries: vec![crate::tool_runtime::SearchProjectTextsQuery {
+                    pattern: "   ".to_string(),
+                    pattern_mode: None,
+                    path: None,
+                    limit: None,
+                    context_before: None,
+                    context_after: None,
+                    include_globs: None,
+                    exclude_globs: None,
+                    result_mode: None,
+                    timeout_secs: None,
+                }],
                 session_id: None,
-                path: None,
-                limit: None,
-                context_before: None,
-                context_after: None,
-                include_globs: None,
-                exclude_globs: None,
-                result_mode: None,
-                timeout_secs: None,
+                max_result_bytes: None,
             },
             Some(&bootstrap),
         )
         .await;
+    let result = extract_single_search_batch_result(result);
     assert!(!result.success);
-    assert!(result.error.unwrap().contains("pattern"));
-    assert_eq!(result.output["code"], "invalid_search_request");
-    assert_eq!(result.output["field"], "pattern");
+    assert_eq!(result.output["error_kind"], "search_project_text_failed");
+    assert_eq!(result.output["failure_stage"], "request_validation");
+    assert_eq!(result.output["reason_code"], "invalid_pattern");
+    assert_eq!(result.output["detail_code"], "invalid_pattern");
+    assert_eq!(result.output["state_changed"], false);
 }
 
 #[test]
@@ -4215,18 +4601,18 @@ async fn write_project_file_rejects_invalid_input_before_agent_dispatch() {
         .await;
     assert!(!result.success);
     assert!(result.error.unwrap().contains("sensitive"));
-    // bad expected_sha256 format
+    // invalid model-facing read revision
     let result = runtime
         .write_project_file(
             "agent:c:p".to_string(),
             "EDIT_PROBE.txt".to_string(),
             "x".to_string(),
             Some(true),
-            Some("not-a-hash".to_string()),
+            Some(0),
         )
         .await;
     assert!(!result.success);
-    assert!(result.error.unwrap().contains("expected_sha256"));
+    assert!(result.error.unwrap().contains("expected_read_revision"));
 }
 
 #[test]

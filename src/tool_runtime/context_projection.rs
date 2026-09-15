@@ -4,6 +4,8 @@ use super::startup_brief::{
 };
 use super::{ToolResult, ToolRuntime};
 use crate::auth::AuthContext;
+use crate::json_measurement::serialized_json_len;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -11,6 +13,10 @@ pub(crate) const TOOL_CALL_CONTEXT_REQUEST_FIELD: &str = "context_request";
 pub(crate) const MAX_CONTEXT_REQUEST_ITEMS: usize = 8;
 pub(crate) const MAX_CONTEXT_REQUEST_KEY_CHARS: usize = 64;
 pub(crate) const MAX_CONTEXT_PROJECTION_BYTES: usize = 20 * 1024;
+const PLUGIN_CATALOG_SCOPES: &[&str] = &[
+    crate::auth::SCOPE_PROJECT_READ,
+    crate::auth::SCOPE_PLUGIN_INSPECT,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextMaterialScopePolicy {
@@ -58,6 +64,12 @@ pub(crate) const CONTEXT_MATERIAL_SPECS: &[ContextMaterialSpec] = &[
         project_required: true,
         scope_policy: ContextMaterialScopePolicy::Require(crate::auth::SCOPE_PROJECT_READ),
         surface: ContextMaterialSurface::SkillRuntime,
+    },
+    ContextMaterialSpec {
+        key: "plugins.catalog",
+        project_required: true,
+        scope_policy: ContextMaterialScopePolicy::RequireAll(PLUGIN_CATALOG_SCOPES),
+        surface: ContextMaterialSurface::AnySidecar,
     },
     ContextMaterialSpec {
         key: "memory.bootstrap",
@@ -116,10 +128,23 @@ fn projection_envelope(materials: Vec<Value>, truncated: bool) -> Value {
     })
 }
 
+#[derive(Serialize)]
+struct ContextProjectionMeasure<'a> {
+    timing: &'static str,
+    applies_to_current_effect: bool,
+    materials: &'a [Value],
+    truncated: bool,
+}
+
 fn fits_projection_budget(materials: &[Value], truncated: bool) -> bool {
-    serde_json::to_vec(&projection_envelope(materials.to_vec(), truncated))
-        .map(|bytes| bytes.len() <= MAX_CONTEXT_PROJECTION_BYTES)
-        .unwrap_or(false)
+    serialized_json_len(&ContextProjectionMeasure {
+        timing: "post_tool",
+        applies_to_current_effect: false,
+        materials,
+        truncated,
+    })
+    .map(|bytes| bytes <= MAX_CONTEXT_PROJECTION_BYTES)
+    .unwrap_or(false)
 }
 
 fn unavailable(key: &str, reason_code: &str) -> Value {
@@ -128,6 +153,14 @@ fn unavailable(key: &str, reason_code: &str) -> Value {
         "status": "unavailable",
         "reason_code": reason_code,
     })
+}
+
+fn scope_unavailable_reason(key: &str) -> &'static str {
+    if key == "plugins.catalog" {
+        "plugin_inspect_scope_unavailable"
+    } else {
+        "context_material_scope_unavailable"
+    }
 }
 
 impl ToolRuntime {
@@ -159,7 +192,7 @@ impl ToolRuntime {
                 } else if spec.project_required && resolved_project.is_none() {
                     unavailable(key, "project_target_unavailable")
                 } else if !context_material_scope_available(spec.scope_policy, auth) {
-                    unavailable(key, "context_material_scope_unavailable")
+                    unavailable(key, scope_unavailable_reason(key))
                 } else {
                     match key {
                         "project.instructions" => {
@@ -187,6 +220,21 @@ impl ToolRuntime {
                             let project =
                                 resolved_project.expect("registry requires project target");
                             match self.skills_catalog_context_projection(project, auth).await {
+                                Ok(projection) => json!({
+                                    "key": key,
+                                    "status": "available",
+                                    "projection": projection,
+                                }),
+                                Err(reason_code) => unavailable(key, reason_code),
+                            }
+                        }
+                        "plugins.catalog" => {
+                            let project =
+                                resolved_project.expect("registry requires project target");
+                            match self
+                                .plugin_project_catalog_context_projection(project, auth)
+                                .await
+                            {
                                 Ok(projection) => json!({
                                     "key": key,
                                     "status": "available",
@@ -223,26 +271,24 @@ impl ToolRuntime {
                 })
             };
 
-            let mut candidate = materials.clone();
-            candidate.push(material.clone());
-            if fits_projection_budget(&candidate, truncated) {
-                materials.push(material);
+            materials.push(material);
+            if fits_projection_budget(&materials, truncated) {
                 continue;
             }
+            materials.pop();
 
             truncated = true;
             let bounded = unavailable(key, "context_projection_budget_exceeded");
-            let mut bounded_candidate = materials.clone();
-            bounded_candidate.push(bounded.clone());
-            if fits_projection_budget(&bounded_candidate, true) {
-                materials.push(bounded);
+            materials.push(bounded);
+            if !fits_projection_budget(&materials, true) {
+                materials.pop();
             }
         }
 
         let projection = projection_envelope(materials, truncated);
         debug_assert!(
-            serde_json::to_vec(&projection)
-                .map(|bytes| bytes.len() <= MAX_CONTEXT_PROJECTION_BYTES)
+            serialized_json_len(&projection)
+                .map(|bytes| bytes <= MAX_CONTEXT_PROJECTION_BYTES)
                 .unwrap_or(false),
             "context projection must stay inside its independent budget"
         );

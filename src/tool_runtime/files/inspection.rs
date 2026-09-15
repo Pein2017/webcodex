@@ -371,14 +371,12 @@ pub(crate) fn relative_entry_path(rel_path: &str, name: &str) -> String {
     }
 }
 
-/// Parse Runner `file_list` stdout (one entry per line, dirs suffixed with
-/// `/`) into bounded project-relative entries with a file/dir kind. Returns
-/// the entries and whether the source exceeded `max_entries`.
-pub(crate) fn parse_file_list_entries(
-    stdout: &str,
-    rel_path: &str,
-    max_entries: usize,
-) -> (Vec<Value>, bool) {
+/// Parse a complete Runner `file_list` source (one entry per line, directories
+/// suffixed with `/`) into deterministically sorted project-relative entries.
+/// Paging is deliberately applied only after the complete source has reached
+/// the Server so `total_entries` and `next_offset` never describe a retained
+/// tail as if it were the full directory.
+pub(crate) fn parse_file_list_entries(stdout: &str, rel_path: &str) -> Vec<Value> {
     let mut all: Vec<Value> = Vec::new();
     for line in stdout.lines() {
         let line = line.trim_end_matches('\r');
@@ -404,9 +402,35 @@ pub(crate) fn parse_file_list_entries(
             .unwrap_or("")
             .cmp(b["path"].as_str().unwrap_or(""))
     });
-    let truncated = all.len() > max_entries;
-    all.truncate(max_entries);
-    (all, truncated)
+    all
+}
+
+pub(crate) fn page_file_list_entries(
+    all: &[Value],
+    offset: usize,
+    max_entries: usize,
+) -> (Vec<Value>, Option<usize>) {
+    let start = offset.min(all.len());
+    let end = start.saturating_add(max_entries).min(all.len());
+    let page = all[start..end].to_vec();
+    let next_offset = (end < all.len()).then_some(end);
+    (page, next_offset)
+}
+
+fn has_leading_runner_result_retention_truncation_marker(value: &str) -> bool {
+    if value.starts_with("[output truncated]\n") || value.starts_with("[...]\n") {
+        return true;
+    }
+    let Some(rest) = value.strip_prefix("[output truncated to last ") else {
+        return false;
+    };
+    let Some(newline) = rest.find('\n') else {
+        return false;
+    };
+    let Some(byte_count) = rest[..newline].strip_suffix(" bytes]") else {
+        return false;
+    };
+    !byte_count.is_empty() && byte_count.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Wall-clock budget for one tracked-file listing. `git ls-files` reads the
@@ -414,10 +438,24 @@ pub(crate) fn parse_file_list_entries(
 /// reporting a sick repository, not a big one.
 const LIST_TRACKED_TIMEOUT_SECS: u64 = 20;
 
-/// Transport cap on raw `git ls-files -z` output. Roughly 25k paths at typical
-/// lengths; beyond it the listing reports `list_truncated` rather than
-/// pretending the index ended there.
-const LIST_TRACKED_MAX_BYTES: usize = 1024 * 1024;
+/// Producer-side source-acquisition budget for raw `git ls-files -z` output.
+/// Keep this comfortably below the ordinary 256 KiB-per-stream Runner capture
+/// and Server result-retention defaults; those are retention contracts, not
+/// polling/WebSocket/QUIC wire ceilings. One extra byte is requested below so
+/// hitting this budget is detectable even when the byte boundary lands on NUL.
+pub(crate) const LIST_TRACKED_SOURCE_MAX_BYTES: usize = 192 * 1024;
+const LIST_TRACKED_SOURCE_PROBE_BYTES: usize = LIST_TRACKED_SOURCE_MAX_BYTES + 1;
+
+fn bounded_tracked_source(raw: &str) -> (&str, bool) {
+    if raw.len() <= LIST_TRACKED_SOURCE_MAX_BYTES {
+        return (raw, false);
+    }
+    let mut end = LIST_TRACKED_SOURCE_MAX_BYTES;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&raw[..end], true)
+}
 
 /// Structured failure shaped like the other file-tool errors, so a caller can
 /// branch on `code` instead of matching prose.
@@ -465,7 +503,7 @@ pub(crate) fn list_tracked_files_command_with_head_fallbacks(
     };
     format!(
         r#"{head_setup}if git rev-parse --git-dir >/dev/null 2>&1; then
-  git ls-files -z --cached{pathspec} | "$head_cmd" -c {LIST_TRACKED_MAX_BYTES}
+  git ls-files -z --cached{pathspec} | "$head_cmd" -c {LIST_TRACKED_SOURCE_PROBE_BYTES}
 else
   exit 3
 fi"#
@@ -473,6 +511,7 @@ fi"#
 }
 
 impl ToolRuntime {
+    #[cfg(test)]
     pub(crate) async fn read_file(
         &self,
         project: String,
@@ -482,51 +521,29 @@ impl ToolRuntime {
         with_line_numbers: Option<bool>,
     ) -> ToolResult {
         let with_line_numbers = with_line_numbers.unwrap_or(false);
-        // Bound the request to the project before it can reach an executor.
-        // The Runner branch below forwards `path` to a remote host that scopes
-        // file ops to `allowed_roots` — which is broader than the project — so
-        // the project boundary has to be enforced here, as `list_project_files`
-        // and `project_overview` already do.
         if let Some(failure) = validate_read_file_path(&path) {
             return failure;
         }
-        // Every other surface already refuses credentials: search excludes
-        // them, artifacts and edits reject them. Reading was the one way left
-        // to get a `.env` or a private key back verbatim. Only the narrow
-        // secret policy applies here — reading `.git/HEAD` or a file under
-        // `target/` by explicit path stays allowed.
-        let proj = match self.resolve_project(&project).await {
-            Ok(p) => p,
-            Err(e) => return ToolResult::err(e),
+        let resolved = match self.resolve_project_input(&project).await {
+            Ok(resolved) => resolved,
+            Err(error) => return ToolResult::err(error),
+        };
+        let Some(runner) = self
+            .runner_registry
+            .get_runner_view(&resolved.config.client_id)
+            .await
+        else {
+            return read_file_failure(ReadFileReason::RunnerUnavailable, Some(&path));
+        };
+        let Some(runner_project_id) =
+            crate::tool_runtime::runner_local_project_id(&resolved.resolved_id)
+        else {
+            return read_file_failure(ReadFileReason::RunnerUnavailable, Some(&path));
         };
         self.read_one_validated_project_file(
-            &proj,
-            path,
-            start_line,
-            limit,
-            with_line_numbers,
-            None,
-        )
-        .await
-    }
-
-    pub(crate) async fn read_file_resolved(
-        &self,
-        resolved: &ResolvedProject,
-        path: String,
-        start_line: Option<usize>,
-        limit: Option<usize>,
-        with_line_numbers: Option<bool>,
-    ) -> ToolResult {
-        let with_line_numbers = with_line_numbers.unwrap_or(false);
-        // Reuse the same path/sensitive checks as the legacy direct helper,
-        // but consume the authoritative Project resolved by dispatch instead
-        // of performing another registry lookup.
-        if let Some(failure) = validate_read_file_path(&path) {
-            return failure;
-        }
-        self.read_one_validated_project_file(
             &resolved.config,
+            runner_project_id,
+            &runner.runner_instance_id,
             path,
             start_line,
             limit,
@@ -539,6 +556,8 @@ impl ToolRuntime {
     pub(crate) async fn read_one_resolved_project_file(
         &self,
         project: &ProjectConfig,
+        runner_project_id: &str,
+        expected_runner_instance_id: &str,
         path: String,
         start_line: Option<usize>,
         limit: Option<usize>,
@@ -553,6 +572,8 @@ impl ToolRuntime {
         }
         self.read_one_validated_project_file(
             project,
+            runner_project_id,
+            expected_runner_instance_id,
             path,
             start_line,
             limit,
@@ -565,6 +586,8 @@ impl ToolRuntime {
     async fn read_one_validated_project_file(
         &self,
         proj: &ProjectConfig,
+        runner_project_id: &str,
+        expected_runner_instance_id: &str,
         path: String,
         start_line: Option<usize>,
         limit: Option<usize>,
@@ -576,7 +599,7 @@ impl ToolRuntime {
         let (eff_start, _eff_limit, eff_end) = effective_read_file_range(start_line, limit);
         let (request_id, rx) = match self
             .runner_registry
-            .enqueue_file_op(
+            .enqueue_project_file_read(
                 ShellFileOpRequest {
                     op: "read".to_string(),
                     client_id,
@@ -598,6 +621,9 @@ impl ToolRuntime {
                     create_dirs: false,
                     wait_timeout_secs: wait_timeout,
                 },
+                runner_project_id,
+                &proj.path,
+                expected_runner_instance_id,
                 "tool_runtime".to_string(),
             )
             .await
@@ -873,6 +899,7 @@ impl ToolRuntime {
         project: String,
         path: Option<String>,
         limit: Option<usize>,
+        offset: Option<usize>,
     ) -> ToolResult {
         let proj = match self.resolve_project(&project).await {
             Ok(p) => p,
@@ -886,6 +913,7 @@ impl ToolRuntime {
             return ToolResult::err(e);
         }
         let max_entries = limit.unwrap_or(200).clamp(1, 500);
+        let offset = offset.unwrap_or(0);
         let client_id = proj.client_id.clone();
         let wait_timeout = 30;
         let (request_id, rx) = match self
@@ -918,12 +946,29 @@ impl ToolRuntime {
         match tokio::time::timeout(Duration::from_secs(wait_timeout + 2), rx).await {
             Ok(Ok(resp)) if resp.exit_code == Some(0) && resp.error.is_none() => {
                 let stdout = resp.stdout.unwrap_or_default();
-                let (entries, truncated) = parse_file_list_entries(&stdout, &rel_path, max_entries);
+                if has_leading_runner_result_retention_truncation_marker(&stdout) {
+                    return ToolResult::err_with_output(
+                        "Runner directory listing was truncated by ordinary result retention; narrow path before paging",
+                        json!({
+                            "error_kind": "source_incomplete",
+                            "reason_code": "runner_result_retention_truncated",
+                            "state_changed": false,
+                        }),
+                    );
+                }
+                let all = parse_file_list_entries(&stdout, &rel_path);
+                let total_entries = all.len();
+                let (entries, next_offset) = page_file_list_entries(&all, offset, max_entries);
+                let returned = entries.len();
                 ToolResult::ok(json!({
                     "project": project,
                     "path": rel_path,
                     "entries": entries,
-                    "truncated": truncated,
+                    "returned": returned,
+                    "total_entries": total_entries,
+                    "offset": offset,
+                    "next_offset": next_offset,
+                    "truncated": next_offset.is_some(),
                 }))
             }
             Ok(Ok(resp)) => ToolResult::err(
@@ -1064,7 +1109,16 @@ impl ToolRuntime {
             }
         }
 
-        let (paths, list_truncated) = super::file_listing::parse_nul_separated(&raw);
+        if has_leading_runner_result_retention_truncation_marker(&raw) {
+            return list_tracked_error(
+                "source_incomplete",
+                "Runner tracked-file source was truncated by ordinary result retention; narrow path before retrying because offset pagination cannot recover a retained tail"
+                    .to_string(),
+            );
+        }
+        let (bounded_raw, producer_budget_hit) = bounded_tracked_source(&raw);
+        let (paths, unterminated_record) = super::file_listing::parse_nul_separated(bounded_raw);
+        let list_truncated = producer_budget_hit || unterminated_record;
         let listing =
             super::file_listing::build_listing(&paths, &scope, &globs, depth, limit, offset);
         ToolResult::ok(listing.to_json(&project, &scope, list_truncated))
@@ -1648,6 +1702,8 @@ mod tests {
             exit_code: None,
             stdout: None,
             stderr: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(1),
             error: Some(message.to_string()),
             request_dispatched: Some(true),

@@ -33,7 +33,6 @@ pub fn document_symbols_input_schema() -> Value {
         ),
     ]));
     schema["properties"]["limit"]["minimum"] = json!(1);
-    schema["properties"]["limit"]["maximum"] = json!(500);
     schema["properties"]["limit"]["default"] = json!(100);
     schema
 }
@@ -60,7 +59,6 @@ pub fn document_diagnostics_input_schema() -> Value {
         ),
     ]));
     schema["properties"]["limit"]["minimum"] = json!(1);
-    schema["properties"]["limit"]["maximum"] = json!(200);
     schema["properties"]["limit"]["default"] = json!(100);
     schema
 }
@@ -116,7 +114,6 @@ pub fn workspace_symbols_input_schema() -> Value {
     schema["properties"]["query"]["minLength"] = json!(1);
     schema["properties"]["query"]["maxLength"] = json!(200);
     schema["properties"]["limit"]["minimum"] = json!(1);
-    schema["properties"]["limit"]["maximum"] = json!(200);
     schema["properties"]["limit"]["default"] = json!(50);
     schema
 }
@@ -152,7 +149,6 @@ pub fn goto_definition_input_schema() -> Value {
     schema["properties"]["line"]["minimum"] = json!(1);
     schema["properties"]["column"]["minimum"] = json!(1);
     schema["properties"]["limit"]["minimum"] = json!(1);
-    schema["properties"]["limit"]["maximum"] = json!(100);
     schema["properties"]["limit"]["default"] = json!(20);
     schema
 }
@@ -195,7 +191,6 @@ pub fn find_references_input_schema() -> Value {
     schema["properties"]["column"]["minimum"] = json!(1);
     schema["properties"]["include_declaration"]["default"] = json!(true);
     schema["properties"]["limit"]["minimum"] = json!(1);
-    schema["properties"]["limit"]["maximum"] = json!(200);
     schema["properties"]["limit"]["default"] = json!(50);
     schema
 }
@@ -236,7 +231,7 @@ pub fn call_hierarchy_input_schema() -> Value {
         (
             "limit",
             "integer",
-            "Global flattened edge limit (default 50, maximum 100).",
+            "Global flattened edge result ceiling (default 50). Positive values above 100 are accepted and clamped to 100.",
             false,
         ),
     ]));
@@ -248,7 +243,6 @@ pub fn call_hierarchy_input_schema() -> Value {
     schema["properties"]["depth"]["maximum"] = json!(2);
     schema["properties"]["depth"]["default"] = json!(1);
     schema["properties"]["limit"]["minimum"] = json!(1);
-    schema["properties"]["limit"]["maximum"] = json!(100);
     schema["properties"]["limit"]["default"] = json!(50);
     schema
 }

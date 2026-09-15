@@ -195,8 +195,11 @@ Hosted MCP clients and GPT Actions require a public HTTPS URL. Set
 `WEBCODEX_PUBLIC_URL` in the Server env file and put a reverse proxy in front
 of `127.0.0.1:8080`. Nginx is supported; a named Cloudflare Tunnel is also a
 valid front door. The same hostname must carry ordinary HTTPS requests and
-`/api/agents/ws` (Cloudflare supports WebSocket upgrades). WebCodex CLI does
-not automate reverse proxy or tunnel setup.
+`/api/agents/ws` (Cloudflare supports WebSocket upgrades). WebCodex also uses
+this configured origin as the MCP App `ui.domain` for Computer and Result
+resources; it never substitutes a WebCodex-operated domain for self-hosted
+servers. When no public URL is configured the optional field is omitted.
+WebCodex CLI does not automate reverse proxy or tunnel setup.
 
 ### Enroll a repository machine
 
@@ -361,6 +364,7 @@ Client enrollment generates the Runner config. Important settings in
 | `transport` | Prefer `auto` with `[quic]` configured. |
 | `project_registry_dir` | Directory of project registry files. |
 | `[policy]` | Local execution boundary (`allowed_roots`, etc.). |
+| `[skills].roots` | Optional absolute Runner-local read-only Skill roots; live files are discovered without copying into the managed Skill Store. |
 | `[shell]` | Optional shell profile definitions and bounded persistent-shell limits. |
 | `[ssh.resources.<name>]` | Optional named SSH target for Session-bound `run_shell` / `run_job`. |
 
@@ -450,16 +454,24 @@ protocol-level refresh-token scope and grants no extra WebCodex permission.
 ## GPT Actions and MCP
 
 - **MCP:** connect a client to `https://your-domain.example/mcp` with a user
-  API token (`wc_pat_*`) or, when OAuth is enabled, the OAuth flow.
+  API token (`wc_pat_*`) or, when OAuth is enabled, the OAuth flow. MCP remains
+  the primary ChatGPT integration.
 - **GPT Actions:** import `https://your-domain.example/openapi.json` into a
-  Custom GPT with HTTP Bearer authentication.
+  Custom GPT with HTTP Bearer authentication. On a generic runtime Server this
+  projects the same canonical Adaptive Runtime model surface: current Adaptive
+  Direct tools become direct snake_case Action operations and supported long-tail
+  tools use `call_runtime_tool`. MCP-only protocol presentation is excluded.
 
-Both use the same user API token and the same ToolRuntime. The OpenAPI schema
-intentionally excludes users, token, pairing/enrollment, setup, doctor, npm,
-server-management, and audit endpoints. Use `webcodex` for those tasks.
+After upgrading from the older generic Action facade, re-import `/openapi.json`
+to pick up the canonical operation names. Existing legacy REST routes may remain
+for compatibility but are not part of the new model-facing schema.
 
-MCP and GPT Actions are documented in [MCP.md](MCP.md) and the client-specific
-setup in [AI Onboarding](AI_ONBOARDING.md).
+Both integrations enter the same ToolRuntime authority path. GPT Actions does not
+introduce a separate scope, Project-authority, permission, Runner-capability, or
+retry policy. Project-bound Connector deployments keep their independent canonical
+fourteen-capability MCP/OpenAPI surface.
+
+See [GPT Actions](GPT_ACTIONS.md), [MCP](MCP.md), and [AI Onboarding](AI_ONBOARDING.md).
 
 ## Operations
 
@@ -519,7 +531,7 @@ ChatGPT path. Credentials are deliberately never returned by the console API.
 
 ### Runtime job API trust model
 
-`job_status`, `job_log`, `list_jobs`, and `job_tail` are intended for trusted
+`observe_jobs`, `list_jobs`, and `job_tail` are intended for trusted
 single-operator deployments. They are not a tenant boundary between mutually
 untrusted users. Do not expose one runtime to multiple untrusted users without
 adding job-owner isolation; use separate server/runtime instances instead.

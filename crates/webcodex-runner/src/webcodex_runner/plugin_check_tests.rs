@@ -271,6 +271,48 @@ fn check_observes_edited_v2_without_replacing_current_v1() {
 }
 
 #[test]
+fn initialize_eof_detail_is_actionable_without_inventing_a_root_cause() {
+    let detail = initialize_failure_detail("plugin_eof");
+    assert!(detail.contains("Plugin protocol output ended before initialize completed"));
+    assert!(detail.contains("process may have exited or closed stdout"));
+    assert!(detail.contains("configured command and arguments"));
+    assert!(detail.contains("For a generated TypeScript Plugin"));
+    assert!(detail.contains("npm run build"));
+    assert!(detail.contains("dist/plugin.js"));
+    assert!(!detail.contains("entrypoint_missing"));
+    assert!(!detail.contains("Cannot find module"));
+}
+
+#[test]
+fn initialize_eof_keeps_raw_stderr_runner_local() {
+    let fixture = CheckFixture::new("check_init_crash_stderr", 2);
+    let response = fixture.check();
+    let encoded = serde_json::to_string(&response).unwrap();
+    assert!(!encoded.contains("diagnostic-only-secret-looking-initialize-stderr"));
+    assert!(!encoded.contains(fixture._temp.path().to_string_lossy().as_ref()));
+
+    let report = checked_report(response);
+    assert!(!report.ready);
+    assert_eq!(report.phase, PluginCheckPhase::Initialize);
+    assert_eq!(report.code.as_deref(), Some("plugin_eof"));
+    assert_eq!(
+        report.detail.as_deref(),
+        Some(initialize_failure_detail("plugin_eof"))
+    );
+    assert!(report.diagnostic.is_none());
+
+    let local = fixture
+        .manager
+        .local_check_stderr_diagnostics("fake")
+        .expect("initialize failure should retain bounded Runner-local stderr");
+    assert!(local
+        .lines
+        .iter()
+        .any(|line| line.text == "diagnostic-only-secret-looking-initialize-stderr"));
+}
+
+#[test]
+#[cfg(feature = "runner-real-process-tests")]
 #[ignore = "runner real-process lane: disposable plugin checks clean up failed candidate process trees"]
 fn runner_real_process_plugin_check_failures_are_structured_diagnostic_results_and_cleanup_process_trees(
 ) {
@@ -531,6 +573,7 @@ fn candidate_gate_serializes_check_and_reload_without_blocking_current_providers
 }
 
 #[test]
+#[cfg(feature = "runner-real-process-tests")]
 #[ignore = "runner real-process lane: plugin shutdown interrupts blocked candidate and reaps its tree"]
 fn runner_real_process_plugin_shutdown_interrupts_blocked_check_candidate_and_reaps_tree() {
     let fixture = CheckFixture::new("candidate_block_list_tree", 10);
@@ -572,7 +615,7 @@ fn runner_config(
 ) -> RunnerConfig {
     use super::super::config::{
         default_websocket_connect_timeout_secs, AcpConfig, McpGatewayConfig, RunnerPolicy,
-        SshConfig, ToolProvidersConfig,
+        SkillsConfig, SshConfig, ToolProvidersConfig,
     };
     RunnerConfig {
         server_url: "http://127.0.0.1:8000".to_string(),
@@ -592,6 +635,7 @@ fn runner_config(
         websocket_connect_timeout_secs: default_websocket_connect_timeout_secs(),
         quic: None,
         shell,
+        skills: SkillsConfig::default(),
         ssh: SshConfig::default(),
         tool_providers: ToolProvidersConfig::default(),
         mcp_gateway: McpGatewayConfig::default(),

@@ -351,7 +351,7 @@ impl ToolRuntime {
                 return process_tool_failure_result(
                     command_rejected_message(
                         format!("run_detached_process {error}"),
-                        "pass timeout_secs between 1 and 3600, or omit it for the default of 60 seconds.",
+                        "pass a positive timeout_secs, or omit it for the default of 60 seconds; values above 3600 are clamped.",
                     ),
                     "invalid_arguments",
                     ShellCommandExecutionState::NotStarted,
@@ -487,26 +487,34 @@ impl ToolRuntime {
             )
             .await
         {
-            Ok(job) => ToolResult::ok(json!({
-                "job_id": job.job_id,
-                "kind": job.kind,
-                "status": job.status,
-                "project": project,
-                "execution_source": "run_detached_process",
-                "purpose": declared_purpose.as_str(),
-                "process_summary": summary,
-                "cwd": resolved_cwd,
-                "shell": "direct_argv",
-                "executor": "agent",
-                "execution_state": "pending",
-                "command_started": false,
-                "command_completed": false,
-                "terminal": false,
-                "effective_timeout_secs": timeout,
-                "created_at": job.created_at,
-                "observation_token": job.observation_token,
-                "last_update_seq": job.last_update_seq,
-            })),
+            Ok(job) => {
+                let continuation = crate::tool_runtime::jobs::observe_job_continuation(
+                    &job.job_id,
+                    job.observation_token.as_deref(),
+                );
+                ToolResult::ok(json!({
+                    "job_id": job.job_id,
+                    "kind": job.kind,
+                    "status": job.status,
+                    "project": project,
+                    "execution_source": "run_detached_process",
+                    "purpose": declared_purpose.as_str(),
+                    "process_summary": summary,
+                    "cwd": resolved_cwd,
+                    "shell": "direct_argv",
+                    "executor": "agent",
+                    "execution_state": "pending",
+                    "command_started": false,
+                    "command_completed": false,
+                    "terminal": false,
+                    "effective_timeout_secs": timeout,
+                    "created_at": job.created_at,
+                    "observation_token": job.observation_token,
+                    "continuation_semantics": crate::tool_runtime::jobs::job_observation_continuation_semantics(),
+                    "last_update_seq": job.last_update_seq,
+                    "continuation": continuation,
+                }))
+            }
             Err(error) => {
                 if let Some(job_id) = error.strip_prefix(DETACHED_IDEMPOTENCY_RECOVERY_PREFIX) {
                     return ToolResult::err_with_output(
@@ -597,7 +605,7 @@ impl ToolRuntime {
                 return process_tool_failure_result(
                     command_rejected_message(
                         format!("run_process {error}"),
-                        "pass timeout_secs between 1 and 3600 and sync_wait_secs between 1 and 60 without exceeding timeout_secs; both may be omitted for their defaults.",
+                        "pass positive timeout_secs/sync_wait_secs values or omit them for defaults; oversized values are clamped to the supported runtime and synchronous-wait ceilings.",
                     ),
                     "invalid_arguments",
                     ShellCommandExecutionState::NotStarted,
@@ -805,6 +813,10 @@ impl ToolRuntime {
                             &observation.stderr_tail,
                             observation.job.activity.as_ref(),
                         );
+                    let continuation = crate::tool_runtime::jobs::observe_job_continuation(
+                        &observation.job.job_id,
+                        observation.job.observation_token.as_deref(),
+                    );
                     ToolResult::ok(json!({
                         "execution_state": execution_state,
                         "command_started": command_started,
@@ -818,6 +830,7 @@ impl ToolRuntime {
                         "job_id": observation.job.job_id,
                         "job_status": observation.job.status,
                         "observation_token": observation.job.observation_token,
+                        "continuation_semantics": crate::tool_runtime::jobs::job_observation_continuation_semantics(),
                         "activity": observation.job.activity,
                         "effective_timeout_secs": timeout,
                         "sync_wait_secs": budget.sync_wait_secs,
@@ -829,6 +842,7 @@ impl ToolRuntime {
                         "stdout_truncated": observation.stdout_truncated,
                         "stderr_truncated": observation.stderr_truncated,
                         "detected_summary": detected_summary,
+                        "continuation": continuation,
                     }))
                 }
                 Err(error) => outcome_unknown_result(format!(

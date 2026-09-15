@@ -8,6 +8,7 @@ use crate::db::{
     ProjectMemoryScopeRecord, MAX_MEMORIES_GLOBAL, MAX_MEMORY_BOOTSTRAP_BYTES,
     MAX_MEMORY_SCOPE_LIST_LIMIT, MAX_MEMORY_SEARCH_LIMIT, MAX_MEMORY_SEARCH_RESULT_BYTES,
 };
+use crate::json_measurement::serialized_json_len;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -18,17 +19,6 @@ const DEFAULT_MEMORY_SEARCH_LIMIT: usize = 20;
 /// bound makes status unknown rather than turning a partial view into deletion
 /// authority.
 const MAX_MEMORY_SCOPE_INVENTORY_CLIENTS: usize = 1_024;
-
-pub(crate) fn is_memory_runtime_tool_name(name: &str) -> bool {
-    matches!(name, "memory_search" | "memory_read")
-}
-
-pub(crate) fn is_memory_management_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "memory_set" | "memory_delete" | "memory_scope_list" | "memory_scope_purge"
-    )
-}
 
 fn memory_hash_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update((value.len() as u64).to_be_bytes());
@@ -340,8 +330,8 @@ impl ToolRuntime {
                 "truncated": true,
                 "memories": candidate,
             });
-            if serde_json::to_vec(&probe)
-                .map(|bytes| bytes.len() <= MAX_MEMORY_SEARCH_RESULT_BYTES)
+            if serialized_json_len(&probe)
+                .map(|bytes| bytes <= MAX_MEMORY_SEARCH_RESULT_BYTES)
                 .unwrap_or(false)
             {
                 returned.push(descriptor);
@@ -731,8 +721,8 @@ impl ToolRuntime {
                 "truncated": candidate.len() < total_count,
                 "memories": candidate,
             });
-            if serde_json::to_vec(&projection)
-                .map(|bytes| bytes.len() <= MAX_MEMORY_BOOTSTRAP_BYTES)
+            if serialized_json_len(&projection)
+                .map(|bytes| bytes <= MAX_MEMORY_BOOTSTRAP_BYTES)
                 .unwrap_or(false)
             {
                 memories.push(descriptor);
@@ -750,8 +740,8 @@ impl ToolRuntime {
             "memories": memories,
         });
         debug_assert!(
-            serde_json::to_vec(&projection)
-                .map(|bytes| bytes.len() <= MAX_MEMORY_BOOTSTRAP_BYTES)
+            serialized_json_len(&projection)
+                .map(|bytes| bytes <= MAX_MEMORY_BOOTSTRAP_BYTES)
                 .unwrap_or(false),
             "memory.bootstrap projection must remain independently bounded"
         );
@@ -774,6 +764,8 @@ mod tests {
                     client_id: client.to_string(),
                     allow_patch: true,
                 },
+                root_fingerprint: None,
+                knowledge_association: None,
             }
         }
         let a = memory_scope_id(&resolved("runner", "/registered/a"));

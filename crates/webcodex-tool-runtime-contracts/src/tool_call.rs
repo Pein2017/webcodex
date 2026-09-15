@@ -4,9 +4,10 @@
 //! name, and the project/session accessors used by dispatch guards and audit
 //! logging.
 
+#[cfg(feature = "workspace-checkpoints")]
+use super::tool_inputs::CheckpointValidationInput;
 use super::tool_inputs::{
-    default_true, ApplyFileChangeInput, CheckpointValidationInput, ExecutionPurpose,
-    ExecutionShell, SessionMode,
+    default_true, ApplyFileChangeInput, ExecutionPurpose, ExecutionShell, SessionMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,7 +25,7 @@ use webcodex_core::plugin::{
 use webcodex_core::runner_protocol::ShellScriptLanguage;
 use webcodex_core::runtime_contract::{
     validate_project_op_path, DEFAULT_OBSERVE_JOBS_TAIL_LINES,
-    GIT_DIFF_HUNKS_CONTINUATION_MAX_BYTES, STRUCTURED_EXECUTION_SYNC_WAIT_MAX_SECS,
+    GIT_DIFF_HUNKS_CONTINUATION_MAX_BYTES,
 };
 use webcodex_tool_contracts::{lookup_tool_definition, model_visible_tool_names_csv};
 use webcodex_workflow_session::{
@@ -229,6 +230,10 @@ pub struct ReadFilesItem {
     pub start_line: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Exact full-file snapshot fence. Runtime-generated read continuations carry
+    /// this automatically; callers should not invent or retarget revisions.
+    #[serde(default, deserialize_with = "deserialize_optional_read_revision")]
+    pub expected_read_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -264,6 +269,15 @@ pub struct ObserveJobsItem {
     pub after_observation_token: Option<String>,
 }
 
+/// Which observable changes may end a bounded batch Job wait early.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObserveJobsWakeOn {
+    #[default]
+    Change,
+    Terminal,
+}
+
 fn deserialize_non_empty_read_path<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -273,6 +287,19 @@ where
         return Err(serde::de::Error::custom("path must not be empty"));
     }
     Ok(path)
+}
+
+fn deserialize_optional_read_revision<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let revision = u64::deserialize(deserializer)?;
+    if !(1..=9_007_199_254_740_991_u64).contains(&revision) {
+        return Err(serde::de::Error::custom(
+            "expected_read_revision must be a positive JSON-safe integer",
+        ));
+    }
+    Ok(Some(revision))
 }
 
 fn deserialize_non_empty_job_id<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -363,10 +390,8 @@ where
     D: serde::Deserializer<'de>,
 {
     let tail_lines = usize::deserialize(deserializer)?;
-    if !(1..=200).contains(&tail_lines) {
-        return Err(serde::de::Error::custom(
-            "tail_lines must be between 1 and 200",
-        ));
+    if tail_lines == 0 {
+        return Err(serde::de::Error::custom("tail_lines must be at least 1"));
     }
     Ok(tail_lines)
 }
@@ -376,10 +401,8 @@ where
     D: serde::Deserializer<'de>,
 {
     let wait_secs = Option::<u64>::deserialize(deserializer)?;
-    if wait_secs.is_some_and(|wait_secs| !(1..=60).contains(&wait_secs)) {
-        return Err(serde::de::Error::custom(
-            "wait_secs must be between 1 and 60",
-        ));
+    if wait_secs == Some(0) {
+        return Err(serde::de::Error::custom("wait_secs must be at least 1"));
     }
     Ok(wait_secs)
 }
@@ -415,11 +438,29 @@ where
 #[serde(deny_unknown_fields)]
 pub struct OpenAiHostFileRef {
     pub download_url: String,
-    pub file_id: String,
+    #[serde(default)]
+    pub file_id: Option<String>,
     #[serde(default)]
     pub mime_type: Option<String>,
     #[serde(default)]
     pub file_name: Option<String>,
+}
+
+/// Adapter-derived provenance for host file references. This is deliberately
+/// skipped by serde on ToolCall: caller/model JSON can never grant either trust
+/// path, and the two host mechanisms cannot impersonate one another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostFileImportProvenance {
+    #[default]
+    Untrusted,
+    GptActionOpenAiHost,
+    TrustedMcpHostFile,
+}
+
+impl HostFileImportProvenance {
+    pub fn is_trusted(self) -> bool {
+        !matches!(self, Self::Untrusted)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -429,6 +470,13 @@ pub struct ComputerSnapshotRegion {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWaitEventSelectorCall {
+    pub kind: String,
+    pub task_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -486,6 +534,8 @@ pub enum ToolCall {
         include_project_instructions: bool,
         #[serde(default = "default_true")]
         include_workflow_guidance: bool,
+        #[serde(default = "default_true")]
+        include_extension_catalog: bool,
         #[serde(default)]
         session_id: Option<String>,
     },
@@ -508,6 +558,20 @@ pub enum ToolCall {
         include_handoff: Option<bool>,
         #[serde(default)]
         include_validation_summary: Option<bool>,
+    },
+
+    /// Explicitly present the current bounded Work Result for one exact coding Session.
+    PresentWorkResult {
+        project: String,
+        session_id: String,
+    },
+
+    /// App-only exact read of the same bounded Work Result projection. This
+    /// business session identity is deliberately excluded from generic Session
+    /// recording so an explicit App refresh cannot mutate the observed ledger.
+    WorkResultState {
+        project: String,
+        session_id: String,
     },
 
     /// Return a bounded structured summary of recorded session ledger data for
@@ -633,8 +697,7 @@ pub enum ToolCall {
     /// open todos/risks/questions/guidance, recent failed tool calls, and
     /// optional workspace, checkpoint, and ledger-derived validation metadata.
     /// Read-only; never calls an LLM or generates natural-language summaries.
-    /// Exposed only through runtime tools / MCP / `callRuntimeTool` (no
-    /// dedicated OpenAPI op).
+    /// Model/API exposure is derived from the canonical ToolDefinition surface.
     SessionHandoffSummary {
         session_id: String,
         #[serde(default)]
@@ -653,6 +716,7 @@ pub enum ToolCall {
 
     /// Create a bounded last-known-good workspace checkpoint outside the
     /// project worktree.
+    #[cfg(feature = "workspace-checkpoints")]
     WorkspaceCheckpointCreate {
         project: String,
         #[serde(default)]
@@ -672,6 +736,7 @@ pub enum ToolCall {
     },
 
     /// List checkpoint metadata for a project without returning diffs.
+    #[cfg(feature = "workspace-checkpoints")]
     WorkspaceCheckpointList {
         project: String,
         #[serde(default)]
@@ -682,6 +747,7 @@ pub enum ToolCall {
 
     /// Show bounded checkpoint metadata and file lists without full diff
     /// content.
+    #[cfg(feature = "workspace-checkpoints")]
     WorkspaceCheckpointShow {
         project: String,
         checkpoint_id: String,
@@ -692,6 +758,7 @@ pub enum ToolCall {
     },
 
     /// Restore a workspace checkpoint after explicit confirmation.
+    #[cfg(feature = "workspace-checkpoints")]
     WorkspaceCheckpointRestore {
         project: String,
         checkpoint_id: String,
@@ -701,6 +768,7 @@ pub enum ToolCall {
     },
 
     /// Delete a persisted checkpoint file after explicit confirmation.
+    #[cfg(feature = "workspace-checkpoints")]
     WorkspaceCheckpointDelete {
         project: String,
         checkpoint_id: String,
@@ -914,15 +982,6 @@ pub enum ToolCall {
         session_id: Option<String>,
     },
 
-    /// Run `git diff` on a project.
-    GitDiff {
-        project: String,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        args: Option<Vec<String>>,
-    },
-
     /// Return bounded structured recent git commit history.
     GitLog {
         project: String,
@@ -945,6 +1004,8 @@ pub enum ToolCall {
         max_hunks: Option<usize>,
         #[serde(default)]
         max_hunk_lines: Option<usize>,
+        #[serde(default)]
+        max_page_bytes: Option<usize>,
         #[serde(default)]
         cached: Option<bool>,
         #[serde(default)]
@@ -1015,6 +1076,8 @@ pub enum ToolCall {
         #[serde(default)]
         filter: Option<String>,
         #[serde(default)]
+        lib: Option<bool>,
+        #[serde(default)]
         all_targets: Option<bool>,
         #[serde(default)]
         all_features: Option<bool>,
@@ -1050,20 +1113,6 @@ pub enum ToolCall {
         timeout_secs: Option<u64>,
         #[serde(default)]
         sync_wait_secs: Option<u64>,
-    },
-
-    /// Read a file from a project.
-    ReadFile {
-        project: String,
-        path: String,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        start_line: Option<usize>,
-        #[serde(default)]
-        limit: Option<usize>,
-        #[serde(default)]
-        with_line_numbers: Option<bool>,
     },
 
     /// Read up to eight UTF-8 files or file ranges under one bounded call.
@@ -1159,6 +1208,92 @@ pub enum ToolCall {
         session_id: Option<String>,
     },
 
+    /// Create explicit high-level durable intent/control state without execution authority.
+    CreateGoal {
+        title: String,
+        objective: String,
+        idempotency_key: String,
+    },
+
+    /// Read one exact caller-owned durable Goal.
+    GetGoal {
+        goal_id: String,
+    },
+
+    /// Build the bounded read-only Goal Plan projection for one explicit App presentation.
+    PresentGoalPlan {
+        goal_id: String,
+    },
+
+    /// App-only exact read of the same bounded Goal Plan projection.
+    GoalPlanState {
+        goal_id: String,
+    },
+
+    /// List caller-visible durable Goals with an optional authoritative lifecycle filter.
+    ListGoals {
+        #[serde(default)]
+        lifecycle: Option<String>,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+
+    /// CAS-update bounded Goal metadata or its closed lifecycle.
+    UpdateGoal {
+        goal_id: String,
+        expected_revision: i64,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        objective: Option<String>,
+        #[serde(default)]
+        lifecycle: Option<String>,
+        #[serde(default)]
+        terminal_reason: Option<String>,
+        idempotency_key: String,
+    },
+
+    /// Explicitly correlate an owned Goal with an independently authorized AgentTask.
+    AssociateGoalAgentTask {
+        goal_id: String,
+        task_id: String,
+        idempotency_key: String,
+    },
+
+    /// Explicitly correlate an owned Goal with an independently authorized Workflow Session.
+    AssociateGoalWorkflowSession {
+        goal_id: String,
+        session_id: String,
+        idempotency_key: String,
+    },
+
+    /// Create one explicit durable one-shot interest in future AgentTask terminal facts.
+    WaitForAgentEvents {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        events: Vec<AgentWaitEventSelectorCall>,
+        idempotency_key: String,
+    },
+
+    /// Read one exact caller-owned durable AgentWait.
+    ReadAgentWait {
+        wait_id: String,
+    },
+
+    /// Cancel one exact AgentWait before the durable Host-dispatch fence.
+    CancelAgentWait {
+        wait_id: String,
+        idempotency_key: String,
+    },
+
+    /// App-only exact read of one caller-owned AgentWait.
+    AgentWaitState {
+        wait_id: String,
+    },
+
     /// Create explicit durable Agent work independent from communication messages and execution backends.
     CreateAgentTask {
         title: String,
@@ -1202,6 +1337,15 @@ pub enum ToolCall {
         idempotency_key: String,
     },
 
+    /// Select the concrete Agent Endpoint continuation backend for one exact live Attempt.
+    StartAgentTaskEndpointContinuation {
+        task_id: String,
+        attempt_id: String,
+        assignee_agent_id: String,
+        attempt_fence: String,
+        attempt_controller_generation: i64,
+    },
+
     /// Explicitly dispatch the exact latest fenced AgentTaskAttempt to one durable CodingAgentRun.
     StartAgentTaskCodingRun {
         project: String,
@@ -1230,6 +1374,10 @@ pub enum ToolCall {
         assignee_agent_id: String,
         attempt_fence: String,
         attempt_controller_generation: i64,
+        #[serde(default)]
+        active_turn_wake_id: Option<String>,
+        #[serde(default)]
+        active_turn_consume_token: Option<String>,
     },
 
     /// Commit exact fenced terminal AgentTaskAttempt truth with independent keyed replay.
@@ -1282,6 +1430,16 @@ pub enum ToolCall {
         specialty_labels: Option<Vec<String>>,
     },
 
+    /// Rotate the server-local continuation Endpoint/controller generation for a durable Agent.
+    RotateAgentContinuationEndpoint {
+        agent_id: String,
+        host: String,
+        #[serde(default)]
+        client_attachment_id: Option<String>,
+        idempotency_key: String,
+    },
+
+    /// Compatibility name for server-local continuation Endpoint rotation.
     /// Attach a current Host/Client Endpoint to a durable Agent.
     AttachAgentEndpoint {
         agent_id: String,
@@ -1289,6 +1447,74 @@ pub enum ToolCall {
         #[serde(default)]
         client_attachment_id: Option<String>,
         idempotency_key: String,
+    },
+
+    /// Present one exact Agent/Endpoint continuation controller card. Never infers a target.
+    PresentAgentContinuation {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+    },
+
+    /// App-only bind of one live Host View to an exact freshly attached Endpoint generation.
+    AgentContinuationBind {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        binding_id: String,
+    },
+
+    /// App-only same-Window recovery for one exact naturally expired Endpoint.
+    AgentContinuationRecoverEndpoint {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        binding_id: String,
+    },
+
+    /// App-only exact Host heartbeat plus bounded authoritative state refresh.
+    AgentContinuationState {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        binding_id: String,
+    },
+
+    /// App-only pre-fence acquire through the durable Wake claim state machine.
+    AgentContinuationWakeAcquire {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        binding_id: String,
+    },
+
+    /// App-only crossing of the existing durable dispatch fence immediately before ui/message.
+    AgentContinuationWakePrepare {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        binding_id: String,
+        wake_id: String,
+        attempt_id: String,
+    },
+
+    /// App-only record of Host dispatch acceptance or conservative post-fence uncertainty.
+    AgentContinuationWakeFinish {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        binding_id: String,
+        wake_id: String,
+        attempt_id: String,
+        outcome: String,
+    },
+
+    /// App-only best-effort withdrawal of one exact process-local Host View binding.
+    AgentContinuationUnbind {
+        agent_id: String,
+        endpoint_id: String,
+        expected_controller_generation: i64,
+        binding_id: String,
     },
 
     /// Detach an Endpoint while preserving the durable Agent.
@@ -1495,30 +1721,6 @@ pub enum ToolCall {
         confirm: bool,
     },
 
-    /// Query the status of a running/finished job.
-    JobStatus {
-        job_id: String,
-        #[serde(default)]
-        include_command_preview: bool,
-    },
-
-    /// Retrieve stdout/stderr log of a job. When `after_observation_token` and
-    /// `wait_secs` are both supplied, this is a single bounded wait (up to
-    /// `wait_secs`, 1..=60) until the current opaque Job observation token
-    /// differs or the Job becomes terminal; it is never a subscription or
-    /// streaming connection.
-    JobLog {
-        job_id: String,
-        #[serde(default)]
-        offset: Option<usize>,
-        #[serde(default)]
-        tail_lines: Option<usize>,
-        #[serde(default)]
-        after_observation_token: Option<String>,
-        #[serde(default)]
-        wait_secs: Option<u64>,
-    },
-
     /// Observe up to eight existing Jobs using one shared bounded wait. Each
     /// item reuses the canonical single-Job observation-token and projection
     /// path; item failures are isolated and no Job is launched or modified.
@@ -1532,6 +1734,8 @@ pub enum ToolCall {
         tail_lines: usize,
         #[serde(default, deserialize_with = "deserialize_observe_jobs_wait_secs")]
         wait_secs: Option<u64>,
+        #[serde(default)]
+        wake_on: ObserveJobsWakeOn,
     },
 
     /// List files in a Runner-registered project directory (bounded, read-only).
@@ -1546,6 +1750,8 @@ pub enum ToolCall {
         path: Option<String>,
         #[serde(default)]
         limit: Option<usize>,
+        #[serde(default)]
+        offset: Option<usize>,
     },
 
     /// List the project's tracked files from the Git index, with glob
@@ -1584,35 +1790,6 @@ pub enum ToolCall {
         limit: Option<usize>,
     },
 
-    /// Search text inside a project (bounded matches, rg-first with grep
-    /// fallback). Each match carries a project-relative path, 1-based line
-    /// number, preview line, and bounded context arrays. Sensitive/build
-    /// directories are excluded by default.
-    SearchProjectText {
-        project: String,
-        pattern: String,
-        #[serde(default)]
-        pattern_mode: Option<SearchPatternMode>,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        limit: Option<usize>,
-        #[serde(default)]
-        context_before: Option<usize>,
-        #[serde(default)]
-        context_after: Option<usize>,
-        #[serde(default)]
-        include_globs: Option<Vec<String>>,
-        #[serde(default)]
-        exclude_globs: Option<Vec<String>>,
-        #[serde(default)]
-        result_mode: Option<SearchResultMode>,
-        #[serde(default)]
-        timeout_secs: Option<i64>,
-    },
-
     /// Run up to eight independent bounded project-text searches under one
     /// project authorization and outer Session event.
     SearchProjectTexts {
@@ -1623,15 +1800,6 @@ pub enum ToolCall {
         session_id: Option<String>,
         #[serde(default)]
         max_result_bytes: Option<usize>,
-    },
-
-    /// Read-only git diff summary for a project: `git status --porcelain`,
-    /// `git diff --stat`, and a parsed changed-file list. Does not modify the
-    /// worktree. Routed to the owning Runner.
-    GitDiffSummary {
-        project: String,
-        #[serde(default)]
-        session_id: Option<String>,
     },
 
     /// Read-only model-facing git worktree summary for a project. Reports
@@ -1683,7 +1851,7 @@ pub enum ToolCall {
     },
 
     /// Write a UTF-8 file in a project via the owning Runner. Creates new files
-    /// and, with `overwrite=true` plus the exact current `expected_sha256`,
+    /// and, with `overwrite=true` plus the current `expected_read_revision`,
     /// replaces existing ones without a stale read clobbering concurrent work.
     /// The server never reads the Runner filesystem directly; the write runs as
     /// a native agent file operation.
@@ -1696,7 +1864,7 @@ pub enum ToolCall {
         #[serde(default)]
         overwrite: Option<bool>,
         #[serde(default)]
-        expected_sha256: Option<String>,
+        expected_read_revision: Option<u64>,
     },
 
     /// Write a binary artifact in a project via the owning Runner. The payload is
@@ -1727,11 +1895,11 @@ pub enum ToolCall {
         overwrite: Option<bool>,
         #[serde(default)]
         session_id: Option<String>,
-        /// Internal provenance bit set only by the MCP HTTP adapter after
-        /// authenticating the OAuth client registration. Never deserialized
-        /// from model/caller arguments and never serialized back out.
+        /// Internal host-file provenance set only by a trusted protocol
+        /// adapter. Never deserialized from model/caller arguments and never
+        /// serialized back out.
         #[serde(skip)]
-        trusted_mcp_host_file_import: bool,
+        host_file_import_provenance: HostFileImportProvenance,
     },
 
     /// Prepare one project artifact for standards-native MCP resource export.
@@ -1822,11 +1990,10 @@ pub enum ToolCall {
     },
 
     /// Apply a bounded transactional batch of edit/create/delete/rename file
-    /// changes via the owning Runner. Every existing input file requires a
-    /// sha256 precondition and every change is preflighted before the first
-    /// mutation. `dry_run` computes the full plan without writing. Exposed only
-    /// through runtime tools / MCP / `callRuntimeTool` (no dedicated OpenAPI
-    /// operation).
+    /// changes via the owning Runner. Whole-file and positional changes carry
+    /// a model-facing read revision; globally unique local exact edits may omit
+    /// it. Every change is preflighted before the first mutation. `dry_run` computes the full plan without writing. Model/API
+    /// exposure is derived from the canonical ToolDefinition surface.
     ApplyTextEdits {
         project: String,
         changes: Vec<ApplyFileChangeInput>,
@@ -1842,8 +2009,8 @@ pub enum ToolCall {
     /// path names, and large untracked files. Never cleans, deletes, restores,
     /// or modifies the project. Never reads file contents, env values, tokens,
     /// or stdout/stderr bodies. Suspicious secret files are identified by
-    /// path/name only. Exposed only through runtime tools / MCP /
-    /// `callRuntimeTool` (no dedicated OpenAPI op).
+    /// path/name only. Model/API exposure is derived from the canonical
+    /// ToolDefinition surface.
     WorkspaceHygieneCheck {
         project: String,
         #[serde(default)]
@@ -2370,6 +2537,7 @@ fn reject_unknown_observe_jobs_fields(arguments: &Value) -> Result<(), String> {
         "items",
         "tail_lines",
         "wait_secs",
+        "wake_on",
         // Wrapper/session metadata that transports may leave in params.
         "session_id",
         "recording_session_id",
@@ -2423,6 +2591,7 @@ fn reject_unknown_git_diff_hunks_fields(arguments: &Value) -> Result<(), String>
         "paths",
         "max_hunks",
         "max_hunk_lines",
+        "max_page_bytes",
         "cached",
         "base_commit",
         "head_commit",
@@ -2534,23 +2703,10 @@ fn validate_structured_validation_sync_wait(name: &str, arguments: &Value) -> Re
     let Some(sync_wait_secs) = sync_wait_value.as_u64() else {
         return Ok(()); // serde reports the canonical type error below.
     };
-    if !(1..=STRUCTURED_EXECUTION_SYNC_WAIT_MAX_SECS).contains(&sync_wait_secs) {
+    if sync_wait_secs == 0 {
         return Err(format!(
-            "invalid arguments for tool '{name}': sync_wait_secs must be between 1 and {STRUCTURED_EXECUTION_SYNC_WAIT_MAX_SECS}"
+            "invalid arguments for tool '{name}': sync_wait_secs must be at least 1"
         ));
-    }
-    if name == "cargo_fmt" && object.get("check").and_then(Value::as_bool) != Some(true) {
-        return Err(
-            "invalid arguments for tool 'cargo_fmt': sync_wait_secs is available only with check=true"
-                .to_string(),
-        );
-    }
-    if let Some(timeout_secs) = object.get("timeout_secs").and_then(Value::as_u64) {
-        if sync_wait_secs > timeout_secs {
-            return Err(format!(
-                "invalid arguments for tool '{name}': sync_wait_secs ({sync_wait_secs}) must not exceed timeout_secs ({timeout_secs})"
-            ));
-        }
     }
     Ok(())
 }
@@ -2588,14 +2744,14 @@ impl ToolCall {
             );
         }
         // Reject unknown tool names up front with a helpful message that lists
-        // every accepted tool and points the caller at listRuntimeTools. This
-        // avoids leaking a raw serde "unknown variant" error and gives custom
-        // GPTs an actionable discovery hint.
+        // every accepted tool and points the caller at canonical discovery. This
+        // avoids leaking a raw serde "unknown variant" error and gives model/API
+        // callers an actionable discovery hint.
         let definition = lookup_tool_definition(name).ok_or_else(|| {
             format!(
-                "unknown tool '{}'. Available tools: {}. Call listRuntimeTools \
-                 (POST /api/tools/list) or the list_tools runtime tool to \
-                 discover accepted tool names.",
+                "unknown tool '{}'. Available tools: {}. Call tool_manifest with \
+                 an exact tool_name (or use its category/intent views) to discover \
+                 accepted model-visible tool names.",
                 name,
                 model_visible_tool_names_csv()
             )
@@ -2614,7 +2770,36 @@ impl ToolCall {
             );
         }
         let recorder_metadata = ToolCallRecorderMetadata::from_business_arguments(&arguments);
-        let arguments = strip_tool_call_expectation_metadata(arguments);
+        let mut arguments = strip_tool_call_expectation_metadata(arguments);
+        if name == "tool_manifest" {
+            if let Some(object) = arguments.as_object_mut() {
+                if !object.contains_key("include_recommended_flows") {
+                    let exact_lookup = object.contains_key("tool_name");
+                    object.insert(
+                        "include_recommended_flows".to_string(),
+                        Value::Bool(!exact_lookup),
+                    );
+                }
+            }
+        }
+        if name == "cargo_test" {
+            if let Some(object) = arguments.as_object_mut() {
+                if object.get("lib").and_then(Value::as_bool) == Some(false) {
+                    object.remove("lib");
+                }
+            }
+        }
+        if name == "cargo_fmt" {
+            if let Some(object) = arguments.as_object_mut() {
+                // Positive sync_wait_secs is a recognized caller-shape hint in
+                // ensure-format mode, but that mode is intentionally synchronous.
+                // Canonicalize the inert hint away before concrete ToolCall serde
+                // so execution/audit truth has one representation: omission.
+                if object.get("check").and_then(Value::as_bool) != Some(true) {
+                    object.remove("sync_wait_secs");
+                }
+            }
+        }
         if name == "read_project_artifact"
             && arguments
                 .as_object()
@@ -2631,7 +2816,7 @@ impl ToolCall {
                 .is_some_and(|object| object.contains_key("expected_content_prefix"))
         {
             return Err(
-                "invalid arguments for tool 'write_project_file': field 'expected_content_prefix' is no longer supported; use expected_sha256"
+                "invalid arguments for tool 'write_project_file': field 'expected_content_prefix' is no longer supported; use expected_read_revision"
                     .to_string(),
             );
         }
@@ -2740,6 +2925,8 @@ impl ToolCall {
             Self::StartSession { .. } => "start_session",
             Self::WorkOnProject { .. } => "work_on_project",
             Self::FinishCodingTask { .. } => "finish_coding_task",
+            Self::PresentWorkResult { .. } => "present_work_result",
+            Self::WorkResultState { .. } => "work_result_state",
             Self::SessionSummary { .. } => "session_summary",
             Self::UpdateSessionContext { .. } => "update_session_context",
             Self::CloseSession { .. } => "close_session",
@@ -2752,10 +2939,15 @@ impl ToolCall {
             Self::CompleteSessionMessage { .. } => "complete_session_message",
             Self::SessionDiscussionSummary { .. } => "session_discussion_summary",
             Self::SessionHandoffSummary { .. } => "session_handoff_summary",
+            #[cfg(feature = "workspace-checkpoints")]
             Self::WorkspaceCheckpointCreate { .. } => "workspace_checkpoint_create",
+            #[cfg(feature = "workspace-checkpoints")]
             Self::WorkspaceCheckpointList { .. } => "workspace_checkpoint_list",
+            #[cfg(feature = "workspace-checkpoints")]
             Self::WorkspaceCheckpointShow { .. } => "workspace_checkpoint_show",
+            #[cfg(feature = "workspace-checkpoints")]
             Self::WorkspaceCheckpointRestore { .. } => "workspace_checkpoint_restore",
+            #[cfg(feature = "workspace-checkpoints")]
             Self::WorkspaceCheckpointDelete { .. } => "workspace_checkpoint_delete",
             Self::RunProcess { .. } => "run_process",
             Self::RunDetachedProcess { .. } => "run_detached_process",
@@ -2775,7 +2967,6 @@ impl ToolCall {
             Self::DiscardUntracked { .. } => "discard_untracked",
             Self::GitCommitPaths { .. } => "git_commit_paths",
             Self::GitStatus { .. } => "git_status",
-            Self::GitDiff { .. } => "git_diff",
             Self::GitDiffHunks { .. } => "git_diff_hunks",
             Self::GitReviewSummary { .. } => "git_review_summary",
             Self::GitLog { .. } => "git_log",
@@ -2783,7 +2974,6 @@ impl ToolCall {
             Self::CargoCheck { .. } => "cargo_check",
             Self::CargoTest { .. } => "cargo_test",
             Self::GoTest { .. } => "go_test",
-            Self::ReadFile { .. } => "read_file",
             Self::ReadFiles { .. } => "read_files",
             Self::SkillList { .. } => "skill_list",
             Self::SkillReadFile { .. } => "skill_read_file",
@@ -2791,11 +2981,26 @@ impl ToolCall {
             Self::SkillInstall { .. } => "skill_install",
             Self::SkillActivate { .. } => "skill_activate",
             Self::SkillRemoveRevision { .. } => "skill_remove_revision",
+            Self::CreateGoal { .. } => "create_goal",
+            Self::GetGoal { .. } => "get_goal",
+            Self::PresentGoalPlan { .. } => "present_goal_plan",
+            Self::GoalPlanState { .. } => "goal_plan_state",
+            Self::ListGoals { .. } => "list_goals",
+            Self::UpdateGoal { .. } => "update_goal",
+            Self::AssociateGoalAgentTask { .. } => "associate_goal_agent_task",
+            Self::AssociateGoalWorkflowSession { .. } => "associate_goal_workflow_session",
+            Self::WaitForAgentEvents { .. } => "wait_for_agent_events",
+            Self::ReadAgentWait { .. } => "read_agent_wait",
+            Self::CancelAgentWait { .. } => "cancel_agent_wait",
+            Self::AgentWaitState { .. } => "agent_wait_state",
             Self::CreateAgentTask { .. } => "create_agent_task",
             Self::ListAgentTasks { .. } => "list_agent_tasks",
             Self::ReadAgentTask { .. } => "read_agent_task",
             Self::AssignAgentTask { .. } => "assign_agent_task",
             Self::StartAgentTaskAttempt { .. } => "start_agent_task_attempt",
+            Self::StartAgentTaskEndpointContinuation { .. } => {
+                "start_agent_task_endpoint_continuation"
+            }
             Self::StartAgentTaskCodingRun { .. } => "start_agent_task_coding_run",
             Self::ReconcileAgentTaskCodingRun { .. } => "reconcile_agent_task_coding_run",
             Self::HeartbeatAgentTaskAttempt { .. } => "heartbeat_agent_task_attempt",
@@ -2803,7 +3008,16 @@ impl ToolCall {
             Self::CreateAgentIdentity { .. } => "create_agent_identity",
             Self::ListAgentIdentities { .. } => "list_agent_identities",
             Self::UpdateAgentIdentity { .. } => "update_agent_identity",
+            Self::RotateAgentContinuationEndpoint { .. } => "rotate_agent_continuation_endpoint",
             Self::AttachAgentEndpoint { .. } => "attach_agent_endpoint",
+            Self::PresentAgentContinuation { .. } => "present_agent_continuation",
+            Self::AgentContinuationBind { .. } => "agent_continuation_bind",
+            Self::AgentContinuationRecoverEndpoint { .. } => "agent_continuation_recover_endpoint",
+            Self::AgentContinuationState { .. } => "agent_continuation_state",
+            Self::AgentContinuationWakeAcquire { .. } => "agent_continuation_wake_acquire",
+            Self::AgentContinuationWakePrepare { .. } => "agent_continuation_wake_prepare",
+            Self::AgentContinuationWakeFinish { .. } => "agent_continuation_wake_finish",
+            Self::AgentContinuationUnbind { .. } => "agent_continuation_unbind",
             Self::DetachAgentEndpoint { .. } => "detach_agent_endpoint",
             Self::CreateConversation { .. } => "create_conversation",
             Self::ListConversations { .. } => "list_conversations",
@@ -2821,15 +3035,11 @@ impl ToolCall {
             Self::MemoryScopePurge { .. } => "memory_scope_purge",
             Self::RunJob { .. } => "run_job",
             Self::StopJob { .. } => "stop_job",
-            Self::JobStatus { .. } => "job_status",
-            Self::JobLog { .. } => "job_log",
             Self::ObserveJobs { .. } => "observe_jobs",
             Self::ListProjectFiles { .. } => "list_project_files",
             Self::ListProjectTrackedFiles { .. } => "list_project_tracked_files",
             Self::ProjectOverview { .. } => "project_overview",
-            Self::SearchProjectText { .. } => "search_project_text",
             Self::SearchProjectTexts { .. } => "search_project_texts",
-            Self::GitDiffSummary { .. } => "git_diff_summary",
             Self::ShowChanges { .. } => "show_changes",
             Self::WorkspaceHygieneCheck { .. } => "workspace_hygiene_check",
             Self::ListJobs { .. } => "list_jobs",
@@ -2902,7 +3112,6 @@ impl ToolCall {
             | Self::DiscardUntracked { session_id, .. }
             | Self::GitCommitPaths { session_id, .. }
             | Self::GitStatus { session_id, .. }
-            | Self::GitDiff { session_id, .. }
             | Self::GitDiffHunks { session_id, .. }
             | Self::GitReviewSummary { session_id, .. }
             | Self::GitLog { session_id, .. }
@@ -2910,7 +3119,6 @@ impl ToolCall {
             | Self::CargoCheck { session_id, .. }
             | Self::CargoTest { session_id, .. }
             | Self::GoTest { session_id, .. }
-            | Self::ReadFile { session_id, .. }
             | Self::ReadFiles { session_id, .. }
             | Self::SkillList { session_id, .. }
             | Self::SkillReadFile { session_id, .. }
@@ -2927,9 +3135,7 @@ impl ToolCall {
             | Self::ListProjectFiles { session_id, .. }
             | Self::ListProjectTrackedFiles { session_id, .. }
             | Self::ProjectOverview { session_id, .. }
-            | Self::SearchProjectText { session_id, .. }
             | Self::SearchProjectTexts { session_id, .. }
-            | Self::GitDiffSummary { session_id, .. }
             | Self::ShowChanges { session_id, .. }
             | Self::WriteProjectFile { session_id, .. }
             | Self::SaveProjectArtifact { session_id, .. }
@@ -2942,11 +3148,6 @@ impl ToolCall {
             | Self::ArtifactUploadFinish { session_id, .. }
             | Self::ArtifactUploadAbort { session_id, .. }
             | Self::ApplyTextEdits { session_id, .. }
-            | Self::WorkspaceCheckpointCreate { session_id, .. }
-            | Self::WorkspaceCheckpointList { session_id, .. }
-            | Self::WorkspaceCheckpointShow { session_id, .. }
-            | Self::WorkspaceCheckpointRestore { session_id, .. }
-            | Self::WorkspaceCheckpointDelete { session_id, .. }
             | Self::WorkspaceHygieneCheck { session_id, .. }
             | Self::LspStatus { session_id, .. }
             | Self::DocumentSymbols { session_id, .. }
@@ -2955,7 +3156,18 @@ impl ToolCall {
             | Self::WorkspaceSymbols { session_id, .. }
             | Self::GotoDefinition { session_id, .. }
             | Self::FindReferences { session_id, .. } => session_id.as_deref(),
+            #[cfg(feature = "workspace-checkpoints")]
+            Self::WorkspaceCheckpointCreate { session_id, .. }
+            | Self::WorkspaceCheckpointList { session_id, .. }
+            | Self::WorkspaceCheckpointShow { session_id, .. }
+            | Self::WorkspaceCheckpointRestore { session_id, .. }
+            | Self::WorkspaceCheckpointDelete { session_id, .. } => session_id.as_deref(),
             Self::SessionHandoffSummary { session_id, .. } => Some(session_id.as_str()),
+            Self::PresentWorkResult { session_id, .. } => Some(session_id.as_str()),
+            // work_result_state intentionally does not expose its business
+            // Session through this generic recorder projection: explicit App
+            // refresh authorizes and reads that exact target inside its runtime method.
+            Self::WorkResultState { .. } => None,
             Self::ImportConversationFilesToProject { session_id, .. } => session_id.as_deref(),
             Self::CallHierarchy { session_id, .. } => session_id.as_deref(),
             Self::WorkOnProject { session_id, .. } => session_id.as_deref(),
@@ -3036,7 +3248,6 @@ impl ToolCall {
             | Self::DiscardUntracked { project, .. }
             | Self::GitCommitPaths { project, .. }
             | Self::GitStatus { project, .. }
-            | Self::GitDiff { project, .. }
             | Self::GitDiffHunks { project, .. }
             | Self::GitReviewSummary { project, .. }
             | Self::GitLog { project, .. }
@@ -3044,7 +3255,6 @@ impl ToolCall {
             | Self::CargoCheck { project, .. }
             | Self::CargoTest { project, .. }
             | Self::GoTest { project, .. }
-            | Self::ReadFile { project, .. }
             | Self::ReadFiles { project, .. }
             | Self::SkillList { project, .. }
             | Self::SkillReadFile { project, .. }
@@ -3061,9 +3271,7 @@ impl ToolCall {
             | Self::ListProjectFiles { project, .. }
             | Self::ListProjectTrackedFiles { project, .. }
             | Self::ProjectOverview { project, .. }
-            | Self::SearchProjectText { project, .. }
             | Self::SearchProjectTexts { project, .. }
-            | Self::GitDiffSummary { project, .. }
             | Self::ShowChanges { project, .. }
             | Self::WriteProjectFile { project, .. }
             | Self::SaveProjectArtifact { project, .. }
@@ -3077,11 +3285,6 @@ impl ToolCall {
             | Self::ArtifactUploadFinish { project, .. }
             | Self::ArtifactUploadAbort { project, .. }
             | Self::ApplyTextEdits { project, .. }
-            | Self::WorkspaceCheckpointCreate { project, .. }
-            | Self::WorkspaceCheckpointList { project, .. }
-            | Self::WorkspaceCheckpointShow { project, .. }
-            | Self::WorkspaceCheckpointRestore { project, .. }
-            | Self::WorkspaceCheckpointDelete { project, .. }
             | Self::WorkspaceHygieneCheck { project, .. }
             | Self::LspStatus { project, .. }
             | Self::DocumentSymbols { project, .. }
@@ -3090,11 +3293,19 @@ impl ToolCall {
             | Self::WorkspaceSymbols { project, .. }
             | Self::GotoDefinition { project, .. }
             | Self::FindReferences { project, .. } => Some(project.as_str()),
+            #[cfg(feature = "workspace-checkpoints")]
+            Self::WorkspaceCheckpointCreate { project, .. }
+            | Self::WorkspaceCheckpointList { project, .. }
+            | Self::WorkspaceCheckpointShow { project, .. }
+            | Self::WorkspaceCheckpointRestore { project, .. }
+            | Self::WorkspaceCheckpointDelete { project, .. } => Some(project.as_str()),
             Self::CallHierarchy { project, .. } => Some(project.as_str()),
             Self::WorkOnProject { project, .. } if !project.trim().is_empty() => {
                 Some(project.as_str())
             }
-            Self::FinishCodingTask { project, .. } => Some(project.as_str()),
+            Self::FinishCodingTask { project, .. }
+            | Self::PresentWorkResult { project, .. }
+            | Self::WorkResultState { project, .. } => Some(project.as_str()),
             Self::UpdateSessionContext { project, .. }
             | Self::ValidationSummary { project, .. } => Some(project.as_str()),
             Self::SessionHandoffSummary { project, .. } => project.as_deref(),

@@ -97,6 +97,8 @@ async fn terminal_observed_poll_complete_and_log() {
             exit_code: Some(0),
             stdout: Some("hello\n".to_string()),
             stderr: Some(String::new()),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(20),
             error: None,
         })
@@ -201,6 +203,7 @@ async fn job_update_rejects_mismatched_request_id_without_mutating_target_job() 
         error: None,
         command_execution_state: None,
         validation_progress: None,
+        test_count_evidence: None,
         activity: None,
         finished: false,
     };

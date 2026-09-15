@@ -8,6 +8,7 @@ use crate::runner_protocol::{
     ShellJobActivityPhase, ShellJobActivitySource, ShellJobActivityState,
 };
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn item(job_id: &str, token: Option<String>) -> ObserveJobsItem {
@@ -89,6 +90,7 @@ async fn update_observed_job(
             error: None,
             command_execution_state: None,
             validation_progress: None,
+            test_count_evidence: None,
             activity,
             finished,
         })
@@ -148,6 +150,10 @@ fn canonical_observation(
         "recovery_reason_code": null,
         "recovery_reason": null,
         "observation_token": format!("wjob1:a:{job_id}:fixture_epoch:7"),
+        "continuation_semantics": {
+            "kind": "observe",
+            "carrier": "observation_token"
+        },
         "log_delta_status": log_delta_status,
         "stdout_delta_reset": false,
         "stderr_delta_reset": false,
@@ -276,6 +282,7 @@ fn observe_jobs_tool_call_enforces_batch_and_scalar_bounds() {
             ToolCall::ObserveJobs {
                 tail_lines: 40,
                 wait_secs: None,
+                wake_on: ObserveJobsWakeOn::Change,
                 ..
             }
         ));
@@ -315,28 +322,28 @@ fn observe_jobs_tool_call_enforces_batch_and_scalar_bounds() {
     )
     .is_err());
 
-    for tail_lines in [1, 200] {
+    for tail_lines in [1, 200, 201, 500] {
         assert!(ToolCall::from_tool_name(
             "observe_jobs",
             json!({"items": [{"job_id": "job"}], "tail_lines": tail_lines})
         )
         .is_ok());
     }
-    for tail_lines in [0, 201] {
+    for tail_lines in [0] {
         assert!(ToolCall::from_tool_name(
             "observe_jobs",
             json!({"items": [{"job_id": "job"}], "tail_lines": tail_lines})
         )
         .is_err());
     }
-    for wait_secs in [1, 60] {
+    for wait_secs in [1, 100, 101, 120] {
         assert!(ToolCall::from_tool_name(
             "observe_jobs",
             json!({"items": [{"job_id": "job"}], "wait_secs": wait_secs})
         )
         .is_ok());
     }
-    for wait_secs in [0, 61] {
+    for wait_secs in [0] {
         assert!(ToolCall::from_tool_name(
             "observe_jobs",
             json!({"items": [{"job_id": "job"}], "wait_secs": wait_secs})
@@ -354,6 +361,7 @@ async fn observe_jobs_direct_dispatch_rejects_duplicates_before_observation() {
             items: vec![item("duplicate", None), item("duplicate", None)],
             tail_lines: 40,
             wait_secs: Some(60),
+            wake_on: Default::default(),
         })
         .await;
     assert!(!result.success);
@@ -371,10 +379,12 @@ fn observe_jobs_schema_catalog_permission_and_audit_are_public_and_token_safe() 
     assert_eq!(spec.input_schema["properties"]["items"]["minItems"], 1);
     assert_eq!(spec.input_schema["properties"]["items"]["maxItems"], 8);
     assert_eq!(spec.input_schema["properties"]["tail_lines"]["default"], 40);
-    assert_eq!(
-        spec.input_schema["properties"]["tail_lines"]["maximum"],
-        200
-    );
+    assert!(spec.input_schema["properties"]["tail_lines"]
+        .get("maximum")
+        .is_none());
+    assert!(spec.input_schema["properties"]["wait_secs"]
+        .get("maximum")
+        .is_none());
     assert_eq!(
         spec.input_schema["properties"]["items"]["items"]["additionalProperties"],
         false
@@ -467,6 +477,7 @@ fn observe_jobs_schema_catalog_permission_and_audit_are_public_and_token_safe() 
         items: vec![item("job", Some(opaque.to_string()))],
         tail_lines: 40,
         wait_secs: Some(5),
+        wake_on: Default::default(),
     };
     let summary = call.session_log_arguments();
     assert_eq!(summary["item_count"], 1);
@@ -542,6 +553,8 @@ fn observe_jobs_compact_projection_single_running_unchanged_keeps_actionable_sta
     assert_eq!(item["changed"], false);
     assert_eq!(item["log_delta_status"], "unchanged");
     assert_eq!(item["observation_token"], token);
+    assert!(item.get("continuation_semantics").is_none());
+    assert!(projected.output.get("continuation_semantics").is_none());
     assert_eq!(
         item["activity"],
         serde_json::to_value(process_activity()).unwrap()
@@ -795,7 +808,7 @@ fn observe_jobs_compact_projection_preserves_mixed_failure_and_budget_recovery()
         "output": null,
         "error_kind": "unknown_job",
         "recovery_kind": "reobserve",
-        "recovery_tool": "list_jobs",
+        "suggested_call": {"tool": "list_jobs", "arguments": {}},
         "error": "unknown job: missing-job"
     });
     let mixed = canonical_batch(vec![success.clone(), failure], "item_error", 0);
@@ -803,16 +816,28 @@ fn observe_jobs_compact_projection_preserves_mixed_failure_and_budget_recovery()
         serde_json::to_value(compact_projection(&mixed)).unwrap(),
         serde_json::to_value(&mixed).unwrap()
     );
-    assert_eq!(mixed.output["items"][1]["recovery_tool"], "list_jobs");
+    assert_eq!(
+        mixed.output["items"][1]["suggested_call"],
+        json!({"tool": "list_jobs", "arguments": {}})
+    );
 
     let mut truncated = canonical_batch(vec![success], "immediate", 0);
     truncated.output["output_truncated"] = json!(true);
     truncated.output["next_index"] = json!(1);
+    truncated.output["continuation_semantics"] = json!({
+        "kind": "batch",
+        "carrier": "index"
+    });
     assert_eq!(
         serde_json::to_value(compact_projection(&truncated)).unwrap(),
         serde_json::to_value(&truncated).unwrap()
     );
     assert_eq!(truncated.output["next_index"], 1);
+    assert_eq!(truncated.output["continuation_semantics"]["kind"], "batch");
+    assert_eq!(
+        truncated.output["continuation_semantics"]["carrier"],
+        "index"
+    );
 }
 
 #[test]
@@ -926,7 +951,8 @@ fn observe_jobs_projection_reports_deterministic_byte_measurements() {
             json!({
                 "index": 1, "job_id": "missing-measure", "success": false,
                 "output": null, "error_kind": "unknown_job", "recovery_kind": "reobserve",
-                "recovery_tool": "list_jobs", "error": "unknown job: missing-measure"
+                "suggested_call": {"tool": "list_jobs", "arguments": {}},
+                "error": "unknown job: missing-measure"
             }),
         ],
         "item_error",
@@ -982,6 +1008,7 @@ async fn observe_jobs_inaccessible_and_unknown_items_are_indistinguishable() {
                 ],
                 tail_lines: 40,
                 wait_secs: Some(5),
+                wake_on: Default::default(),
             },
             Some(&auth_b),
         )
@@ -1002,7 +1029,7 @@ async fn observe_jobs_inaccessible_and_unknown_items_are_indistinguishable() {
 #[tokio::test]
 async fn observe_jobs_mixed_success_result_matches_declared_output_schema_and_enqueues_nothing() {
     let runtime = test_runtime();
-    let (agent_job, _request, auth) =
+    let (agent_job, request, auth) =
         register_and_start_agent_job(&runtime, "observe-no-enqueue").await;
     let initial = runtime
         .job_log_for_auth(agent_job.clone(), None, Some(40), Some(&auth), None, None)
@@ -1011,6 +1038,16 @@ async fn observe_jobs_mixed_success_result_matches_declared_output_schema_and_en
         .as_str()
         .unwrap()
         .to_string();
+    update_observed_job(
+        &runtime,
+        "observe-no-enqueue",
+        &request,
+        "completed",
+        None,
+        None,
+        true,
+    )
+    .await;
     let result = runtime
         .dispatch_with_auth(
             ToolCall::ObserveJobs {
@@ -1020,6 +1057,7 @@ async fn observe_jobs_mixed_success_result_matches_declared_output_schema_and_en
                 ],
                 tail_lines: 40,
                 wait_secs: Some(5),
+                wake_on: ObserveJobsWakeOn::Terminal,
             },
             Some(&auth),
         )
@@ -1063,6 +1101,7 @@ async fn observe_jobs_missing_baseline_is_immediate_and_projects_activity_withou
                 items: vec![item(&job_id, None)],
                 tail_lines: 40,
                 wait_secs: Some(60),
+                wake_on: ObserveJobsWakeOn::Terminal,
             },
             Some(&auth),
         )
@@ -1116,6 +1155,7 @@ async fn observe_jobs_timeout_waits_once_for_multiple_active_jobs() {
                 ],
                 tail_lines: 40,
                 wait_secs: Some(1),
+                wake_on: Default::default(),
             },
             Some(&auth),
         )
@@ -1177,6 +1217,7 @@ async fn observe_jobs_one_item_update_wakes_shared_wait_and_refreshes_all_snapsh
                     ],
                     tail_lines: 40,
                     wait_secs: Some(5),
+                    wake_on: Default::default(),
                 },
                 Some(&waiting_auth),
             )
@@ -1224,6 +1265,8 @@ async fn observe_jobs_terminal_transition_wakes_shared_wait() {
         false,
     )
     .await;
+    let (other_job, _, _) = register_and_start_agent_job(&runtime, "observe-terminal-other").await;
+    let other_token = observation_token(&runtime, &other_job, &auth).await;
     let token = observation_token(&runtime, &job_id, &auth).await;
 
     let waiting_runtime = runtime.clone();
@@ -1233,9 +1276,13 @@ async fn observe_jobs_terminal_transition_wakes_shared_wait() {
         waiting_runtime
             .dispatch_with_auth(
                 ToolCall::ObserveJobs {
-                    items: vec![item(&waiting_job, Some(token))],
+                    items: vec![
+                        item(&other_job, Some(other_token)),
+                        item(&waiting_job, Some(token)),
+                    ],
                     tail_lines: 40,
-                    wait_secs: Some(5),
+                    wait_secs: Some(100),
+                    wake_on: ObserveJobsWakeOn::Terminal,
                 },
                 Some(&waiting_auth),
             )
@@ -1253,13 +1300,16 @@ async fn observe_jobs_terminal_transition_wakes_shared_wait() {
     )
     .await;
 
-    let result = task.await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("terminal must wake well before the 100-second maximum")
+        .unwrap();
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["wait"]["outcome"], "terminal");
     assert_eq!(result.output["terminal_count"], 1);
-    assert_eq!(result.output["items"][0]["output"]["terminal"], true);
-    assert!(result.output["items"][0]["output"]["activity"].is_null());
-    assert_item_has_no_wait_metadata(&result.output["items"][0]);
+    assert_eq!(result.output["items"][1]["output"]["terminal"], true);
+    assert!(result.output["items"][1]["output"]["activity"].is_null());
+    assert_item_has_no_wait_metadata(&result.output["items"][1]);
 }
 
 #[test]
@@ -1272,11 +1322,395 @@ fn observe_jobs_session_sanitizer_removes_nested_token_bodies() {
                 {"job_id": "job", "after_observation_token": opaque}
             ],
             "tail_lines": 40,
-            "wait_secs": 5
+            "wait_secs": 5,
+            "wake_on": "terminal"
         }),
     );
+    assert_eq!(summary["wake_on"], "terminal");
+    for policy in [
+        json!("private-unknown-value"),
+        json!(null),
+        json!({"bad": true}),
+    ] {
+        let sanitized = super::super::sessions::session_input_summary_for_tool(
+            "observe_jobs",
+            &json!({"wake_on": policy}),
+        );
+        assert!(sanitized.get("wake_on").is_none());
+    }
     let serialized = serde_json::to_string(&summary).unwrap();
     assert!(!serialized.contains(opaque));
     assert_eq!(summary["items"][0]["job_id"], "job");
     assert!(summary["items"][0].get("after_observation_token").is_none());
+}
+
+#[tokio::test]
+async fn ordinary_receipts_production_sqlite_dual_restart_observe_and_list_filters() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("ordinary-receipts.db");
+    let db = Arc::new(crate::Database::open(&path).unwrap());
+    let registry = Arc::new(crate::job_receipts::production_registry(db.clone()).await);
+    let runtime = ToolRuntime::new(registry, Arc::new(RuntimeInfo::default()));
+    let client = "receipt-dual-restart";
+    register_agent(
+        &runtime,
+        client,
+        Some("tester"),
+        RunnerCapabilities {
+            async_jobs: true,
+            async_shell_jobs: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bootstrap_auth_context();
+    let project = agent_test_project_id(client);
+    let started = runtime
+        .dispatch_with_auth(
+            ToolCall::RunJob {
+                project: project.clone(),
+                command: "echo receipt".into(),
+                session_id: None,
+                timeout_secs: Some(60),
+                cwd: None,
+                purpose: Some(ExecutionPurpose::Diagnostic),
+                shell: None,
+            },
+            Some(&auth),
+        )
+        .await;
+    assert!(started.success, "{:?}", started.error);
+    let job_id = started.output["job_id"].as_str().unwrap().to_string();
+    let request = wait_for_patch_agent_request(&runtime, client).await;
+    runtime
+        .runner_registry
+        .update_job(RunnerJobUpdateRequest {
+            client_id: client.into(),
+            runner_instance_id: "inst".into(),
+            update_seq: None,
+            job_id: job_id.clone(),
+            request_id: Some(request.request_id),
+            status: "completed".into(),
+            stdout_chunk: Some("bounded stdout\n".into()),
+            stderr_chunk: Some("bounded stderr\n".into()),
+            stdout_tail: None,
+            stderr_tail: None,
+            log_snapshot: None,
+            exit_code: Some(0),
+            duration_ms: Some(42),
+            error: None,
+            command_execution_state: None,
+            validation_progress: None,
+            test_count_evidence: None,
+            activity: None,
+            finished: true,
+        })
+        .await
+        .unwrap();
+    let old_token = observation_token(&runtime, &job_id, &auth).await;
+    let rows = db
+        .load_job_receipts(chrono::Utc::now().timestamp())
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "production wiring must persist through SQLite"
+    );
+    let deadline = rows[0].expires_at;
+    drop(runtime);
+    drop(db);
+    let db = Arc::new(crate::Database::open(&path).unwrap());
+    let registry = Arc::new(crate::job_receipts::production_registry(db.clone()).await);
+    let runtime = ToolRuntime::new(registry, Arc::new(RuntimeInfo::default()));
+    // No Runner registration/inventory exists in the replacement process.
+    let started = Instant::now();
+    let observed = runtime
+        .dispatch_with_auth(
+            ToolCall::ObserveJobs {
+                items: vec![item(&job_id, Some(old_token))],
+                tail_lines: 40,
+                wait_secs: Some(30),
+                wake_on: Default::default(),
+            },
+            Some(&auth),
+        )
+        .await;
+    assert!(observed.success, "{:?}", observed.error);
+    let output = &observed.output["items"][0]["output"];
+    assert_eq!(
+        observed.output["items"][0]["success"], true,
+        "{}",
+        observed.output
+    );
+    assert_eq!(output["status"], "completed");
+    assert_eq!(output["exit_code"], 0);
+    assert_eq!(output["stdout_tail"], "bounded stdout\n");
+    assert_eq!(output["stderr_tail"], "bounded stderr\n");
+    assert_eq!(output["log_delta_status"], "reset");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    for (status, project_filter, session_id, expected) in [
+        (Some("completed".into()), Some(project.clone()), None, 1),
+        (Some("running".into()), Some(project.clone()), None, 0),
+        (None, Some("agent:other:project".into()), None, 0),
+        (None, None, Some("wc_sess_other".into()), 0),
+    ] {
+        let listed = runtime
+            .dispatch_with_auth(
+                ToolCall::ListJobs {
+                    limit: Some(1),
+                    status,
+                    project: project_filter,
+                    session_id,
+                },
+                Some(&auth),
+            )
+            .await;
+        assert!(listed.success, "{:?}", listed.error);
+        assert_eq!(
+            listed.output["jobs"].as_array().unwrap().len(),
+            expected,
+            "{}",
+            listed.output
+        );
+    }
+    assert_eq!(
+        db.load_job_receipts(chrono::Utc::now().timestamp())
+            .unwrap()[0]
+            .expires_at,
+        deadline
+    );
+    register_agent(
+        &runtime,
+        client,
+        Some("new-owner"),
+        RunnerCapabilities {
+            async_jobs: true,
+            async_shell_jobs: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        runtime
+            .runner_registry
+            .get_job(&job_id)
+            .await
+            .unwrap()
+            .status,
+        "completed"
+    );
+    assert!(probe_patch_agent_request(&runtime, client).await.is_none());
+}
+
+#[tokio::test]
+async fn observe_jobs_terminal_policy_coalesces_noisy_jobs_with_one_deadline_and_caller_delta() {
+    let runtime = test_runtime();
+    let (job_a, request_a, auth) = register_and_start_agent_job(&runtime, "coalesce-a").await;
+    let (job_b, request_b, _) = register_and_start_agent_job(&runtime, "coalesce-b").await;
+    let token_a = observation_token(&runtime, &job_a, &auth).await;
+    let token_b = observation_token(&runtime, &job_b, &auth).await;
+    // A change already visible on entry must also be coalesced, without moving
+    // the caller's delta baseline to this newer state.
+    update_observed_job(
+        &runtime,
+        "coalesce-a",
+        &request_a,
+        "running",
+        Some("before wait\n"),
+        None,
+        false,
+    )
+    .await;
+    let started = Instant::now();
+    let observation = runtime.observe_jobs_for_auth(
+        vec![
+            item(&job_a, Some(token_a.clone())),
+            item(&job_b, Some(token_b.clone())),
+        ],
+        40,
+        Some(1),
+        ObserveJobsWakeOn::Terminal,
+        Some(&auth),
+    );
+    tokio::pin!(observation);
+    tokio::select! {
+        result = &mut observation => panic!("non-terminal update woke early: {:?}", result.output["wait"]),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
+    update_observed_job(
+        &runtime,
+        "coalesce-a",
+        &request_a,
+        "running",
+        Some("during wait\n"),
+        Some(process_activity()),
+        false,
+    )
+    .await;
+    // Exercise the other stream as well as log-independent activity updates.
+    runtime
+        .runner_registry
+        .update_job(RunnerJobUpdateRequest {
+            client_id: "coalesce-b".into(),
+            runner_instance_id: "inst".into(),
+            update_seq: None,
+            job_id: job_b.clone(),
+            request_id: Some(request_b.request_id.clone()),
+            status: "running".into(),
+            stdout_chunk: None,
+            stderr_chunk: Some("stderr during wait\n".into()),
+            stdout_tail: None,
+            stderr_tail: None,
+            log_snapshot: None,
+            exit_code: None,
+            duration_ms: None,
+            error: None,
+            command_execution_state: None,
+            validation_progress: None,
+            test_count_evidence: None,
+            activity: Some(process_activity()),
+            finished: false,
+        })
+        .await
+        .unwrap();
+    let noisy = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            update_observed_job(
+                &runtime,
+                "coalesce-b",
+                &request_b,
+                "running",
+                Some("noise\n"),
+                Some(process_activity()),
+                false,
+            )
+            .await;
+        }
+    };
+    // Keep producing changes beyond the allowed wait: resetting the deadline
+    // on progress would hit this watchdog instead of returning a result.
+    let result = tokio::select! {
+        result = &mut observation => result,
+        _ = noisy => unreachable!(),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(started + Duration::from_millis(2500))) => panic!("updates extended the shared deadline"),
+    };
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(800),
+        "returned early: {elapsed:?}"
+    );
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.output["wait"]["outcome"], "timeout");
+    let a = &result.output["items"][0]["output"];
+    let b = &result.output["items"][1]["output"];
+    assert_eq!(a["changed"], true);
+    assert_eq!(b["changed"], true);
+    assert_eq!(a["terminal"], false);
+    assert_eq!(a["stdout_tail"], "before wait\nduring wait\n");
+    assert_eq!(b["stderr_tail"], "stderr during wait\n");
+    assert!(b["stdout_tail"].as_str().unwrap().contains("noise"));
+    assert_ne!(a["observation_token"], token_a);
+    assert_ne!(b["observation_token"], token_b);
+    assert_eq!(
+        a["activity"],
+        serde_json::to_value(process_activity()).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn observe_jobs_updates_around_first_wait_registration_are_not_lost() {
+    // First poll drives the baseline pass and canonical wait registration to
+    // Pending without a scheduler sleep. Updates immediately before that poll
+    // exercise revision comparison; updates immediately after it exercise Notify.
+    for terminal in [false, true] {
+        for update_before_poll in [false, true] {
+            let runtime = test_runtime();
+            let (job_id, request, auth) =
+                register_and_start_agent_job(&runtime, "observe-race").await;
+            let token = observation_token(&runtime, &job_id, &auth).await;
+            let observation = runtime.observe_jobs_for_auth(
+                vec![item(&job_id, Some(token.clone()))],
+                40,
+                Some(5),
+                if terminal {
+                    ObserveJobsWakeOn::Terminal
+                } else {
+                    ObserveJobsWakeOn::Change
+                },
+                Some(&auth),
+            );
+            tokio::pin!(observation);
+            if !update_before_poll {
+                assert!(futures_util::poll!(&mut observation).is_pending());
+            }
+            update_observed_job(
+                &runtime,
+                "observe-race",
+                &request,
+                if terminal { "completed" } else { "running" },
+                Some("raced update\n"),
+                None,
+                terminal,
+            )
+            .await;
+            if update_before_poll {
+                // Characterize the exact pass -> waiter gap directly: a
+                // canonical waiter starting after this update must compare
+                // the caller baseline before relying on a future notification.
+                let canonical = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    runtime.job_log_for_auth(
+                        job_id.clone(),
+                        None,
+                        Some(1),
+                        Some(&auth),
+                        Some(token),
+                        Some(5),
+                    ),
+                )
+                .await
+                .expect("revision comparison must catch an update before registration");
+                assert!(canonical.success);
+                assert_eq!(canonical.output["changed"], true);
+                assert_eq!(canonical.output["terminal"], terminal);
+            }
+            let result = tokio::time::timeout(Duration::from_secs(2), observation)
+                .await
+                .expect("update near registration must not wait the five-second deadline");
+            assert!(result.success, "{:?}", result.error);
+            assert_eq!(
+                result.output["wait"]["outcome"],
+                if terminal { "terminal" } else { "updated" }
+            );
+            assert_eq!(result.output["items"][0]["output"]["changed"], true);
+            assert_eq!(result.output["items"][0]["output"]["terminal"], terminal);
+            assert_eq!(
+                result.output["items"][0]["output"]["stdout_tail"],
+                "raced update\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn observe_jobs_canonical_continuation_is_parser_ready_with_or_without_baseline() {
+    for token in [None, Some("opaque-observation-cursor")] {
+        let hint = super::super::jobs::observe_job_continuation("job", token);
+        let parsed =
+            ToolCall::from_tool_name(hint["tool"].as_str().unwrap(), hint["arguments"].clone())
+                .unwrap();
+        assert!(matches!(
+            parsed,
+            ToolCall::ObserveJobs {
+                wait_secs: Some(100),
+                wake_on: ObserveJobsWakeOn::Terminal,
+                ..
+            }
+        ));
+        assert_eq!(
+            hint["arguments"]["items"][0]["after_observation_token"].as_str(),
+            token
+        );
+    }
 }

@@ -26,6 +26,7 @@ Account:\n\
   logout                        Remove this device's credentials\n\n\
 Advanced / operator:\n\
   ops                           Read-only operator workflow checks\n\
+  plugin                        Inspect, check, and reload Native Tool Plugins\n\
   users                         Manage users\n\
   tokens                        Manage personal API credentials\n\
   runner-tokens                 Manage Runner transport credentials\n\n\
@@ -159,11 +160,13 @@ pub(crate) fn ops_usage() -> &'static str {
        --server-url URL        WebCodex server URL [default: http://127.0.0.1:8080]\n\
        --proxy http://HOST:PORT Explicit proxy override for Server requests\n\
        --no-system-proxy       Ignore proxy environment and connect directly\n\
-       --env-file PATH         Read WEBCODEX_TOKEN from env file\n\
+       --env-file PATH         Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
        --token-file PATH       Read bearer token from file\n\
        --token TOKEN           Bearer token input; never printed\n\
        --json                  Print machine-readable output\n\
        -h, --help              Print help and exit\n\n\
+     User/API credential precedence: --token, --token-file, selected --env-file\n\
+     WEBCODEX_TOKEN then WEBCODEX_PAT, process WEBCODEX_TOKEN then WEBCODEX_PAT.\n\n\
      These commands are read-only. They do not run jobs, start shell commands,\n\
      create sessions, write files, or print token/env values.\n"
 }
@@ -175,7 +178,7 @@ pub(crate) fn ops_status_usage() -> &'static str {
        --server-url URL        WebCodex server URL [default: http://127.0.0.1:8080]\n\
        --proxy http://HOST:PORT Explicit proxy override for Server requests\n\
        --no-system-proxy       Ignore proxy environment and connect directly\n\
-       --env-file PATH         Read WEBCODEX_TOKEN from env file\n\
+       --env-file PATH         Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
        --token-file PATH       Read bearer token from file\n\
        --token TOKEN           Bearer token input; never printed\n\
        --json                  Print machine-readable output\n\
@@ -190,7 +193,7 @@ pub(crate) fn ops_runners_usage() -> &'static str {
        --server-url URL        WebCodex server URL [default: http://127.0.0.1:8080]\n\
        --proxy http://HOST:PORT Explicit proxy override for Server requests\n\
        --no-system-proxy       Ignore proxy environment and connect directly\n\
-       --env-file PATH         Read WEBCODEX_TOKEN from env file\n\
+       --env-file PATH         Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
        --token-file PATH       Read bearer token from file\n\
        --token TOKEN           Bearer token input; never printed\n\
        --json                  Print machine-readable output\n\
@@ -207,7 +210,7 @@ pub(crate) fn ops_runner_usage() -> &'static str {
        --server-url URL        WebCodex server URL [default: http://127.0.0.1:8080]\n\
        --proxy http://HOST:PORT Explicit proxy override for Server requests\n\
        --no-system-proxy       Ignore proxy environment and connect directly\n\
-       --env-file PATH         Read WEBCODEX_TOKEN from env file\n\
+       --env-file PATH         Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
        --token-file PATH       Read bearer token from file\n\
        --token TOKEN           Bearer token input; never printed\n\
        --json                  Print machine-readable output\n\
@@ -223,7 +226,7 @@ pub(crate) fn ops_projects_usage() -> &'static str {
        --server-url URL        WebCodex server URL [default: http://127.0.0.1:8080]\n\
        --proxy http://HOST:PORT Explicit proxy override for Server requests\n\
        --no-system-proxy       Ignore proxy environment and connect directly\n\
-       --env-file PATH         Read WEBCODEX_TOKEN from env file\n\
+       --env-file PATH         Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
        --token-file PATH       Read bearer token from file\n\
        --token TOKEN           Bearer token input; never printed\n\
        --json                  Print machine-readable output\n\
@@ -240,7 +243,7 @@ pub(crate) fn ops_windows_usage() -> &'static str {
        --server-url URL        WebCodex server URL [default: http://127.0.0.1:8080]\n\
        --proxy http://HOST:PORT Explicit proxy override for Server requests\n\
        --no-system-proxy       Ignore proxy environment and connect directly\n\
-       --env-file PATH         Read WEBCODEX_TOKEN from env file\n\
+       --env-file PATH         Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
        --token-file PATH       Read bearer token from file\n\
        --token TOKEN           Bearer token input; never printed\n\
        --json                  Print machine-readable output\n\
@@ -256,13 +259,120 @@ pub(crate) fn ops_smoke_preflight_usage() -> &'static str {
        --server-url URL        WebCodex server URL [default: http://127.0.0.1:8080]\n\
        --proxy http://HOST:PORT Explicit proxy override for Server requests\n\
        --no-system-proxy       Ignore proxy environment and connect directly\n\
-       --env-file PATH         Read WEBCODEX_TOKEN from env file\n\
+       --env-file PATH         Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
        --token-file PATH       Read bearer token from file\n\
        --token TOKEN           Bearer token input; never printed\n\
        --json                  Print machine-readable output\n\
        --strict                Exit 2 when the ops report status is FAIL\n\
        -h, --help              Print help and exit\n\n\
      This command calls only read-only status/project/workspace inspection APIs.\n"
+}
+
+pub(crate) fn plugin_usage() -> &'static str {
+    "Usage: webcodex plugin <COMMAND>\n\n\
+Native Tool Plugin authoring/operator commands. `init` is local scaffolding; the network\n\
+commands remain thin authenticated adapters over the canonical Server plugin_tool runtime.\n\n\
+Commands:\n\
+  init        Create a local TypeScript Plugin project using the published SDK\n\
+  list        List visible Plugin-capable Runners, committed providers, or provider tools\n\
+  describe    Describe one exact provider-local tool and return its opaque binding observation\n\
+  check       Ask one exact Runner to perform the disposable Plugin admission preflight\n\
+  reload      Ask one exact Runner to atomically replace its complete configured provider set\n\n\
+Use `webcodex plugin <COMMAND> --help` for command-specific options.\n\
+init is local-only and needs no Server, Runner, token, or Plugin scope.\n\
+list/describe require plugin:inspect. check/reload require plugin:manage.\n\
+--oauth-local-plugins grants plugin:inspect + plugin:invoke only; it never grants plugin:manage.\n\
+There is intentionally no plugin call command in this authoring phase.\n"
+}
+
+pub(crate) fn plugin_init_usage() -> &'static str {
+    "Usage: webcodex plugin init <DIRECTORY> [--id PROVIDER_ID]\n\n\
+Create a deterministic local TypeScript/ESM Native Tool Plugin project. The generated project\n\
+pins @yyjeqhc/webcodex-plugin-sdk exactly to 0.1.0 and builds independently of a WebCodex\n\
+source checkout. This command is local-only: it performs no Server request, token lookup,\n\
+Runner operation, dependency installation, Runner config edit, or generated-code execution.\n\n\
+Options:\n\
+  --id PROVIDER_ID          Exact Native Plugin provider id. When omitted, DIRECTORY's basename\n\
+                            is used only if it already passes canonical provider-id validation.\n\
+  -h, --help                Print help and exit\n\n\
+The destination must be absent or an empty ordinary directory. Existing files, symlinks, and\n\
+non-empty directories are rejected; plugin init never overwrites user data. On success it prints\n\
+a copy-ready Runner provider block using the generated project's absolute dist/plugin.js path,\n\
+but it never edits Runner configuration or performs any network/authentication action.\n"
+}
+
+fn plugin_common_usage() -> &'static str {
+    "  --server-url URL         WebCodex Server URL [default: http://127.0.0.1:8080]\n\
+  --proxy http://HOST:PORT  Explicit proxy override for this Server request\n\
+  --no-system-proxy         Ignore proxy environment and connect directly\n\
+  --env-file PATH           Read user/API credential from WEBCODEX_TOKEN, then WEBCODEX_PAT\n\
+  --token-file PATH         Read bearer token from file (recommended for Plugin authoring)\n\
+  --token TOKEN             Bearer token input; never printed\n\
+  --json                    Print the canonical plugin_tool output object as JSON\n\
+  -h, --help                Print help and exit\n\n\
+Credential precedence: --token, --token-file, selected --env-file WEBCODEX_TOKEN then\n\
+WEBCODEX_PAT, process WEBCODEX_TOKEN then WEBCODEX_PAT. WEBCODEX_PAT is only an additive\n\
+user/API CLI alias; existing WEBCODEX_TOKEN behavior remains preferred. For repeat Plugin\n\
+authoring prefer --token-file /path/to/plugin-authoring-pat.\n"
+}
+
+pub(crate) fn plugin_list_usage() -> String {
+    format!(
+        "Usage: webcodex plugin list [--runner RUNNER [--plugin PLUGIN]] [OPTIONS]\n\n\
+Mirror plugin_tool action=list without starting, checking, or reloading providers.\n\
+Without --runner, list caller-visible Plugin-capable Runners. With --runner, list\n\
+that exact Runner's committed providers. With --runner + --plugin, list the provider's\n\
+current frozen tool catalog. Requires plugin:inspect.\n\n\
+Identity options:\n\
+  --runner RUNNER            Exact caller-visible Runner client_id\n\
+  --plugin PLUGIN            Exact provider id; requires --runner\n\n\
+Common options:\n{}",
+        plugin_common_usage()
+    )
+}
+
+pub(crate) fn plugin_describe_usage() -> String {
+    format!(
+        "Usage: webcodex plugin describe --runner RUNNER --plugin PLUGIN --tool TOOL [OPTIONS]\n\n\
+Mirror plugin_tool action=describe for one exact Runner/provider/tool. The Server returns\n\
+the current tool metadata and an opaque binding observation; the CLI does not cache it or\n\
+treat it as authorization. Requires plugin:inspect and does not perform an extra list.\n\n\
+Identity options:\n\
+  --runner RUNNER            Exact caller-visible Runner client_id (required)\n\
+  --plugin PLUGIN            Exact provider id (required)\n\
+  --tool TOOL                Exact provider-local tool name (required)\n\n\
+Common options:\n{}",
+        plugin_common_usage()
+    )
+}
+
+pub(crate) fn plugin_check_usage() -> String {
+    format!(
+        "Usage: webcodex plugin check --runner RUNNER --plugin PLUGIN [OPTIONS]\n\n\
+Mirror plugin_tool action=check. The exact Runner resolves its real provider configuration,\n\
+starts a disposable candidate, performs initialize/tools-list admission, and disposes it.\n\
+The candidate is never committed, but startup itself may have side effects. Requires\n\
+plugin:manage. The CLI does not spawn or validate the Plugin itself and never auto-retries.\n\n\
+Identity options:\n\
+  --runner RUNNER            Exact caller-visible Runner client_id (required)\n\
+  --plugin PLUGIN            Exact provider id (required)\n\n\
+Common options:\n{}",
+        plugin_common_usage()
+    )
+}
+
+pub(crate) fn plugin_reload_usage() -> String {
+    format!(
+        "Usage: webcodex plugin reload --runner RUNNER [OPTIONS]\n\n\
+Mirror plugin_tool action=reload for one exact Runner. The Runner rereads runner.toml,\n\
+prepares every configured provider candidate, and atomically replaces the complete provider\n\
+set only when all candidates are admitted; otherwise the committed set is unchanged.\n\
+There is no per-provider reload option. Requires plugin:manage and never auto-retries.\n\n\
+Identity options:\n\
+  --runner RUNNER            Exact caller-visible Runner client_id (required)\n\n\
+Common options:\n{}",
+        plugin_common_usage()
+    )
 }
 
 pub(crate) fn server_usage() -> &'static str {

@@ -5,7 +5,7 @@ use super::validation::handle_validation_request;
 use super::{
     handle_computer_operation, handle_prepare_managed_worktree_operation,
     handle_project_lifecycle_operation, handle_project_operation,
-    handle_resolve_or_register_project_operation, handle_skill_store_request,
+    handle_resolve_or_register_project_operation, handle_runner_skill_request,
     run_internal_posix_script_with_profiles_and_execution_state,
     run_internal_search_script_with_profiles_and_execution_state,
     run_process_with_profiles_and_execution_state, run_script_with_profiles_and_execution_state,
@@ -198,6 +198,7 @@ fn submit_invalid_job_start(sink: &RunnerSink, request: &RunnerRequest, error: S
         error: Some(error),
         command_execution_state,
         validation_progress: None,
+        test_count_evidence: None,
         activity: None,
         finished: true,
     });
@@ -394,9 +395,18 @@ pub(crate) fn dispatch_request_with_outcome(
         RunnerOperation::McpGateway(operation) => sink
             .submit_mcp_gateway_result(request_id, runtime.mcp_gateway().handle(operation))
             .map(|_| true),
-        RunnerOperation::PluginGateway(operation) => sink
-            .submit_plugin_gateway_result(request_id, runtime.plugins().handle(operation))
-            .map(|_| true),
+        RunnerOperation::PluginGateway(operation) => {
+            let response = match operation {
+                webcodex_core::plugin::PluginGatewayRequest::ProjectCatalog { project_id } => {
+                    runtime
+                        .plugins()
+                        .handle_project_catalog(&project_id, project_registry_dir)
+                }
+                operation => runtime.plugins().handle(operation),
+            };
+            sink.submit_plugin_gateway_result(request_id, response)
+                .map(|_| true)
+        }
         RunnerOperation::RunnerConfig(operation) => {
             let result = handle_runner_config_operation(runtime, &operation);
             // A reload may have replaced the snapshot passed into dispatch_request.
@@ -419,8 +429,9 @@ pub(crate) fn dispatch_request_with_outcome(
             sink.submit_result_with_metadata(request_id, result, config, runtime)
                 .map(|_| true)
         }
-        RunnerOperation::SkillStore(operation) => {
-            let result = handle_skill_store_request(
+        RunnerOperation::Skill(operation) => {
+            let result = handle_runner_skill_request(
+                &config.skills,
                 runtime.client_id(),
                 runtime.server_url(),
                 policy,

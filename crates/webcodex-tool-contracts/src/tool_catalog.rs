@@ -7,9 +7,11 @@ pub const TOOL_DISCOVERY_GROUP_CLEANUP: &str = "cleanup";
 pub const TOOL_DISCOVERY_GROUP_CODING_AGENT: &str = "coding_agent";
 pub const TOOL_DISCOVERY_GROUP_COMMUNICATION: &str = "communication";
 pub const TOOL_DISCOVERY_GROUP_AGENT_TASK: &str = "agent_task";
+pub const TOOL_DISCOVERY_GROUP_AGENT_WAIT: &str = "agent_wait";
 pub const TOOL_DISCOVERY_GROUP_EDIT: &str = "edit";
 pub const TOOL_DISCOVERY_GROUP_FILE_TRANSFER: &str = "file_transfer";
 pub const TOOL_DISCOVERY_GROUP_GIT: &str = "git";
+pub const TOOL_DISCOVERY_GROUP_GOAL: &str = "goal";
 pub const TOOL_DISCOVERY_GROUP_INSPECT: &str = "inspect";
 pub const TOOL_DISCOVERY_GROUP_JOBS: &str = "jobs";
 pub const TOOL_DISCOVERY_GROUP_PATCH: &str = "patch";
@@ -30,12 +32,10 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "work_on_project",
             "project_overview",
             "list_project_tracked_files",
-            "read_file",
             "read_files",
             "run_process",
             "run_script",
             "run_shell",
-            "search_project_text",
             "search_project_texts",
             "document_symbols",
             "document_diagnostics",
@@ -48,12 +48,12 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "list_project_files",
             "show_changes",
             "git_status",
-            "git_diff",
-            "git_diff_summary",
             "git_review_summary",
             "git_diff_hunks",
             "git_log",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_list",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_show",
             "computer_list_targets",
             "computer_list_windows",
@@ -86,10 +86,31 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "read_agent_task",
             "assign_agent_task",
             "start_agent_task_attempt",
+            "start_agent_task_endpoint_continuation",
             "start_agent_task_coding_run",
             "reconcile_agent_task_coding_run",
             "heartbeat_agent_task_attempt",
             "complete_agent_task_attempt",
+        ],
+    },
+    ToolDiscoveryGroup {
+        name: TOOL_DISCOVERY_GROUP_AGENT_WAIT,
+        tools: &[
+            "wait_for_agent_events",
+            "read_agent_wait",
+            "cancel_agent_wait",
+        ],
+    },
+    ToolDiscoveryGroup {
+        name: TOOL_DISCOVERY_GROUP_GOAL,
+        tools: &[
+            "create_goal",
+            "get_goal",
+            "present_goal_plan",
+            "list_goals",
+            "update_goal",
+            "associate_goal_agent_task",
+            "associate_goal_workflow_session",
         ],
     },
     ToolDiscoveryGroup {
@@ -98,7 +119,8 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "create_agent_identity",
             "list_agent_identities",
             "update_agent_identity",
-            "attach_agent_endpoint",
+            "rotate_agent_continuation_endpoint",
+            "present_agent_continuation",
             "bootstrap_agent_conversation",
             "detach_agent_endpoint",
             "create_conversation",
@@ -124,15 +146,15 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
         tools: &[
             "git_commit_paths",
             "git_status",
-            "git_diff",
-            "git_diff_summary",
             "git_review_summary",
             "git_diff_hunks",
             "git_log",
             "show_changes",
             "git_restore_paths",
             "discard_untracked",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_create",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_restore",
         ],
     },
@@ -140,15 +162,16 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
         name: TOOL_DISCOVERY_GROUP_REVIEW,
         tools: &[
             "finish_coding_task",
+            "present_work_result",
             "show_changes",
             "git_review_summary",
             "git_diff_hunks",
             "workspace_hygiene_check",
-            "git_diff_summary",
             "git_log",
             "git_status",
-            "git_diff",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_show",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_list",
         ],
     },
@@ -225,8 +248,6 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "run_detached_process",
             "run_job",
             "stop_job",
-            "job_status",
-            "job_log",
             "observe_jobs",
             "list_jobs",
         ],
@@ -248,10 +269,15 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "complete_session_message",
             "session_discussion_summary",
             "session_handoff_summary",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_create",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_list",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_show",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_restore",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_delete",
             "list_projects",
             "list_runners",
@@ -277,9 +303,11 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "delete_project_files",
             "git_restore_paths",
             "discard_untracked",
+            #[cfg(feature = "workspace-checkpoints")]
             "workspace_checkpoint_delete",
         ],
     },
+    #[cfg(feature = "workspace-checkpoints")]
     ToolDiscoveryGroup {
         name: TOOL_DISCOVERY_GROUP_CHECKPOINT,
         tools: &[
@@ -303,9 +331,7 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
             "list_runners",
             "list_projects",
             "project_overview",
-            "read_file",
             "read_files",
-            "search_project_text",
             "search_project_texts",
             "run_process",
             "run_script",
@@ -329,13 +355,16 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
     ToolRecommendedFlow {
         name: "execution_lifetime",
-        summary: "Execution lifetime: run_process/run_job stay Runner-owned. If accepted native work must outlive the current Runner process across exit, restart, upgrade, or replacement, discover run_detached_process and observe its supervisor-owned Job; never use an expired detached key as a retry token.",
+        summary: "Execution selection: run_process/run_script/run_shell and structured validation are Runner-owned sync-first; run_job is Runner-owned immediate async; run_detached_process is supervisor-owned immediate async; session_shell_exec continues an existing Session shell.",
         manifest_purpose:
-            "Choose execution by lifetime ownership: ordinary process/shell Jobs remain owned by the current Runner, while run_detached_process explicitly hands accepted native argv work to a narrow supervisor so it can outlive the initiating Runner and be recovered by a replacement Runner only under the detached reconciliation contract.",
+            "Choose execution by form, lifetime, start mode, and continuation rather than duration. Runner-owned sync-first run_process/run_script/run_shell and structured validation keep the same execution when handed off and continue with observe_jobs. run_job is Runner-owned immediate async. run_detached_process is supervisor-owned immediate async and is only for a native child that must survive Runner restart/upgrade/stop/replacement; duration alone is not a reason to detach. session_shell_exec continues an existing persistent Session shell instead of creating a Job.",
         tools: &[
             "run_process",
+            "run_script",
+            "run_shell",
             "run_job",
             "run_detached_process",
+            "session_shell_exec",
             "observe_jobs",
             "stop_job",
         ],
@@ -344,11 +373,9 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
         name: "inspect",
         summary: "Inspect: on Adaptive Runtime prefer search_project_texts/read_files even for one query/range. Use run_process for native argv, run_shell for a short tightly related shell chain, run_script for program-like shell content, then show_changes to review.",
         manifest_purpose:
-            "Prefer batch-capable search_project_texts/read_files for Adaptive inspection even with one item; singular search_project_text/read_file remain valid simple primitives. Use run_process for one native argv call, run_shell only for shell semantics or one tightly related observation goal, and run_script for loops/conditionals/functions/traps/multi-stage logic before reviewing the worktree.",
+            "Use search_project_texts/read_files for inspection even with one query or range. Use run_process for one native argv call, run_shell only for shell semantics or one tightly related observation goal, and run_script for loops/conditionals/functions/traps/multi-stage logic before reviewing the worktree.",
         tools: &[
-            "search_project_text",
             "search_project_texts",
-            "read_file",
             "read_files",
             "run_process",
             "run_script",
@@ -359,7 +386,7 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     ToolRecommendedFlow {
         name: "edit",
         summary:
-            "Edit: after read_file/read_files, apply_text_edits with current SHA is the default for ordinary model-generated edits, even when many lines change. Use apply_patch only when contextual/large multi-hunk patch form is materially clearer; external diffs use apply_unified_diff.",
+            "Edit: after read_files, apply_text_edits with current SHA is the default for ordinary model-generated edits, even when many lines change. Use apply_patch only when contextual/large multi-hunk patch form is materially clearer; external diffs use apply_unified_diff.",
         manifest_purpose:
             "Read current files first; SHA-guarded apply_text_edits is the canonical default even when many lines change. Use apply_patch only when contextual or multi-hunk form is materially clearer. Repetitive patch targets need stable unique containing function/impl/type/test/module context. On matching_mode_rejected, do not weaken the guard or switch to first_match: reread and prefer apply_text_edits if exact edits are easy. If patch form remains clearer, consume bounded read_files recovery and preserve the requested guard: unique retries use matching_mode=unique with unique context; exact_unique retries remain matching_mode=exact_unique and never downgrade the stale-context/concurrency fence. context_mismatch requires bounded reread and regeneration from current source, never blind retry. External raw diffs use apply_unified_diff; whole-file writes are only for intentional rewrites.",
         tools: &[
@@ -389,15 +416,15 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     ToolRecommendedFlow {
         name: "validate",
         summary:
-            "Validate: use cargo_check / cargo_test / go_test; long validation continues as a Job. Prefer structured validation tools. Use run_shell only for shell-specific validation and keep independent validation/effect boundaries separate.",
+            "Validate: cargo_fmt / cargo_check / cargo_test / go_test are structured Runner-owned sync-first validation; when a mode supports handoff, unfinished same execution continues as a Job observed with observe_jobs.",
         manifest_purpose:
-            "Use structured Rust or Go validation; long checks become Jobs. run_shell remains available for shell-specific validation, but do not combine validation, commit, push, deploy, restart, or other independent failure/permission boundaries into one shell chain.",
+            "Use structured Rust or Go validation. These tools are Runner-owned sync-first; when the selected mode supports async handoff, unfinished work keeps the same execution identity and continues through observe_jobs. Tool-specific effect and evidence semantics remain authoritative: cargo_fmt check=false stays synchronous and may mutate, while check=true is read-only and may hand off. Use run_shell only for shell-specific validation and keep independent failure/permission boundaries separate.",
         tools: &[
+            "cargo_fmt",
             "cargo_check",
             "cargo_test",
             "go_test",
             "observe_jobs",
-            "job_status",
             "validation_summary",
             "run_process",
             "run_script",
@@ -468,9 +495,9 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
 ];
 
-/// Single ordered, unique source of truth for the `local_coding` MCP surface
-/// and `tool_manifest(intent="coding")`. The order is both the MCP tools/list
-/// order and the coding manifest ranking.
+/// Single ordered, unique source of truth for the fixed `local_coding` MCP
+/// compatibility surface. This list intentionally does not drive Adaptive
+/// Runtime intent discovery.
 pub const LOCAL_CODING_TOOL_NAMES: &[&str] = &[
     // entry
     "work_on_project",
@@ -487,9 +514,7 @@ pub const LOCAL_CODING_TOOL_NAMES: &[&str] = &[
     "project_overview",
     "list_project_tracked_files",
     "list_project_files",
-    "search_project_text",
     "search_project_texts",
-    "read_file",
     "read_files",
     // LSP navigation
     "lsp_status",
@@ -510,8 +535,6 @@ pub const LOCAL_CODING_TOOL_NAMES: &[&str] = &[
     "run_shell",
     "run_job",
     "observe_jobs",
-    "job_status",
-    "job_log",
     "list_jobs",
     "stop_job",
     // validation
@@ -524,11 +547,51 @@ pub const LOCAL_CODING_TOOL_NAMES: &[&str] = &[
     "git_status",
     "git_log",
     "git_review_summary",
-    "git_diff",
     "git_diff_hunks",
     "show_changes",
     "workspace_hygiene_check",
     // finish
+    "finish_coding_task",
+];
+
+/// Ordered selection surface for ordinary coding work under Adaptive Runtime.
+///
+/// This is intentionally smaller and more canonical than the fixed Local Coding
+/// compatibility surface. It may include distinct gateway-routed specialists
+/// that are worth explicit discovery, but excludes singular/legacy peers when a
+/// preferred batch, structured review, or Job-continuation path exists.
+pub const CODING_INTENT_TOOL_NAMES: &[&str] = &[
+    "work_on_project",
+    "project_overview",
+    "search_project_texts",
+    "read_files",
+    // Distinct semantic navigation capabilities remain useful even though they
+    // are long-tail Adaptive gateway targets.
+    "document_symbols",
+    "document_diagnostics",
+    "hover",
+    "workspace_symbols",
+    "goto_definition",
+    "find_references",
+    "call_hierarchy",
+    // Canonical edit plus contextual/multi-hunk specialist.
+    "apply_text_edits",
+    "apply_patch",
+    // Ordinary execution plus program-like multi-stage specialist.
+    "run_process",
+    "run_script",
+    "run_shell",
+    "observe_jobs",
+    // Structured validation.
+    "cargo_fmt",
+    "cargo_check",
+    "cargo_test",
+    "go_test",
+    // Worktree and committed-range review.
+    "git_review_summary",
+    "git_diff_hunks",
+    "show_changes",
+    "workspace_hygiene_check",
     "finish_coding_task",
 ];
 
@@ -540,7 +603,7 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
     ToolManifestIntent {
         name: "coding",
         purpose: "Default coding loop: start, inspect, structured edit, validate, review, report.",
-        tools: LOCAL_CODING_TOOL_NAMES,
+        tools: CODING_INTENT_TOOL_NAMES,
     },
     ToolManifestIntent {
         name: "audit",
@@ -549,15 +612,12 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
             "work_on_project",
             "project_overview",
             "list_project_tracked_files",
-            "read_file",
             "read_files",
-            "search_project_text",
             "search_project_texts",
             "list_project_files",
             "git_status",
             "git_log",
             "git_review_summary",
-            "git_diff_summary",
             "git_diff_hunks",
             "show_changes",
             "workspace_hygiene_check",
@@ -576,9 +636,7 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
             "project_overview",
             "list_project_tracked_files",
             "list_project_files",
-            "search_project_text",
             "search_project_texts",
-            "read_file",
             "read_files",
             "git_status",
             "git_log",
@@ -606,7 +664,6 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
         tools: &[
             "runtime_status",
             "git_status",
-            "git_diff_summary",
             "workspace_hygiene_check",
             "cargo_fmt",
             "cargo_check",

@@ -3,13 +3,16 @@
 mod support;
 
 mod agent_tasks;
+mod agent_waits;
 mod apply_text_edits;
 mod assignment_fence;
 mod builtin_coding_workflow;
+#[cfg(feature = "workspace-checkpoints")]
 mod checkpoint;
 mod coding_task;
 mod coding_task_semantic_navigation;
 mod collaboration;
+mod computer_budgets;
 mod context_projection;
 mod continuation_feedback;
 mod diagnostics;
@@ -19,6 +22,7 @@ mod execution_context;
 mod files;
 mod files_helpers;
 mod git;
+mod goals;
 mod handoff;
 mod handoff_brief;
 mod hygiene;
@@ -43,6 +47,7 @@ mod sessions_resolver;
 mod skills;
 mod specialized_dispatch;
 mod startup_brief;
+mod startup_catalog;
 mod sync_timeout;
 mod targeted_inventory;
 mod trusted_smoke;
@@ -52,4 +57,5 @@ mod validation_handoff;
 mod validation_identity;
 mod validation_summary;
 mod work_on_project;
+mod work_result;
 mod write_project_file;

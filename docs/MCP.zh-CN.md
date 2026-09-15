@@ -84,6 +84,8 @@ Server 启动时会选择 model-facing MCP surface。普通用户不需要选择
 
 MCP tool 的 machine-readable 结果位于 `structuredContent`；`content` 只保留简短的人类可读或 protocol-native fallback。需要结构化字段的 client 应读取 `structuredContent`，不要解析文本。
 
+部分 MCP host 不会把 `structuredContent` 暴露给模型；Claude Custom Connector 已观察到这种情况，即使 WebCodex 已成功执行工具并返回完整结构化结果。为这类 host 提供服务的 operator 可以显式设置 `WEBCODEX_MCP_TEXT_JSON_COMPAT=true`。开启后，普通 Runtime 与 Connector tool result 仍以 `structuredContent` 为 canonical，同时把同一 JSON 值序列化到 `content[0].text`。该选项默认关闭，因为重复表示会增加 response/model-context 大小；protocol-native image/resource framing 与现有 App-only compatibility path 不受影响。
+
 Result 中的 recovery 字段只描述下一次**显式**调用的安全建议，不授予 authority，也不会触发 hidden retry。尤其是 uncertain outcome，必须先 reconcile，再决定是否重复 effect。
 
 ### 内建 local MCP gateway
@@ -289,12 +291,11 @@ summarize the project, review the result, and finish. Do not edit files.
 
 ## 读取与搜索边界
 
-- `read_file` 是有界流式范围读取：`start_line`（默认 1）、`limit`（默认 2000，
-  最大 2000），返回范围加上完整文件 SHA-256 与行元数据，以及用于继续的
-  `next_start_line`。
-- `read_files` 批量执行最多 8 次单文件读取，条目结果相互独立。
-- `search_project_text` 是默认搜索工具（优先 ripgrep，工作量与字节均有界）；
-  `search_project_texts` 批量执行最多 8 个查询。
+- `read_files` 是 canonical 有界范围读取工具，一次支持 1 到 8 个文件；单条目 batch
+  就是单范围读取路径。每个成功条目返回完整文件 SHA-256 与有界行元数据；partial
+  条目返回可直接执行的单条目 `read_files` continuation，且读取并非 snapshot-stable。
+- `search_project_texts` 是 canonical 有界搜索面，一次支持 1 到 8 个独立查询（优先
+  ripgrep，并保留现有有界 fallback）；单查询直接使用 one-query batch。
 
 只有已识别的 backend 明确报告搜索正常完成且无匹配时，空搜索结果才是肯定的
 “无匹配”证据。backend 标识缺失或畸形、完成状态缺失、状态与输出不一致、

@@ -151,8 +151,7 @@ pub fn list_session_messages_input_schema() -> Value {
             },
             "limit": {
                 "type": "integer",
-                "maximum": 100,
-                "description": "Maximum messages to return. Defaults to 50 and is clamped to 100. Results are newest-first by created_at."
+                "description": "Maximum messages to return. Defaults to 50; values above 100 are accepted and clamped to 100. Results are newest-first by created_at."
             }
         },
         "required": ["session_id"],
@@ -197,14 +196,12 @@ pub fn observe_session_messages_input_schema() -> Value {
             "wait_secs": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 60,
-                "description": "Optional one-shot bounded wait in seconds. Allowed only with after_observation_token; never creates a subscription or stream."
+                "description": "Optional one-shot bounded wait in seconds. Positive values above 60 are accepted and clamped to 60. Allowed only with after_observation_token; never creates a subscription or stream."
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 100,
-                "description": "Maximum retained current-state message changes returned. Defaults to 50."
+                "description": "Maximum retained current-state message changes returned. Defaults to 50; values above 100 are accepted and clamped to 100."
             }
         },
         "required": ["session_id"],
@@ -345,9 +342,29 @@ pub fn validation_summary_input_schema() -> Value {
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 100,
                 "default": 20,
-                "description": "Maximum validation history events returned. Defaults to 20 and is clamped to 1..100; per-event parser evidence keeps its own fixed bounds."
+                "description": "Maximum validation history events returned. Defaults to 20; values above 100 are accepted and clamped to 100. Per-event parser evidence keeps its own fixed bounds."
+            }
+        },
+        "required": ["project", "session_id"],
+        "additionalProperties": false
+    })
+}
+
+pub fn work_result_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Required exact runtime Project input. It is independently resolved and authorized on every call and must match the project scoped to session_id."
+            },
+            "session_id": {
+                "type": "string",
+                "pattern": "^wc_sess_[A-Za-z0-9_]+$",
+                "description": "Required exact project-scoped Workflow Session id. Identity is never inferred from current/recent Session, Window, transport, or credential context."
             }
         },
         "required": ["project", "session_id"],
@@ -365,8 +382,7 @@ pub fn session_discussion_summary_input_schema() -> Value {
             },
             "limit": {
                 "type": "integer",
-                "maximum": 100,
-                "description": "Maximum recent progress/decision messages to return. Defaults to 50 and is clamped to 100."
+                "description": "Maximum recent progress/decision messages to return. Defaults to 50; values above 100 are accepted and clamped to 100."
             }
         },
         "required": ["session_id"],
@@ -384,7 +400,7 @@ pub fn session_handoff_summary_input_schema() -> Value {
             },
             "project": {
                 "type": "string",
-                "description": "Optional runtime project id. When provided, the handoff includes a bounded workspace summary and checkpoint candidates."
+                "description": "Optional runtime project id. When provided, the handoff includes a bounded workspace summary."
             },
             "include_workspace": {
                 "type": "boolean",
@@ -392,7 +408,7 @@ pub fn session_handoff_summary_input_schema() -> Value {
             },
             "include_checkpoints": {
                 "type": "boolean",
-                "description": "Include bounded checkpoint candidates, especially the latest last_known_good. Defaults to true. Only effective when project is provided."
+                "description": "Include bounded checkpoint candidates, especially the latest last_known_good. Defaults to true. Only effective when project is provided and the workspace-checkpoints build feature is enabled; otherwise accepted and ignored."
             },
             "include_validation": {
                 "type": "boolean",
@@ -405,8 +421,7 @@ pub fn session_handoff_summary_input_schema() -> Value {
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 100,
-                "description": "Maximum items per bounded section. Defaults to 20 and is clamped to 1..100."
+                "description": "Maximum items per bounded section. Defaults to 20; values above 100 are accepted and clamped to 100."
             }
         },
         "required": ["session_id"],

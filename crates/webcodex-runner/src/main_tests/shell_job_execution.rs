@@ -40,6 +40,7 @@ fn shell_job_filters_sensitive_env_case_insensitive() {
     // environment; Windows removal must be case-insensitive like the OS.
     for spelling in [
         "WEBCODEX_TOKEN",
+        "WebCodex_Pat",
         "WebCodex_User_Token",
         "Authorization",
         "webcodex_agent_token",
@@ -61,7 +62,12 @@ fn shell_job_filters_sensitive_env_case_insensitive() {
     // A configured shell env must not be able to re-insert a secret after the
     // inherited environment was scrubbed. Exercise canonical and mixed-case
     // spellings because Windows environment names are case-insensitive.
-    for spelling in ["WEBCODEX_TOKEN", "WebCodex_User_Token", "authorization"] {
+    for spelling in [
+        "WEBCODEX_TOKEN",
+        "webcodex_pat",
+        "WebCodex_User_Token",
+        "authorization",
+    ] {
         let shell = ShellConfig {
             env: HashMap::from([(spelling.to_string(), "configured-secret".to_string())]),
             ..ShellConfig::default()
@@ -255,6 +261,7 @@ fn shell_job_rejects_cwd_symlink_escape() {
         .is_some_and(|error| error.contains("outside allowed_roots")));
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: waits on a real shell timeout"]
 fn runner_real_process_shell_job_timeout_returns_timeout_error() {
@@ -288,7 +295,7 @@ fn long_lived_descendant_command(pid_file: &Path) -> String {
     )
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "runner-real-process-tests"))]
 #[test]
 #[ignore = "runner real-process lane: waits on a real shell timeout"]
 fn runner_real_process_shell_job_timeout_reaps_descendant_process_group() {
@@ -324,7 +331,7 @@ fn runner_real_process_shell_job_timeout_reaps_descendant_process_group() {
     assert_descendant_reaped(&pid_file);
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "runner-real-process-tests"))]
 #[test]
 #[ignore = "runner real-process lane: waits on a real shell timeout"]
 fn runner_real_process_shell_job_timeout_profile_reaps_descendant_process_group() {

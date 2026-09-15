@@ -9,7 +9,7 @@ use super::state::{
 };
 use super::{
     clamp_grace, job_recovery_grace_secs, now_ts, RunnerRegistry, RUNNER_ONLINE_WINDOW_SECS,
-    JOB_RECOVERY_GRACE_SECS, MAX_OUTPUT_BYTES,
+    JOB_RECOVERY_GRACE_SECS, LIVE_JOB_STREAM_RETENTION_BYTES,
 };
 use webcodex_core::runner_operation::{
     RunnerInvocationMetadata, RunnerJobOperation, RunnerOperation,
@@ -19,10 +19,12 @@ use crate::runner_protocol::{
     RunnerProjectSummary, RunnerRequest, RunnerCapabilities,
     RunnerRegisterRequest, ShellCommandExecutionState, ShellJobContext, ShellJobInventory,
     ShellJobLogSnapshot, ShellJobOpRequest, ShellJobSnapshot, ShellJobStreamSnapshot,
-    ShellJobValidationMetadata, ShellJobValidationProgress, ShellJobValidationStep,
+    ShellJobTestCountEvidence, ShellJobValidationMetadata, ShellJobValidationProgress,
+    ShellJobValidationStep,
     ShellProcessArgv, ShellScriptLanguage, ShellScriptPayload, JOB_INVENTORY_MAX_TERMINAL_JOBS,
     JOB_SNAPSHOT_STREAM_MAX_BYTES, JOB_TERMINAL_RETENTION_SECS,
 };
+use webcodex_core::validation_evidence::CargoTestCountEvidenceStatus;
 
 const CLIENT_ID: &str = "oe";
 const INSTANCE_A: &str = "instance-reconcile-a";
@@ -42,6 +44,7 @@ fn reconciliation_capabilities() -> RunnerCapabilities {
         structured_validation_argv: true,
         structured_cargo_test_count_assertion: true,
         structured_cargo_test_execution_policy: true,
+        structured_cargo_test_lib: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
         ..Default::default()
@@ -60,6 +63,8 @@ fn project_summary() -> RunnerProjectSummary {
         hooks: Vec::new(),
         disabled: false,
         revision: None,
+        root_fingerprint: None,
+        lineage: None,
         git_branch: Some("main".to_string()),
         git_head: None,
         git_dirty: None,
@@ -153,6 +158,19 @@ fn cargo_validation_start_metadata(
     }
 }
 
+fn cargo_lib_validation_start_metadata() -> ShellJobStartMetadata {
+    let mut metadata = cargo_validation_start_metadata(None, None, None);
+    for step in &mut metadata.validation_steps {
+        step.args.push("--lib".to_string());
+    }
+    if let Some(validation) = metadata.validation.as_mut() {
+        for step in &mut validation.steps {
+            step.args.push("--lib".to_string());
+        }
+    }
+    metadata
+}
+
 async fn start_and_take_over(
     registry: &RunnerRegistry,
     instance: &str,
@@ -232,6 +250,7 @@ fn snapshot_from_request(
         stdout,
         stderr: ShellJobStreamSnapshot::default(),
         validation_progress: None,
+        test_count_evidence: None,
         activity: None,
     }
 }
@@ -261,6 +280,7 @@ fn update(
         error: None,
         command_execution_state: None,
         validation_progress: None,
+        test_count_evidence: None,
         activity: None,
         finished,
     }
@@ -423,6 +443,7 @@ async fn validation_progress_accepts_coalesced_sequence_gaps_without_skipping_st
                 current_step: current_step.map(str::to_string),
                 failed_step: None,
             }),
+            test_count_evidence: None,
             activity,
             finished,
         }
@@ -539,6 +560,29 @@ async fn old_count_capable_runner_fails_closed_on_explicit_cargo_execution_polic
 }
 
 #[tokio::test]
+async fn old_structured_runner_fails_closed_on_cargo_test_lib_selector() {
+    let registry = RunnerRegistry::default();
+    let mut registration = register_request(INSTANCE_A, empty_inventory());
+    registration.capabilities.structured_cargo_test_lib = false;
+    assert!(registration.capabilities.structured_validation_argv);
+    registry.register(registration).await.unwrap();
+
+    let error = registry
+        .start_job_with_metadata(
+            start_request("validation"),
+            "tester".to_string(),
+            cargo_lib_validation_start_metadata(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("structured_cargo_test_lib_unavailable"),
+        "error={error}"
+    );
+    assert!(registry.list_jobs(Some(100)).await.is_empty());
+}
+
+#[tokio::test]
 async fn cargo_execution_policy_survives_inventory_roundtrip_and_server_restart() {
     let registry_a = RunnerRegistry::default();
     register(&registry_a, INSTANCE_A, empty_inventory()).await;
@@ -650,21 +694,21 @@ async fn cargo_test_count_assertion_survives_inventory_roundtrip_and_server_rest
     let mut snapshot = snapshot_from_request(
         &job,
         &request,
-        "running",
+        "completed",
         2,
-        stream("running 4 tests\n", 1, false),
+        stream("retained tail after truncation\n", 42, true),
     );
     snapshot.validation_progress = Some(ShellJobValidationProgress {
-        completed: 0,
-        current_step: Some("test".to_string()),
+        completed: 1,
+        current_step: None,
         failed_step: None,
     });
-    snapshot.activity = Some(crate::runner_protocol::ShellJobActivity {
-        state: crate::runner_protocol::ShellJobActivityState::Working,
-        phase: crate::runner_protocol::ShellJobActivityPhase::ValidationTest,
-        source: crate::runner_protocol::ShellJobActivitySource::ValidationPlan,
+    snapshot.test_count_evidence = Some(ShellJobTestCountEvidence {
+        tests_detected: true,
+        tests_run_count: Some(6),
+        status: CargoTestCountEvidenceStatus::CompleteSummary,
     });
-    let expected_activity = snapshot.activity;
+    let expected_evidence = snapshot.test_count_evidence.clone();
     let inventory: ShellJobInventory = serde_json::from_value(
         serde_json::to_value(ShellJobInventory {
             active_complete: true,
@@ -682,8 +726,10 @@ async fn cargo_test_count_assertion_survives_inventory_roundtrip_and_server_rest
         restored_validation.validation_target_id.as_deref(),
         Some(target)
     );
-    assert_eq!(restored.status, "running");
-    assert_eq!(restored.activity, expected_activity);
+    assert_eq!(restored.status, "completed");
+    assert!(restored.stdout_log_truncated);
+    assert_eq!(restored.stdout_retained_from_line, Some(42));
+    assert_eq!(restored.test_count_evidence, expected_evidence);
     assert!(restored.recovered_after_server_restart);
 }
 
@@ -980,6 +1026,104 @@ async fn structured_process_reconciliation_restores_active_and_terminal_evidence
             .unwrap()
             .contains("typed stdin"),
         "recovered durable state must not contain typed stdin"
+    );
+}
+
+#[tokio::test]
+async fn javascript_structured_job_start_requires_additive_runner_capability() {
+    let registry = RunnerRegistry::default();
+    register(&registry, INSTANCE_A, empty_inventory()).await;
+    let metadata = || ShellJobStartMetadata {
+        project_id: Some(RUNTIME_PROJECT_ID.to_string()),
+        session_id: Some(SESSION_ID.to_string()),
+        project_cwd: Some("/srv/demo".to_string()),
+        purpose: Some("operation".to_string()),
+        shell: Some("javascript".to_string()),
+        visibility: ShellJobVisibility::HiddenUntilHandoff,
+        structured_execution: Some(StructuredJobExecution::Script(ShellScriptPayload {
+            language: ShellScriptLanguage::Javascript,
+            script: "await Promise.resolve();\n".to_string(),
+            args: Vec::new(),
+        })),
+        ..Default::default()
+    };
+
+    let error = registry
+        .start_job_with_metadata(start_request(""), "tester".to_string(), metadata())
+        .await
+        .unwrap_err();
+    assert!(error.contains("structured_script_javascript"), "{error}");
+
+    let mut upgraded = register_request(INSTANCE_A, empty_inventory());
+    upgraded.capabilities.structured_script_javascript = true;
+    registry.register(upgraded).await.unwrap();
+    let job = registry
+        .start_job_with_metadata(start_request(""), "tester".to_string(), metadata())
+        .await
+        .unwrap();
+    let request = registry
+        .poll(RunnerPollRequest {
+            client_id: CLIENT_ID.to_string(),
+            runner_instance_id: INSTANCE_A.to_string(),
+        })
+        .await
+        .unwrap()
+        .expect("JavaScript script Job request");
+    assert_eq!(request.job_id.as_deref(), Some(job.job_id.as_str()));
+    assert_eq!(
+        request.script.as_ref().map(|script| script.language),
+        Some(ShellScriptLanguage::Javascript)
+    );
+}
+
+#[tokio::test]
+async fn typescript_structured_job_start_requires_additive_runner_capability() {
+    let registry = RunnerRegistry::default();
+    let mut old_style = register_request(INSTANCE_A, empty_inventory());
+    old_style.capabilities.structured_script_javascript = true;
+    old_style.capabilities.structured_script_typescript = false;
+    registry.register(old_style).await.unwrap();
+    let metadata = || ShellJobStartMetadata {
+        project_id: Some(RUNTIME_PROJECT_ID.to_string()),
+        session_id: Some(SESSION_ID.to_string()),
+        project_cwd: Some("/srv/demo".to_string()),
+        purpose: Some("operation".to_string()),
+        shell: Some("typescript".to_string()),
+        visibility: ShellJobVisibility::HiddenUntilHandoff,
+        structured_execution: Some(StructuredJobExecution::Script(ShellScriptPayload {
+            language: ShellScriptLanguage::Typescript,
+            script: "const value: string = 'ok';\nvoid value;\n".to_string(),
+            args: Vec::new(),
+        })),
+        ..Default::default()
+    };
+
+    let error = registry
+        .start_job_with_metadata(start_request(""), "tester".to_string(), metadata())
+        .await
+        .unwrap_err();
+    assert!(error.contains("structured_script_typescript"), "{error}");
+
+    let mut upgraded = register_request(INSTANCE_A, empty_inventory());
+    upgraded.capabilities.structured_script_javascript = true;
+    upgraded.capabilities.structured_script_typescript = true;
+    registry.register(upgraded).await.unwrap();
+    let job = registry
+        .start_job_with_metadata(start_request(""), "tester".to_string(), metadata())
+        .await
+        .unwrap();
+    let request = registry
+        .poll(RunnerPollRequest {
+            client_id: CLIENT_ID.to_string(),
+            runner_instance_id: INSTANCE_A.to_string(),
+        })
+        .await
+        .unwrap()
+        .expect("TypeScript script Job request");
+    assert_eq!(request.job_id.as_deref(), Some(job.job_id.as_str()));
+    assert_eq!(
+        request.script.as_ref().map(|script| script.language),
+        Some(ShellScriptLanguage::Typescript)
     );
 }
 
@@ -1693,10 +1837,11 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
                 expected_runner_owner: None,
                 expected_project_id: None,
                 expected_project_cwd: None,
+                expected_project_runner_instance_id: None,
                 expected_mcp_gateway_runner_instance_id: None,
                 expected_ssh_resource_runner_instance_id: None,
                 expected_runner_config_runner_instance_id: None,
-                skill_store_fence: None,
+                skill_fence: None,
                 dispatched: true,
                 expected_mcp_gateway_provider_id: None,
                 expected_mcp_gateway_provider_instance_id: None,
@@ -1715,10 +1860,11 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
                 expected_runner_owner: None,
                 expected_project_id: None,
                 expected_project_cwd: None,
+                expected_project_runner_instance_id: None,
                 expected_mcp_gateway_runner_instance_id: None,
                 expected_ssh_resource_runner_instance_id: None,
                 expected_runner_config_runner_instance_id: None,
-                skill_store_fence: None,
+                skill_fence: None,
                 dispatched: false,
                 expected_mcp_gateway_provider_id: None,
                 expected_mcp_gateway_provider_instance_id: None,
@@ -2415,7 +2561,90 @@ fn standalone_snapshot(job_id: &str, status: &str) -> ShellJobSnapshot {
         stdout: ShellJobStreamSnapshot::default(),
         stderr: ShellJobStreamSnapshot::default(),
         validation_progress: None,
+        test_count_evidence: None,
         activity: None,
+    }
+}
+
+#[test]
+fn job_inventory_accepts_javascript_structured_script_context() {
+    let mut javascript = standalone_snapshot("javascript-running", "running");
+    javascript.context.shell = Some("javascript".to_string());
+    javascript.context.command_preview = "javascript script (24 bytes, 1 args)".to_string();
+    javascript.context.structured_execution = Some(
+        crate::runner_protocol::ShellJobStructuredExecutionMetadata {
+            execution_source: "run_script".to_string(),
+            language: Some(ShellScriptLanguage::Javascript),
+            script_bytes: Some(24),
+            arg_count: 1,
+            stdin_present: false,
+            validation_identity: None,
+            validation_tool: None,
+            assertion_name: None,
+        },
+    );
+    let inventory = ShellJobInventory {
+        active_complete: true,
+        jobs: vec![javascript.clone()],
+    };
+    validate_job_inventory(CLIENT_ID, &[project_summary()], &inventory).unwrap();
+
+    javascript.context.shell = Some("node".to_string());
+    let error = validate_job_inventory(
+        CLIENT_ID,
+        &[project_summary()],
+        &ShellJobInventory {
+            active_complete: true,
+            jobs: vec![javascript],
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("shell is invalid"), "{error}");
+}
+
+#[test]
+fn job_inventory_accepts_typescript_semantic_identity_and_rejects_runtime_identity() {
+    let snapshot = || {
+        let mut typescript = standalone_snapshot("typescript-running", "running");
+        typescript.context.shell = Some("typescript".to_string());
+        typescript.context.command_preview = "typescript script (24 bytes, 1 args)".to_string();
+        typescript.context.structured_execution = Some(
+            crate::runner_protocol::ShellJobStructuredExecutionMetadata {
+                execution_source: "run_script".to_string(),
+                language: Some(ShellScriptLanguage::Typescript),
+                script_bytes: Some(24),
+                arg_count: 1,
+                stdin_present: false,
+                validation_identity: None,
+                validation_tool: None,
+                assertion_name: None,
+            },
+        );
+        typescript
+    };
+    validate_job_inventory(
+        CLIENT_ID,
+        &[project_summary()],
+        &ShellJobInventory {
+            active_complete: true,
+            jobs: vec![snapshot()],
+        },
+    )
+    .unwrap();
+
+    for concrete_runtime in ["node", "tsx"] {
+        let mut invalid = snapshot();
+        invalid.context.shell = Some(concrete_runtime.to_string());
+        let error = validate_job_inventory(
+            CLIENT_ID,
+            &[project_summary()],
+            &ShellJobInventory {
+                active_complete: true,
+                jobs: vec![invalid],
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("shell is invalid"), "{error}");
     }
 }
 
@@ -2691,7 +2920,7 @@ fn job_reconciliation_inventory_validation_is_bounded_and_atomic() {
             .unwrap()
             .contains_key(forbidden_field));
     }
-    assert!(serde_json::to_vec(&encoded).unwrap().len() < MAX_OUTPUT_BYTES);
+    assert!(serde_json::to_vec(&encoded).unwrap().len() < LIVE_JOB_STREAM_RETENTION_BYTES);
 }
 
 #[tokio::test]
@@ -3321,3 +3550,6 @@ async fn sweep_only_transitions_expired_jobs_and_leaves_recent_recovering() {
         "non-expired recovering job is left alone by the sweep"
     );
 }
+
+#[path = "job_receipts.rs"]
+mod job_receipts;

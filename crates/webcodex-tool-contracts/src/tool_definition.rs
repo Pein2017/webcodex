@@ -6,7 +6,9 @@
 //! while the registry migration proceeds in small steps.
 
 mod agent_tasks;
+mod agent_waits;
 mod artifacts;
+#[cfg(feature = "workspace-checkpoints")]
 mod checkpoints;
 mod coding_agents;
 mod communication;
@@ -16,6 +18,7 @@ mod discovery;
 mod edits;
 mod files;
 mod git;
+mod goals;
 mod hygiene;
 mod jobs;
 mod lsp;
@@ -37,8 +40,8 @@ use super::registry::input_schemas::list_tools_input_schema;
 #[cfg(any(test, feature = "root-test-support"))]
 pub use super::tool_catalog::TOOL_MANIFEST_INTENTS;
 pub use super::tool_catalog::{
-    available_tool_manifest_intent_names, resolve_tool_manifest_intent, LOCAL_CODING_TOOL_NAMES,
-    TOOL_DISCOVERY_GROUPS, TOOL_RECOMMENDED_FLOWS,
+    available_tool_manifest_intent_names, resolve_tool_manifest_intent, CODING_INTENT_TOOL_NAMES,
+    LOCAL_CODING_TOOL_NAMES, TOOL_DISCOVERY_GROUPS, TOOL_RECOMMENDED_FLOWS,
 };
 #[cfg(any(test, feature = "root-test-support"))]
 pub use super::tool_catalog::{
@@ -53,13 +56,15 @@ pub use super::tool_policy::{
     adaptive_runtime_direct_tool_definitions, exploration_tool_names,
     is_adaptive_runtime_direct_tool, is_model_visible_tool_name, lookup_tool_definition,
     model_visible_tool_definitions, model_visible_tool_names_csv, runtime_tool_accepts_context_ack,
+    runtime_tool_activity_interaction, runtime_tool_activity_semantics,
     runtime_tool_advances_context_checkpoint, runtime_tool_approval_policy,
     runtime_tool_captures_validation_output, runtime_tool_category,
-    runtime_tool_effect_annotations, runtime_tool_is_change_summary_like, runtime_tool_is_git_like,
-    runtime_tool_is_read_like, runtime_tool_is_shell_like, runtime_tool_is_write_like,
-    runtime_tool_metadata, runtime_tool_permission_risk, runtime_tool_requires_permission,
-    runtime_tool_runner_capability, runtime_tool_session_evidence_policy,
-    runtime_tool_session_risk_class,
+    runtime_tool_effect_annotations, runtime_tool_execution_contract,
+    runtime_tool_is_change_summary_like, runtime_tool_is_git_like, runtime_tool_is_read_like,
+    runtime_tool_is_shell_like, runtime_tool_is_write_like, runtime_tool_metadata,
+    runtime_tool_operator_extension_family, runtime_tool_permission_risk,
+    runtime_tool_requires_permission, runtime_tool_runner_capability,
+    runtime_tool_session_evidence_policy, runtime_tool_session_risk_class,
 };
 #[cfg(any(test, feature = "root-test-support"))]
 pub use super::tool_policy::{
@@ -81,7 +86,7 @@ use webcodex_core::runner_protocol::{
     RUNNER_CAPABILITY_FILE_WRITE, RUNNER_CAPABILITY_GIT, RUNNER_CAPABILITY_LSP_CALL_HIERARCHY,
     RUNNER_CAPABILITY_LSP_READ_ONLY_NAVIGATION, RUNNER_CAPABILITY_PERSISTENT_SHELL,
     RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL, RUNNER_CAPABILITY_SHELL,
-    RUNNER_CAPABILITY_SKILL_STORE_MANAGE, RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV,
+    RUNNER_CAPABILITY_SKILL_MANAGEMENT, RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV,
     RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD,
 };
 
@@ -155,8 +160,8 @@ pub enum RunnerCapabilityRequirement {
     /// Exact Runner process-local first-class config check/reload. Never inferred
     /// from SIGHUP, generic shell execution, Plugin support, or protocol generation.
     RunnerConfigControl,
-    /// Runner-global operator Skill store management. Never inferred from read.
-    SkillStoreManage,
+    /// Runner-global managed Skill lifecycle and revision management.
+    SkillManagement,
 }
 
 impl RunnerCapabilityRequirement {
@@ -191,7 +196,7 @@ impl RunnerCapabilityRequirement {
             Self::LspCallHierarchy => RUNNER_CAPABILITY_LSP_CALL_HIERARCHY,
             Self::CodingAgentRuns => RUNNER_CAPABILITY_CODING_AGENT_RUNS,
             Self::RunnerConfigControl => RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL,
-            Self::SkillStoreManage => RUNNER_CAPABILITY_SKILL_STORE_MANAGE,
+            Self::SkillManagement => RUNNER_CAPABILITY_SKILL_MANAGEMENT,
         }
     }
 
@@ -233,7 +238,7 @@ impl RunnerCapabilityRequirement {
             Self::LspCallHierarchy => &[RUNNER_CAPABILITY_LSP_CALL_HIERARCHY],
             Self::CodingAgentRuns => &[RUNNER_CAPABILITY_CODING_AGENT_RUNS],
             Self::RunnerConfigControl => &[RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL],
-            Self::SkillStoreManage => &[RUNNER_CAPABILITY_SKILL_STORE_MANAGE],
+            Self::SkillManagement => &[RUNNER_CAPABILITY_SKILL_MANAGEMENT],
         }
     }
 
@@ -270,6 +275,19 @@ pub type ToolInputSchemaFactory = fn() -> serde_json::Value;
 pub struct ToolModelSpecDeclaration {
     pub description: &'static str,
     pub input_schema: ToolInputSchemaFactory,
+    /// Optional GPT Actions presentation copy. Canonical/MCP descriptions stay
+    /// unchanged; this exists only when the Action importer's 300-character
+    /// operation-description ceiling needs a deliberately shorter rendering.
+    pub gpt_action_description: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolGptActionExposure {
+    /// Follow the canonical Adaptive Runtime surface automatically.
+    Inherit,
+    /// This tool depends on MCP-only protocol semantics and must not be exposed
+    /// directly or through the GPT Actions gateway.
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,11 +296,15 @@ pub struct ToolModelSurfaceDeclaration {
     /// surface. `None` is the default and means a model-visible runtime tool
     /// belongs to the adaptive long tail behind `call_runtime_tool`.
     pub adaptive_runtime_direct_rank: Option<u16>,
+    /// GPT Actions inherits Adaptive Runtime unless a concrete protocol
+    /// incompatibility is declared on the canonical ToolDefinition.
+    pub gpt_action_exposure: ToolGptActionExposure,
 }
 
 impl ToolModelSurfaceDeclaration {
     const DEFAULT: Self = Self {
         adaptive_runtime_direct_rank: None,
+        gpt_action_exposure: ToolGptActionExposure::Inherit,
     };
 }
 
@@ -693,16 +715,218 @@ impl ToolSessionEvidencePolicy {
     }
 }
 
+/// Closed model-selection vocabulary for ordinary execution primitives. These
+/// fields describe how a model should select and continue an execution tool;
+/// they do not grant authority, change permissions, or redefine runtime state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionForm {
+    NativeArgv,
+    TypedScript,
+    ShellCommand,
+    StructuredValidation,
+    PersistentShellCommand,
+}
+
+impl ToolExecutionForm {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeArgv => "native_argv",
+            Self::TypedScript => "typed_script",
+            Self::ShellCommand => "shell_command",
+            Self::StructuredValidation => "structured_validation",
+            Self::PersistentShellCommand => "persistent_shell_command",
+        }
+    }
+}
+
+/// Runtime carrier responsible for the accepted execution lifetime. This is
+/// deliberately unrelated to resource ownership, principal identity, or auth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionLifetime {
+    Runner,
+    Supervisor,
+    SessionShell,
+}
+
+impl ToolExecutionLifetime {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Runner => "runner",
+            Self::Supervisor => "supervisor",
+            Self::SessionShell => "session_shell",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionStart {
+    SyncFirst,
+    AsyncImmediate,
+    ExistingSession,
+}
+
+impl ToolExecutionStart {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SyncFirst => "sync_first",
+            Self::AsyncImmediate => "async_immediate",
+            Self::ExistingSession => "existing_session",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionContinuation {
+    ObserveJobs,
+    SessionShell,
+    None,
+}
+
+impl ToolExecutionContinuation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ObserveJobs => "observe_jobs",
+            Self::SessionShell => "session_shell",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolExecutionContract {
+    pub form: ToolExecutionForm,
+    pub lifetime: ToolExecutionLifetime,
+    pub start: ToolExecutionStart,
+    pub continuation: ToolExecutionContinuation,
+}
+
+impl ToolExecutionContract {
+    pub const fn new(
+        form: ToolExecutionForm,
+        lifetime: ToolExecutionLifetime,
+        start: ToolExecutionStart,
+        continuation: ToolExecutionContinuation,
+    ) -> Self {
+        Self {
+            form,
+            lifetime,
+            start,
+            continuation,
+        }
+    }
+}
+
+/// Static Stateless Operator protocol-extension classification. This declares only
+/// which protocol capability family admits a hidden runtime tool; authorization,
+/// permission, Project authority, and Runner capability remain independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOperatorExtensionFamily {
+    SkillRuntime,
+    SkillManagement,
+    MemoryRuntime,
+    MemoryManagement,
+    TraceDiagnostics,
+}
+
+/// User-facing Activity presentation. This is observability metadata only: it
+/// grants no authority and must not be used as a Project-visibility shortcut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolActivityPresentation {
+    Work,
+    Support,
+    Transport,
+}
+
+impl ToolActivityPresentation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Work => "work",
+            Self::Support => "support",
+            Self::Transport => "transport",
+        }
+    }
+}
+
+/// Whether one tool call is a meaningful model/environment interaction for
+/// Window cadence, runtime freshness, recorder-gap, and Goal liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolActivityInteraction {
+    Meaningful,
+    NonMeaningful,
+}
+
+impl ToolActivityInteraction {
+    pub const fn is_meaningful(self) -> bool {
+        matches!(self, Self::Meaningful)
+    }
+}
+
+/// Canonical semantic kind projected into human-facing Activity surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolActivityKind {
+    Read,
+    Search,
+    Navigate,
+    Edit,
+    Run,
+    Test,
+    Review,
+    None,
+}
+
+impl ToolActivityKind {
+    pub const fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::Read => Some("read"),
+            Self::Search => Some("search"),
+            Self::Navigate => Some("navigate"),
+            Self::Edit => Some("edit"),
+            Self::Run => Some("run"),
+            Self::Test => Some("test"),
+            Self::Review => Some("review"),
+            Self::None => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolActivityPolicy {
+    pub presentation: ToolActivityPresentation,
+    pub interaction: ToolActivityInteraction,
+    /// Narrow escape hatch for a pre-existing display fact that cannot be
+    /// recovered from the other canonical ToolDefinition evidence.
+    pub kind_override: Option<ToolActivityKind>,
+}
+
+impl ToolActivityPolicy {
+    const DEFAULT: Self = Self {
+        presentation: ToolActivityPresentation::Work,
+        interaction: ToolActivityInteraction::Meaningful,
+        kind_override: None,
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolActivitySemantics {
+    pub presentation: ToolActivityPresentation,
+    pub interaction: ToolActivityInteraction,
+    pub kind: ToolActivityKind,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ToolDefinition {
     pub name: &'static str,
     pub audit: ToolAuditPolicy,
     pub model_spec: Option<ToolModelSpecDeclaration>,
     pub model_surface: ToolModelSurfaceDeclaration,
+    pub operator_extension_family: Option<ToolOperatorExtensionFamily>,
+    /// Optional canonical selection semantics for ordinary execution tools.
+    pub execution: Option<ToolExecutionContract>,
     pub visibility: ToolVisibility,
     pub category: &'static str,
     pub metadata: ToolMetadata,
     pub policy: ToolDefinitionPolicy,
+    pub activity: ToolActivityPolicy,
     pub session_evidence: ToolSessionEvidencePolicy,
     /// Runner capability/owner requirement before dispatch reaches a Runner-backed
     /// Project. `None` means the tool is not Runner-dispatched or enforces its
@@ -710,7 +934,55 @@ pub struct ToolDefinition {
     pub runner_capability: Option<RunnerCapabilityRequirement>,
 }
 
+impl ToolDefinition {
+    pub const fn with_operator_extension_family(
+        mut self,
+        family: ToolOperatorExtensionFamily,
+    ) -> Self {
+        self.operator_extension_family = Some(family);
+        self
+    }
+
+    pub const fn with_execution(mut self, execution: ToolExecutionContract) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
+    /// Override only GPT Actions presentation text. This never changes the
+    /// canonical ToolSpec schema, semantic contract, authority, or MCP copy.
+    pub const fn with_gpt_action_description(mut self, description: &'static str) -> Self {
+        if let Some(mut model_spec) = self.model_spec {
+            model_spec.gpt_action_description = Some(description);
+            self.model_spec = Some(model_spec);
+        }
+        self
+    }
+
+    /// Mark a canonical model-visible tool as incompatible with GPT Actions
+    /// transport while leaving every other model/runtime surface unchanged.
+    pub const fn with_gpt_action_unsupported(mut self) -> Self {
+        self.model_surface.gpt_action_exposure = ToolGptActionExposure::Unsupported;
+        self
+    }
+
+    pub const fn with_activity(
+        mut self,
+        presentation: ToolActivityPresentation,
+        interaction: ToolActivityInteraction,
+    ) -> Self {
+        self.activity.presentation = presentation;
+        self.activity.interaction = interaction;
+        self
+    }
+
+    pub const fn with_activity_kind(mut self, kind: ToolActivityKind) -> Self {
+        self.activity.kind_override = Some(kind);
+        self
+    }
+}
+
 pub const TOOL_CATEGORY_AGENT_TASK: &str = "agent_task";
+pub const TOOL_CATEGORY_AGENT_WAIT: &str = "agent_wait";
 pub const TOOL_CATEGORY_ARTIFACT: &str = "artifact";
 pub const TOOL_CATEGORY_CHECKPOINT: &str = "checkpoint";
 pub const TOOL_CATEGORY_CODING_AGENT: &str = "coding_agent";
@@ -720,6 +992,7 @@ pub const TOOL_CATEGORY_CLEANUP: &str = "cleanup";
 pub const TOOL_CATEGORY_EDIT: &str = "edit";
 pub const TOOL_CATEGORY_FILE: &str = "file";
 pub const TOOL_CATEGORY_GIT: &str = "git";
+pub const TOOL_CATEGORY_GOAL: &str = "goal";
 pub const TOOL_CATEGORY_JOB: &str = "job";
 pub const TOOL_CATEGORY_LSP: &str = "lsp";
 pub const TOOL_CATEGORY_PATCH: &str = "patch";
@@ -760,6 +1033,12 @@ impl ToolContextContinuityPolicy {
     pub const CONSERVATIVE: Self = Self {
         accepts_context_ack: true,
         checkpoint: ContextCheckpointPolicy::OnModelFacingResult,
+    };
+
+    /// Ordinary observations can be repeated without checkpoint recovery.
+    pub const REOBSERVABLE: Self = Self {
+        accepts_context_ack: false,
+        checkpoint: ContextCheckpointPolicy::Never,
     };
 
     pub const RECOVERY_ONLY: Self = Self {
@@ -843,6 +1122,8 @@ const fn def(
         audit,
         model_spec: None,
         model_surface: ToolModelSurfaceDeclaration::DEFAULT,
+        operator_extension_family: None,
+        execution: None,
         visibility,
         category,
         metadata: make_tool_metadata(
@@ -856,6 +1137,7 @@ const fn def(
             shell_like,
         ),
         policy: ToolDefinitionPolicy::DEFAULT,
+        activity: ToolActivityPolicy::DEFAULT,
         session_evidence,
         runner_capability,
     }
@@ -870,6 +1152,7 @@ const fn model_spec(
         model_spec: Some(ToolModelSpecDeclaration {
             description,
             input_schema,
+            gpt_action_description: None,
         }),
         ..definition
     }
@@ -879,6 +1162,7 @@ const fn adaptive_runtime_direct(definition: ToolDefinition, rank: u16) -> ToolD
     ToolDefinition {
         model_surface: ToolModelSurfaceDeclaration {
             adaptive_runtime_direct_rank: Some(rank),
+            ..definition.model_surface
         },
         ..definition
     }
@@ -943,6 +1227,10 @@ const fn context_continuity(
     }
 }
 
+const fn context_reobservable(definition: ToolDefinition) -> ToolDefinition {
+    context_continuity(definition, ToolContextContinuityPolicy::REOBSERVABLE)
+}
+
 const fn context_recovery_only(definition: ToolDefinition) -> ToolDefinition {
     context_continuity(definition, ToolContextContinuityPolicy::RECOVERY_ONLY)
 }
@@ -986,10 +1274,13 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     TOOL_DEFINITION_HEAD,
     sessions::DEFINITIONS,
     communication::DEFINITIONS,
+    goals::DEFINITIONS,
     agent_tasks::DEFINITIONS,
+    agent_waits::DEFINITIONS,
     memory::DEFINITIONS,
     skills::DEFINITIONS,
     hygiene::DEFINITIONS,
+    #[cfg(feature = "workspace-checkpoints")]
     checkpoints::DEFINITIONS,
     coding_agents::DEFINITIONS,
     computer::DEFINITIONS,
@@ -1012,7 +1303,7 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     edits::DEFINITIONS,
 ];
 
-const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[context_recovery_only(model_spec(
+const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[context_reobservable(model_spec(
     def(
         "list_tools",
         ToolAuditPolicy::TYPED_CANONICAL,
@@ -1032,6 +1323,10 @@ const TOOL_DEFINITION_HEAD: &[ToolDefinition] = &[context_recovery_only(model_sp
         false,
         false,
         ToolSessionEvidencePolicy::NONE,
+    )
+    .with_activity(
+        ToolActivityPresentation::Support,
+        ToolActivityInteraction::NonMeaningful,
     ),
     "List runtime tools. Full output includes schemas and may be large; use summary_only with category, features, or limit for bounded GPT Action discovery.",
     list_tools_input_schema,

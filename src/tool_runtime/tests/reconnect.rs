@@ -354,6 +354,30 @@ async fn meaningful_activity_is_scoped_and_not_refreshed_by_status_calls() {
         observed_at
     );
 
+    // observe_jobs is transport presentation, but it is still a meaningful
+    // model/environment interaction and therefore may refresh runtime
+    // observation freshness.
+    runtime
+        .observations
+        .record_successful_tool_call(ToolCallObservation {
+            principal_kind: "dev".to_string(),
+            principal_id: "dev".to_string(),
+            project: None,
+            surface: "mcp".to_string(),
+            session_id: None,
+            tool: "observe_jobs".to_string(),
+            observed_at: observed_at + 200,
+        });
+    let after_observe_jobs = layers(&runtime).await;
+    assert_eq!(
+        after_observe_jobs["last_successful_tool_call"]["tool"],
+        "observe_jobs"
+    );
+    assert_eq!(
+        after_observe_jobs["last_successful_tool_call"]["observed_at"],
+        observed_at + 200
+    );
+
     // Additional status polling must not refresh the observation.
     for _ in 0..3 {
         let result = runtime
@@ -369,12 +393,12 @@ async fn meaningful_activity_is_scoped_and_not_refreshed_by_status_calls() {
         assert!(result.success);
     }
     let still = layers(&runtime).await;
-    assert_eq!(still["last_successful_tool_call"]["tool"], "start_session");
+    assert_eq!(still["last_successful_tool_call"]["tool"], "observe_jobs");
     assert_eq!(
         still["last_successful_tool_call"]["observed_at"]
             .as_i64()
             .unwrap(),
-        observed_at
+        observed_at + 200
     );
 }
 #[tokio::test]
@@ -883,6 +907,7 @@ fn coding_start_call(project: &str, instruction: &str) -> ToolCall {
         session_id: None,
         include_project_instructions: true,
         include_workflow_guidance: true,
+        include_extension_catalog: false,
     }
 }
 
@@ -897,6 +922,7 @@ fn coding_resume_call(project: &str, instruction: &str, session_id: &str) -> Too
         session_id: Some(session_id.to_string()),
         include_project_instructions: true,
         include_workflow_guidance: true,
+        include_extension_catalog: false,
     }
 }
 
@@ -1153,13 +1179,17 @@ async fn coding_workflow_read_only_upgrade_is_atomic_and_permission_checked() {
     let read = dispatch_coding_call_in_window(
         &runtime,
         "oauth-client",
-        ToolCall::ReadFile {
+        ToolCall::ReadFiles {
             project: project.clone(),
-            path: "src/inspect.rs".to_string(),
+            items: vec![crate::tool_runtime::ReadFilesItem {
+                path: "src/inspect.rs".to_string(),
+                start_line: None,
+                limit: None,
+                expected_read_revision: None,
+            }],
             session_id: Some(session_id.clone()),
-            start_line: None,
-            limit: None,
             with_line_numbers: None,
+            max_result_bytes: None,
         },
         Some(&read_auth),
         "upgrade-window",
@@ -1225,7 +1255,7 @@ async fn coding_workflow_read_only_upgrade_is_atomic_and_permission_checked() {
             .iter()
             .filter(|event| {
                 event.kind == "tool_call_finished"
-                    && event.tool_name == "read_file"
+                    && event.tool_name == "read_files"
                     && event.status.as_deref() == Some("succeeded")
             })
             .count(),

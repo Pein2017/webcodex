@@ -1,8 +1,8 @@
 use super::RunnerCapabilityRequirement::{GitOrShell, OwnerOnly};
 use super::ToolVisibility::{ModelHidden, ModelVisible};
 use super::{
-    adaptive_runtime_direct, context_recovery_only, def, model_spec, permission_risk,
-    requires_explicit_business_session, ToolDefinition, PERMISSION_RISK_WRITE,
+    adaptive_runtime_direct, context_recovery_only, context_reobservable, def, model_spec,
+    permission_risk, requires_explicit_business_session, ToolDefinition, PERMISSION_RISK_WRITE,
     TOOL_CATEGORY_SESSION, TOOL_CATEGORY_VALIDATION,
 };
 use crate::metadata::{
@@ -16,7 +16,7 @@ use crate::registry::input_schemas::{
     post_session_message_input_schema, resolve_session_message_input_schema,
     session_discussion_summary_input_schema, session_handoff_summary_input_schema,
     session_summary_input_schema, update_session_context_input_schema,
-    validation_summary_input_schema, work_on_project_input_schema,
+    validation_summary_input_schema, work_on_project_input_schema, work_result_input_schema,
 };
 
 pub(super) const DEFINITIONS: &[ToolDefinition] = &[
@@ -41,7 +41,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         super::ToolSessionEvidencePolicy::NONE,
     ),
     adaptive_runtime_direct(
-        context_recovery_only(model_spec(
+        context_reobservable(model_spec(
             def(
                 "work_on_project",
                 super::ToolAuditPolicy::TYPED_CANONICAL,
@@ -61,10 +61,14 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 false,
                 super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Support,
+                super::ToolActivityInteraction::Meaningful,
             ),
-            "Canonical model entry for ordinary coding/review via an existing Project or Runner path; Git not required for checkout mode. Omitted/checkout preserves the existing path flow. mode=worktree with client_id + path asks the Runner to resolve an exact Git base, bootstrap or re-observe an isolated managed worktree, register it as an ordinary Project, and then start or exactly resume the Workflow Session. This hides registration/worktree plumbing without bypassing Project authority and returns compact workflow plus project instructions.",
+            "Canonical bootstrap for ordinary coding/review. Use project or client_id+path. Omit session_id for a fresh Workflow Session; a fresh Workflow Session does not imply a fresh model context. Use exact resume only for an active accessible Session and never guesses prior Session. Defaults return project instructions, workflow guidance, and Skills/Plugin selection metadata. If the current model context retains instructions/guidance, set the matching include_* false; use defaults for a fresh or uncertain model context. Session/window/transport identity never proves retention; Runtime still re-observes instruction files. Skill bodies require skill_read_file; Plugin calls require plugin_tool describe. Checkout does not require Git; mode=worktree uses an exact Git base for an isolated worktree without bypassing Project authority.",
             work_on_project_input_schema,
-        )),
+        ).with_gpt_action_description("Start or resume exact project work. Use project or client_id+path; omit session_id for a fresh Workflow Session. Defaults return project/workflow/extension context. worktree mode creates an isolated Runner-managed Git worktree without widening authority.")),
         10,
     ),
     adaptive_runtime_direct(
@@ -88,13 +92,76 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 false,
                 super::ToolSessionEvidencePolicy::NONE,
-            ),
+            )
+            .with_activity_kind(super::ToolActivityKind::Review),
             "Return an optional deterministic evidence snapshot for model review, including workspace, validation, jobs, and recorded tool events. The result is advisory: it does not decide task completion, replace direct diff or test review, or generate the user-facing final report.",
             finish_coding_task_input_schema,
         )),
         150,
     ),
-    requires_explicit_business_session(model_spec(
+    adaptive_runtime_direct(
+        requires_explicit_business_session(model_spec(
+            def(
+                "present_work_result",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::pointer("project", "/work_result/project"),
+                    super::ToolAuditResultField::pointer("session_id", "/work_result/session_id"),
+                    super::ToolAuditResultField::pointer("state_version", "/work_result/state_version"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelVisible,
+                "workflow",
+                Some(GitOrShell),
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Observe,
+                    risk: Read,
+                    approval: super::ToolApprovalPolicy::None,
+                    idempotency: super::ToolIdempotency::PureRead,
+                },
+                Some(PROJECT_READ),
+                true,
+                NoPath,
+                false,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            ),
+            "Optionally present one exact coding Workflow Session as a persistent read-only Work Result MCP App card when a user-visible work summary is genuinely useful. Requires explicit project + session_id, creates no work, runs no validation/review, changes no Session lifecycle, and grants no authority. The returned Work Result is the card's initial authoritative snapshot; do not call merely to acknowledge a clean worktree and do not call repeatedly to refresh. Later refresh is user-driven inside the existing card through one exact app-only state read per click. Presentation is UX only, never a correctness requirement; repeated explicit presentation may create another Host card.",
+            work_result_input_schema,
+        ))
+        .with_gpt_action_unsupported(),
+        155,
+    ),
+    def(
+        "work_result_state",
+        super::ToolAuditPolicy::typed_fields(&[
+            super::ToolAuditResultField::pointer("project", "/work_result/project"),
+            super::ToolAuditResultField::pointer("session_id", "/work_result/session_id"),
+            super::ToolAuditResultField::pointer("state_version", "/work_result/state_version"),
+            super::ToolAuditResultField::value("error_kind"),
+        ]),
+        ModelHidden,
+        "workflow",
+        Some(GitOrShell),
+        TOOL_PROVIDER_CONTROL,
+        super::ToolSemanticContract {
+            effect: super::ToolEffect::Observe,
+            risk: Read,
+            approval: super::ToolApprovalPolicy::None,
+            idempotency: super::ToolIdempotency::PureRead,
+        },
+        Some(PROJECT_READ),
+        true,
+        NoPath,
+        false,
+        false,
+        super::ToolSessionEvidencePolicy::NONE,
+    )
+    .with_activity(
+        super::ToolActivityPresentation::Transport,
+        super::ToolActivityInteraction::NonMeaningful,
+    ),
+    requires_explicit_business_session(context_reobservable(model_spec(
         def(
             "session_summary",
             super::ToolAuditPolicy::TYPED_CANONICAL,
@@ -117,7 +184,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         ),
         "Return a bounded structured summary from the session ledger for an explicit session_id: recorded events, message-board summary, task mode, guards, and lifecycle. Uses durable ledger data where session persistence is configured.",
         session_summary_input_schema,
-    )),
+    ))),
     requires_explicit_business_session(permission_risk(
         model_spec(
             def(
@@ -172,7 +239,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         ),
         PERMISSION_RISK_WRITE,
     )),
-    requires_explicit_business_session(model_spec(
+    requires_explicit_business_session(context_reobservable(model_spec(
         def(
             "validation_summary",
             super::ToolAuditPolicy::TYPED_CANONICAL,
@@ -192,10 +259,14 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             false,
             false,
             super::ToolSessionEvidencePolicy::NONE,
+        )
+        .with_activity(
+            super::ToolActivityPresentation::Support,
+            super::ToolActivityInteraction::Meaningful,
         ),
         "Read bounded structured validation evidence already recorded in an explicit project-scoped session ledger. Does not run Cargo or shell commands, enqueue a Runner request, read project files, mutate the workspace, or replace finish_coding_task.",
         validation_summary_input_schema,
-    )),
+    ))),
     requires_explicit_business_session(model_spec(
         def(
             "post_session_message",
@@ -421,9 +492,10 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         )),
         15,
     ),
-    requires_explicit_business_session(model_spec(
-        def(
-            "session_handoff_summary",
+    adaptive_runtime_direct(
+        requires_explicit_business_session(context_recovery_only(model_spec(
+            def(
+                "session_handoff_summary",
             super::ToolAuditPolicy::typed_fields(&[
                 super::ToolAuditResultField::value("session_id"),
                 super::ToolAuditResultField::value("project"),
@@ -451,8 +523,14 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             false,
             false,
             super::ToolSessionEvidencePolicy::NONE,
+        )
+        .with_activity(
+            super::ToolActivityPresentation::Support,
+            super::ToolActivityInteraction::Meaningful,
         ),
-        "Read-only handoff for multi-step tasks, explicit session_id. Reads session ledger collaboration and ledger-derived validation. Diagnostics use bounded tails or safe result metadata; validation.parser.available is false if absent. Worker/coordinator read.",
-        session_handoff_summary_input_schema,
-    )),
+            "Read-only handoff for multi-step tasks, explicit session_id. Reads session ledger collaboration and ledger-derived validation. Diagnostics use bounded tails or safe result metadata; validation.parser.available is false if absent. Use the default full view to recover unknown context; summary_only, limit below 20, or disabled include_* components cannot establish a new ACK baseline. No checkpoint allocation; grants no authority.",
+            session_handoff_summary_input_schema,
+        ).with_gpt_action_description("Recover an explicit Workflow Session for multi-step work. Use full defaults to rebuild context/ACK baseline; summary_only or reduced sections are diagnostic only. Read-only and grants no authority."))),
+        16,
+    ),
 ];

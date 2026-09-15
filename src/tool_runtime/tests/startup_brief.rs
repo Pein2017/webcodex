@@ -108,7 +108,7 @@ fn instruction_source<'a>(output: &'a Value, path: &str) -> &'a Value {
 fn assert_builtin_workflow(output: &Value) {
     let workflow = &output["workflow"];
     assert_eq!(workflow["contract"], "webcodex.coding_workflow");
-    assert_eq!(workflow["version"], 9);
+    assert_eq!(workflow["version"], 10);
     assert_eq!(workflow["authority"], "model_guidance_only");
     assert!(workflow["role_selection"]
         .as_str()
@@ -117,14 +117,12 @@ fn assert_builtin_workflow(output: &Value) {
         .as_str()
         .expect("Session context ACK guidance");
     assert!(ack_guidance.contains("ack_session_context_revision"));
-    assert!(ack_guidance.contains("session_context_revision exactly"));
-    assert!(ack_guidance.contains("never derive it"));
-    assert!(ack_guidance.contains("No revision"));
-    assert!(ack_guidance.contains("if unknown, omit"));
-    assert!(ack_guidance.contains("Missing/invalid"));
-    assert!(ack_guidance.contains("compact handoff"));
-    assert!(ack_guidance.contains("stale may recover"));
-    assert!(ack_guidance.contains("Nonblocking"));
+    assert!(ack_guidance.contains("Checkpoint/recovery tools"));
+    assert!(ack_guidance.contains("only where exposed"));
+    assert!(ack_guidance.contains("never invent it"));
+    assert!(ack_guidance.contains("If unknown, omit"));
+    assert!(ack_guidance.contains("Session handoff recovery path"));
+    assert!(ack_guidance.contains("nonblocking"));
     let recording_guidance = workflow["model_protocol"]["session_recording"]
         .as_str()
         .expect("Session recording guidance");
@@ -174,6 +172,13 @@ fn assert_builtin_workflow(output: &Value) {
         .collect::<Vec<_>>()
         .join("\n");
     for phrase in [
+        "cargo_fmt(check=false)",
+        "instead of reproducing rustfmt edits manually",
+        "highest expected correctness and reliability",
+        "bounded deterministic Python transformation through run_shell",
+        "first-class option",
+        "do not bypass permission/path policy",
+        "Always inspect the resulting diff and validate final source",
         "independent read-only inspection",
         "short sync_wait_secs",
         "same-execution Job handoff",
@@ -819,13 +824,17 @@ async fn restart_restored_coding_task_session_reloads_rules_without_persisting_b
     let read = dispatch_coding_call_in_window(
         &runtime1,
         "rules-restart",
-        ToolCall::ReadFile {
+        ToolCall::ReadFiles {
             project: project.clone(),
-            path: "src/restart.rs".to_string(),
+            items: vec![crate::tool_runtime::ReadFilesItem {
+                path: "src/restart.rs".to_string(),
+                start_line: None,
+                limit: None,
+                expected_read_revision: None,
+            }],
             session_id: Some(session_id.clone()),
-            start_line: None,
-            limit: None,
             with_line_numbers: None,
+            max_result_bytes: None,
         },
         Some(&auth),
         "rules-restart-window",
@@ -883,7 +892,7 @@ async fn restart_restored_coding_task_session_reloads_rules_without_persisting_b
             .iter()
             .filter(|event| {
                 event.kind == "tool_call_finished"
-                    && event.tool_name == "read_file"
+                    && event.tool_name == "read_files"
                     && event.status.as_deref() == Some("succeeded")
             })
             .count(),
@@ -1013,6 +1022,7 @@ async fn startup_uses_project_scoped_lifecycle_aware_job_summary() {
             error: None,
             command_execution_state: None,
             validation_progress: None,
+            test_count_evidence: None,
             activity: None,
             finished: false,
         })
@@ -1152,6 +1162,7 @@ async fn startup_uses_project_scoped_lifecycle_aware_job_summary() {
             error: None,
             command_execution_state: None,
             validation_progress: None,
+            test_count_evidence: None,
             activity: None,
             finished: true,
         })

@@ -1,7 +1,7 @@
 use super::RunnerCapabilityRequirement::GitOrShell;
 use super::ToolVisibility::ModelVisible;
 use super::{
-    adaptive_runtime_direct, change_summary_like, context_recovery_only, def, git_like, model_spec,
+    adaptive_runtime_direct, change_summary_like, context_reobservable, def, git_like, model_spec,
     require_all_scopes, ToolDefinition, TOOL_CATEGORY_GIT,
 };
 use crate::metadata::{
@@ -10,49 +10,13 @@ use crate::metadata::{
     JOB_RUN, PROJECT_READ, PROJECT_WRITE, TOOL_PROVIDER_RUNNER,
 };
 use crate::registry::input_schemas::{
-    git_commit_paths_input_schema, git_diff_hunks_input_schema, git_diff_input_schema,
-    git_diff_summary_input_schema, git_log_input_schema, git_review_summary_input_schema,
-    git_status_input_schema, show_changes_input_schema,
+    git_commit_paths_input_schema, git_diff_hunks_input_schema, git_log_input_schema,
+    git_review_summary_input_schema, git_status_input_schema, show_changes_input_schema,
 };
 
 pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
-    context_recovery_only(change_summary_like(git_like(model_spec(
-        def(
-            "git_diff_summary",
-            super::ToolAuditPolicy::TYPED_CANONICAL.context(
-                super::ToolAuditContextPolicy::Fields(&[
-                    super::ToolAuditResultField::value("clean"),
-                    super::ToolAuditResultField::value("branch"),
-                    super::ToolAuditResultField::value("head"),
-                    super::ToolAuditResultField::value("upstream"),
-                    super::ToolAuditResultField::value("ahead"),
-                    super::ToolAuditResultField::value("behind"),
-                    super::ToolAuditResultField::value("counts"),
-                    super::ToolAuditResultField::value("changed_files"),
-                ]),
-            ),
-            ModelVisible,
-            TOOL_CATEGORY_GIT,
-            Some(GitOrShell),
-            TOOL_PROVIDER_RUNNER,
-            super::ToolSemanticContract {
-                effect: super::ToolEffect::Observe,
-                risk: Read,
-                approval: super::ToolApprovalPolicy::None,
-                idempotency: super::ToolIdempotency::PureRead,
-            },
-            Some(PROJECT_READ),
-            true,
-            NoPath,
-            false,
-            false,
-            super::ToolSessionEvidencePolicy::NONE.review(super::ToolReviewEvidence::DiffReview).diff_review(super::ToolDiffReviewEvidence::Always),
-        ),
-        "Read-only git diff summary for a project: `git status --porcelain`, `git diff --stat`, and a parsed changed-file list. Does not modify the worktree.",
-        git_diff_summary_input_schema,
-    )))),
     adaptive_runtime_direct(
-        context_recovery_only(change_summary_like(git_like(model_spec(
+        context_reobservable(change_summary_like(git_like(model_spec(
             def(
                 "git_review_summary",
                 super::ToolAuditPolicy::typed_fields(&[
@@ -92,7 +56,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
         120,
     ),
     adaptive_runtime_direct(
-        context_recovery_only(change_summary_like(git_like(model_spec(
+        context_reobservable(change_summary_like(git_like(model_spec(
             def(
                 "show_changes",
                 super::ToolAuditPolicy::TYPED_CANONICAL.context(
@@ -124,9 +88,9 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE.review(super::ToolReviewEvidence::WorkspaceReview).diff_review(super::ToolDiffReviewEvidence::ArgumentBool("include_diff")),
             ),
-            "Default inspect/review tool before final response. Read-only worktree overview with bounded hunks. If hunks truncate, diff_review_handoff classifies page/line/mixed truncation and provides a parser-ready git_diff_hunks recovery call.",
+            "Default inspect/review tool before final response. Read-only worktree overview with bounded hunks and compact Session signals; recent Session event history is omitted unless session_event_limit is explicitly positive. If hunks truncate, diff_review_handoff classifies page/line/mixed truncation and provides a parser-ready git_diff_hunks recovery call.",
             show_changes_input_schema,
-        )))),
+        ).with_gpt_action_description("Review current worktree changes and optional bounded diff hunks before handoff. If diff output truncates, follow the returned git_diff_hunks recovery call. Read-only; recent Session event history is opt-in.")))),
         130,
     ),
 ];
@@ -156,7 +120,7 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
         "Commit exactly requested changed file paths with an atomic expected_head fence and isolated temporary index; normal Git clean filters may run under job:run authority, ordinary commit hooks are bypassed so they cannot add unrelated paths, and the tool never pushes.",
         git_commit_paths_input_schema,
     )), &[PROJECT_WRITE, JOB_RUN]),
-    context_recovery_only(git_like(model_spec(
+    context_reobservable(git_like(model_spec(
         def(
             "git_status",
             super::ToolAuditPolicy::TYPED_CANONICAL
@@ -181,32 +145,8 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
         "Run git status --porcelain for a project.",
         git_status_input_schema,
     ))),
-    context_recovery_only(git_like(model_spec(
-        def(
-            "git_diff",
-            super::ToolAuditPolicy::TYPED_CANONICAL,
-            ModelVisible,
-            TOOL_CATEGORY_GIT,
-            Some(GitOrShell),
-            TOOL_PROVIDER_RUNNER,
-            super::ToolSemanticContract {
-                effect: super::ToolEffect::Observe,
-                risk: Read,
-                approval: super::ToolApprovalPolicy::None,
-                idempotency: super::ToolIdempotency::PureRead,
-            },
-            Some(PROJECT_READ),
-            true,
-            NoPath,
-            false,
-            false,
-            super::ToolSessionEvidencePolicy::NONE.review(super::ToolReviewEvidence::DiffReview).diff_review(super::ToolDiffReviewEvidence::Always),
-        ),
-        "Run git diff for a project, optionally scoped to paths.",
-        git_diff_input_schema,
-    ))),
     adaptive_runtime_direct(
-        context_recovery_only(change_summary_like(git_like(model_spec(
+        context_reobservable(change_summary_like(git_like(model_spec(
             def(
                 "git_diff_hunks",
                 super::ToolAuditPolicy::typed_fields(&[
@@ -242,12 +182,12 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE.review(super::ToolReviewEvidence::DiffReview).diff_review(super::ToolDiffReviewEvidence::Always),
             ),
-            "Targeted/paged diff review for worktree/cached or exact base/head ranges, with paths and scope-bound opaque continuation. Replay scope and paging inputs unchanged for later records. Truncated results separate later-hunk continuation from omitted_lines recoverability: hunk_line_limit can use larger max_hunk_lines and/or narrower paths only with bounded headroom; fixed byte/line ceilings never advertise fake recovery. Read-only.",
+            "Targeted/paged diff review for worktree/cached or exact base/head ranges, with paths and scope/fence-bound opaque continuation. max_page_bytes controls the raw producer page and defaults to the input-schema shared safe producer maximum; it is separate from the 512 KiB final model-facing result ceiling. Copy continuation only through the returned parser-ready next_call. recovery.later_hunks.next_call means the next logical diff record, never an intra-hunk cursor. recovery.current_hunk.next_call is current-hunk-only: bounded refinement when independently proven, or the existing exact hunk-fragment token at the next complete diff line. Line-budget and page-byte-budget truncation may both use that fragment only with proven positive complete-line progress; otherwise fixed ceilings advertise no recovery when safe forward progress is not proven. Read-only.",
             git_diff_hunks_input_schema,
-        )))),
+        ).with_gpt_action_description("Read bounded diff hunks for worktree/cached or exact base/head ranges. Follow recovery.later_hunks only for the next logical record; use recovery.current_hunk for returned exact complete-line hunk continuation when proven safe. Never guess offsets.")))),
         125,
     ),
-    context_recovery_only(git_like(model_spec(
+    context_reobservable(git_like(model_spec(
         def(
             "git_log",
             super::ToolAuditPolicy::TYPED_CANONICAL.context(
@@ -274,7 +214,7 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
             false,
             super::ToolSessionEvidencePolicy::NONE,
         ),
-        "Return bounded structured recent git commit history for a project. Does not return commit bodies or modify the worktree.",
+        "Return bounded structured recent git commit history for a project. When truncated, next_skip is the exact parser-ready offset for the next page when it can advance within the existing 10000 skip bound; null means no safe forward page is available. Retained-tail or malformed source records fail closed; retry with a smaller limit. Offset paging assumes history is unchanged between calls. Does not return commit bodies or modify the worktree.",
         git_log_input_schema,
     ))),
 ];

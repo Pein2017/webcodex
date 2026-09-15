@@ -34,9 +34,15 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             false,
             super::ToolSessionEvidencePolicy::NONE.validation_identity(super::ToolValidationIdentityKind::CargoFmt),
         ),
-        "Run cargo fmt. With check=true it is read-only validation; optional sync_wait_secs shortens only the synchronous grace before the same execution is returned as a Job. Mutating format stays synchronous and rejects sync_wait_secs.",
+        "After source edits, use check=false (default) to ensure formatting: precheck first, mutate only for a proven rustfmt diff, and use changed/state_changed instead of reproducing rustfmt diffs with edit tools. Use check=true for pure read-only final validation; only that mode may hand off the same execution as a Job. Validation intent is intrinsic to this validator and Runtime-derived; do not pass generic execution purpose. sync_wait_secs is accepted but ignored in ensure-format mode, which always stays synchronous.",
         cargo_fmt_input_schema,
-    )),
+    )
+    .with_execution(super::ToolExecutionContract::new(
+        super::ToolExecutionForm::StructuredValidation,
+        super::ToolExecutionLifetime::Runner,
+        super::ToolExecutionStart::SyncFirst,
+        super::ToolExecutionContinuation::ObserveJobs,
+    ))),
     adaptive_runtime_direct(
         captures_validation_output(model_spec(
             def(
@@ -60,9 +66,15 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE.validation_identity(super::ToolValidationIdentityKind::CargoCheck),
             ),
-            "Preferred structured cargo check (default --all-targets). Supports scoped flags without shell interpolation; optional sync_wait_secs controls only the synchronous grace before the same execution is returned as a Job, never total timeout or retry.",
+            "Preferred structured cargo check (default --all-targets). Intent is intrinsic and Runtime-derived; do not pass generic execution purpose. Scoped flags only; sync_wait_secs controls same execution Job handoff grace, not total timeout or retry.",
             cargo_check_input_schema,
-        )),
+        )
+        .with_execution(super::ToolExecutionContract::new(
+            super::ToolExecutionForm::StructuredValidation,
+            super::ToolExecutionLifetime::Runner,
+            super::ToolExecutionStart::SyncFirst,
+            super::ToolExecutionContinuation::ObserveJobs,
+        ))),
         90,
     ),
     adaptive_runtime_direct(
@@ -88,9 +100,15 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE.validation_identity(super::ToolValidationIdentityKind::CargoTest),
             ),
-            "Preferred structured cargo test with scoped args and bounded output. Normal execution requires non-zero executed-test evidence; explicit require_tests=false opts out when no min_tests minimum is requested, while require_tests=true/min_tests enforce a proven minimum. no_run=true is compile-only and does not require executed-test-count proof. Optional sync_wait_secs controls only synchronous grace before the same execution Job is returned; it never changes total timeout, test proof, or retry semantics.",
+            "Preferred structured cargo test with scoped args and bounded output. Validation intent is intrinsic to this validator and Runtime-derived; do not pass generic execution purpose. lib=true selects Cargo --lib directly; lib=false and omission keep ordinary target selection. filter is one Rust substring passed as `cargo test FILTER`, not a place for `--exact`, `--nocapture`, or other Cargo/libtest flags; zero-test results are not validation proof and return recovery guidance. Normal execution requires non-zero executed-test evidence; explicit require_tests=false opts out when no min_tests minimum is requested, while require_tests=true/min_tests enforce a proven minimum. no_run=true is compile-only and does not require executed-test-count proof. sync_wait_secs only controls same execution Job handoff grace.",
             cargo_test_input_schema,
-        )),
+        ).with_gpt_action_description("Run structured cargo tests with bounded output. A successful proof requires executed-test evidence unless explicitly opted out; use min_tests/require_tests when count matters. Long validation continues as the same Job.")
+        .with_execution(super::ToolExecutionContract::new(
+            super::ToolExecutionForm::StructuredValidation,
+            super::ToolExecutionLifetime::Runner,
+            super::ToolExecutionStart::SyncFirst,
+            super::ToolExecutionContinuation::ObserveJobs,
+        ))),
         100,
     ),
     captures_validation_output(model_spec(
@@ -115,7 +133,13 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE.validation_identity(super::ToolValidationIdentityKind::GoTest),
             ),
-            "Preferred structured go test -json (default ./...) with bounded package scopes. Requires Runner Go JSON validation support; optional sync_wait_secs controls only synchronous grace before the same execution is returned as a Job, never total timeout or retry.",
+            "Preferred structured go test -json (default ./...) with bounded package scopes. Validation intent is intrinsic to this validator and Runtime-derived; do not pass generic execution purpose. Requires Runner Go JSON validation support; optional sync_wait_secs controls only synchronous grace before the same execution is returned as a Job, never total timeout or retry.",
             go_test_input_schema,
-    )),
+    )
+    .with_execution(super::ToolExecutionContract::new(
+        super::ToolExecutionForm::StructuredValidation,
+        super::ToolExecutionLifetime::Runner,
+        super::ToolExecutionStart::SyncFirst,
+        super::ToolExecutionContinuation::ObserveJobs,
+    ))),
 ];

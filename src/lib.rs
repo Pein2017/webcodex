@@ -26,6 +26,9 @@ mod console_web;
 mod db;
 mod host_console_http;
 mod job_observation;
+mod job_receipts;
+mod json_digest;
+mod json_measurement;
 mod mcp;
 mod mcp_gateway;
 mod model_surface;
@@ -65,7 +68,7 @@ pub(crate) use webcodex_core::{
 };
 pub(crate) use webcodex_runner_config as runner_config;
 pub(crate) use webcodex_workspace::project_overview;
-#[cfg(test)]
+#[cfg(all(test, feature = "workspace-checkpoints"))]
 pub(crate) use webcodex_workspace::workspace_checkpoint;
 
 pub(crate) use auth::{get_db, json_error, AuthMiddleware};
@@ -259,7 +262,7 @@ only for local/trusted-network demos."
     // login form to the consent decision. PAT/bootstrap plaintext is never
     // stored here — only the resolved user identity.
     let authorize_session_store = Arc::new(oauth_http::AuthorizeSessionStore::new());
-    let runner_registry = Arc::new(runner_http::registry_with_tool_request_trace());
+    let runner_registry = Arc::new(job_receipts::production_registry(db.clone()).await);
     // Root HTTP admission consults this process-local state before any
     // side-effecting handler can run. It closes the small race between the
     // authoritative drain transition and Salvo consuming its stop command.
@@ -284,10 +287,14 @@ only for local/trusted-network demos."
             .with_window_activity_database(db.clone())
             .with_memory_database(db.clone())
             .with_communication_database(db.clone())
-            .with_checkpoint_state_dir(runtime_state_dir.clone())
             .with_session_ledger(config.session_ledger_path())
             .with_persistent_coding_agent_observation_state(&runtime_state_dir)
             .map_err(std::io::Error::other)?;
+    #[cfg(feature = "workspace-checkpoints")]
+    {
+        tool_runtime_builder =
+            tool_runtime_builder.with_checkpoint_state_dir(runtime_state_dir.clone());
+    }
     if let Some(activity_store) = db::WorkspaceActivityStore::from_env(db.clone()) {
         tool_runtime_builder =
             tool_runtime_builder.with_activity_recorder(Arc::new(activity_store));
@@ -377,16 +384,12 @@ only for local/trusted-network demos."
                 .post(runtime_http::tools_call),
         )
         .push(
+            Router::with_path(route_metadata::api_path(RouteId::GptActionsInvoke))
+                .post(runtime_http::gpt_action_invoke),
+        )
+        .push(
             Router::with_path(route_metadata::api_path(RouteId::ArtifactsImport))
                 .post(runtime_http::import_conversation_files_to_project),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::JobsStatus))
-                .post(runtime_http::job_status),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::JobsLog))
-                .post(runtime_http::job_log),
         )
         .push(
             Router::with_path(route_metadata::api_path(RouteId::JobsStop))
@@ -429,28 +432,12 @@ only for local/trusted-network demos."
                 .post(runtime_http::projects_resolve_or_register),
         )
         .push(
-            Router::with_path(route_metadata::api_path(RouteId::ProjectsReadFile))
-                .post(runtime_http::projects_read_file),
-        )
-        .push(
             Router::with_path(route_metadata::api_path(RouteId::ProjectsGitStatus))
                 .post(runtime_http::projects_git_status),
         )
         .push(
-            Router::with_path(route_metadata::api_path(RouteId::ProjectsGitDiff))
-                .post(runtime_http::projects_git_diff),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::ProjectsGitDiffSummary))
-                .post(runtime_http::projects_git_diff_summary),
-        )
-        .push(
             Router::with_path(route_metadata::api_path(RouteId::ProjectsListFiles))
                 .post(runtime_http::projects_list_files),
-        )
-        .push(
-            Router::with_path(route_metadata::api_path(RouteId::ProjectsSearchText))
-                .post(runtime_http::projects_search_text),
         )
         .push(
             Router::with_path(route_metadata::api_path(RouteId::ProjectsApplyUnifiedDiff))
@@ -795,7 +782,10 @@ only for local/trusted-network demos."
         "tool_request_trace"
     );
     tracing::info!(
-        mcp_compact_schemas = crate::config::mcp_compact_schemas_enabled(),
+        mcp_compact_schemas = crate::model_surface::effective_mcp_compact_schemas(
+            runtime_exposure,
+            crate::config::mcp_compact_schemas_override(),
+        ),
         "mcp_compact_schemas"
     );
     tracing::info!("OpenAPI (GPT Actions): {}/openapi.json", base);

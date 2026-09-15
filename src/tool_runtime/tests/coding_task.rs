@@ -133,7 +133,18 @@ fn coding_task_tools_are_registered_in_metadata_and_openapi() {
     assert!(work_props["base_ref"]["description"]
         .as_str()
         .is_some_and(|description| description.contains("Runner resolves")));
-    assert!(work.description.contains("managed worktree"));
+    for phrase in [
+        "mode=worktree",
+        "exact Git base",
+        "isolated worktree",
+        "Project authority",
+    ] {
+        assert!(
+            work.description.contains(phrase),
+            "work_on_project description should retain {phrase}: {}",
+            work.description
+        );
+    }
     let work_output = crate::tool_runtime::registry::output_schema_for_tool("work_on_project");
     assert!(work_output["properties"]["output"]["properties"]
         .as_object()
@@ -217,31 +228,16 @@ fn coding_task_tools_are_registered_in_metadata_and_openapi() {
     }
 
     let openapi = crate::openapi::build_openapi_spec();
-    let tool_call = &openapi["components"]["schemas"]["ToolCallRequest"];
-    let tool_desc = tool_call["properties"]["tool"]["description"]
-        .as_str()
+    let work = &openapi["paths"]["/api/actions/work_on_project"]["post"];
+    assert_eq!(work["operationId"], "work_on_project");
+    let work_properties = work["requestBody"]["content"]["application/json"]["schema"]
+        ["properties"]
+        .as_object()
         .unwrap();
-    assert!(!tool_desc.contains("start_coding_task"));
-    assert!(tool_desc.contains("work_on_project"));
-    assert!(tool_desc.contains("finish_coding_task"));
-    let properties = tool_call["properties"].as_object().unwrap();
-    for field in [
-        "project",
-        "client_id",
-        "path",
-        "mode",
-        "base_ref",
-        "execution_context",
-        "include_hygiene",
-        "include_handoff",
-        "include_workspace",
-        "include_validation_summary",
-        "include_validation",
-        "summary_only",
-    ] {
+    for field in ["project", "client_id", "path", "mode", "base_ref"] {
         assert!(
-            properties.contains_key(field),
-            "ToolCallRequest missing model-visible flattened field {field}"
+            work_properties.contains_key(field),
+            "work_on_project missing {field}"
         );
     }
     for field in [
@@ -254,31 +250,34 @@ fn coding_task_tools_are_registered_in_metadata_and_openapi() {
         "new_session",
     ] {
         assert!(
-            !properties.contains_key(field),
-            "ToolCallRequest must not expose hidden start-only flattened field {field}"
+            !work_properties.contains_key(field),
+            "retired work_on_project field {field}"
         );
     }
-    assert!(!tool_call["description"]
-        .as_str()
-        .unwrap()
-        .contains("start_coding_task"));
+
+    let finish = &openapi["paths"]["/api/actions/finish_coding_task"]["post"];
+    assert_eq!(finish["operationId"], "finish_coding_task");
+    let finish_properties = finish["requestBody"]["content"]["application/json"]["schema"]
+        ["properties"]
+        .as_object()
+        .unwrap();
     for field in [
-        "expected_failure",
-        "expected_failure_kind",
-        "assertion_name",
+        "project",
+        "session_id",
+        "include_hygiene",
+        "include_handoff",
+        "include_workspace",
+        "include_validation_summary",
+        "summary_only",
     ] {
         assert!(
-            !properties.contains_key(field),
-            "ToolCallRequest must not publish recorder metadata field {field}"
+            finish_properties.contains_key(field),
+            "finish_coding_task missing {field}"
         );
     }
-    let operation_count: usize = openapi["paths"]
-        .as_object()
-        .unwrap()
-        .values()
-        .map(|methods| methods.as_object().unwrap().len())
-        .sum();
-    assert_eq!(operation_count, 22, "no dedicated OpenAPI operations added");
+    assert!(openapi["paths"]
+        .get("/api/actions/start_coding_task")
+        .is_none());
 }
 
 #[tokio::test]
@@ -370,9 +369,11 @@ async fn coding_workflow_full_diagnostic_has_no_binding_projection() {
     let inspect = result.output["recommended_flow"]["inspect"]
         .as_array()
         .unwrap();
-    assert!(contains_string(inspect, "read_file"));
-    assert!(contains_string(inspect, "search_project_text"));
+    assert!(contains_string(inspect, "read_files"));
+    assert!(contains_string(inspect, "search_project_texts"));
     assert!(contains_string(inspect, "show_changes"));
+    assert!(!contains_string(inspect, "read_file"));
+    assert!(!contains_string(inspect, "search_project_text"));
     let edit = result.output["recommended_flow"]["edit"]
         .as_array()
         .unwrap();
@@ -401,28 +402,7 @@ async fn coding_workflow_full_diagnostic_has_no_binding_projection() {
         .iter()
         .find(|tool| tool["name"] == "work_on_project")
         .expect("canonical work_on_project manifest entry");
-    for field in ["project", "client_id", "path", "instruction", "session_id"] {
-        assert!(
-            work_tool["accepted_flattened_args"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|accepted| accepted == field),
-            "work_on_project manifest entry missing {field}"
-        );
-    }
-    for advanced in [
-        "detail",
-        "temporary_project_name",
-        "bind_current",
-        "new_session",
-    ] {
-        assert!(!work_tool["accepted_flattened_args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|field| field == advanced));
-    }
+    assert!(work_tool.get("accepted_flattened_args").is_none());
     assert!(work_tool.get("inputSchema").is_none());
     assert!(work_tool.get("outputSchema").is_none());
     assert_eq!(result.output["git"]["clean"], true);
@@ -738,6 +718,7 @@ async fn work_on_project_serviced(
                         session_id: None,
                         include_project_instructions: true,
                         include_workflow_guidance: true,
+                        include_extension_catalog: false,
                     },
                     Some(&auth),
                 )
@@ -1191,7 +1172,7 @@ async fn finish_coding_task_requires_explicit_session_and_returns_structured_fie
     let req = wait_for_patch_agent_request(&runtime, "coding-finish").await;
     assert_internal_posix_script_contains(&req, "git status --porcelain=v1 -b");
     let show_changes_stdout = format!(
-        "{}{}{}",
+        "{}{}{}{}",
         crate::tool_runtime::framed_show_changes_test_block(
             'S',
             "## main\n M README.md\n",
@@ -1205,7 +1186,12 @@ async fn finish_coding_task_requires_explicit_session_and_returns_structured_fie
         crate::tool_runtime::framed_show_changes_test_block(
             'T',
             " README.md | 1 +\n 1 file changed, 1 insertion(+)\n",
-            "diff_stat_exit=0\ndiff_stat_truncated=0\ndiff_stat_bytes=52\n"
+            "diff_stat_exit=0\ndiff_stat_truncated=0\ndiff_stat_bytes=48\n"
+        ),
+        crate::tool_runtime::framed_show_changes_test_block(
+            'N',
+            "",
+            "numstat_exit=0\nnumstat_truncated=0\nnumstat_bytes=0\n"
         )
     );
     complete_patch_agent_request(
@@ -1444,8 +1430,8 @@ async fn finish_coding_task_summary_only_uses_review_evidence_without_projecting
     record_coding_task_tool_event(
         &runtime,
         &session_id,
-        "search_project_text",
-        json!({"project": project, "query": "docs"}),
+        "search_project_texts",
+        json!({"project": project, "queries": [{"pattern": "docs"}]}),
         true,
         json!({}),
     );
@@ -1756,10 +1742,10 @@ async fn finish_coding_task_summary_only_passes_with_resolved_unexpected_cargo_f
         record_coding_task_tool_event(
             &fixture.runtime,
             &fixture.session_id,
-            "read_file",
+            "read_files",
             json!({
                 "project": fixture.project.clone(),
-                "path": format!("src/display-padding-{index}.rs")
+                "items": [{"path": format!("src/display-padding-{index}.rs")}]
             }),
             true,
             json!({}),
@@ -1913,10 +1899,10 @@ async fn handoff_display_limit_does_not_change_canonical_started_shell_failure_c
         record_coding_task_tool_event(
             &fixture.runtime,
             &fixture.session_id,
-            "read_file",
+            "read_files",
             json!({
                 "project": fixture.project.clone(),
-                "path": format!("src/benign-padding-{index}.rs")
+                "items": [{"path": format!("src/benign-padding-{index}.rs")}]
             }),
             true,
             json!({}),
@@ -2367,8 +2353,8 @@ async fn failure_history_fail_closed_attempts_do_not_block_clean_finish() {
     record_coding_task_tool_event(
         &fixture.runtime,
         &fixture.session_id,
-        "read_file",
-        json!({"project": fixture.project.clone(), "path": "missing.rs"}),
+        "read_files",
+        json!({"project": fixture.project.clone(), "items": [{"path": "missing.rs"}]}),
         false,
         json!({"error_kind": "invalid_arguments"}),
     );
@@ -2982,8 +2968,8 @@ async fn finish_coding_task_summary_only_treats_read_failure_as_historical_non_a
     record_coding_task_tool_event(
         &fixture.runtime,
         &fixture.session_id,
-        "read_file",
-        json!({"project": fixture.project.clone(), "path": "README.md"}),
+        "read_files",
+        json!({"project": fixture.project.clone(), "items": [{"path": "README.md"}]}),
         false,
         json!({
             "error_kind": "permission_denied"
@@ -3398,12 +3384,9 @@ fn assert_review_evidence_tools_safe(review_evidence: &Value) {
         assert!(
             matches!(
                 tool,
-                "read_file"
+                "read_files"
                     | "list_project_files"
-                    | "search_project_text"
                     | "search_project_texts"
-                    | "git_diff"
-                    | "git_diff_summary"
                     | "git_diff_hunks"
                     | "git_review_summary"
                     | "show_changes"

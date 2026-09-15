@@ -88,6 +88,8 @@ async fn complete_plugin_request(
                 exit_code: None,
                 stdout: None,
                 stderr: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
                 duration_ms: None,
                 error: None,
             },
@@ -292,6 +294,10 @@ async fn plugin_check_routes_exact_runner_and_never_changes_outer_mcp_inventory(
         panic!("plugin check failed");
     };
     assert_eq!(value["result"]["isError"], false);
+    assert_eq!(
+        value["result"]["content"][0]["text"],
+        "Plugin metadata available in structuredContent."
+    );
     let report = &value["result"]["structuredContent"];
     assert_eq!(report["runner"], "runner-a");
     assert_eq!(report["plugin"], "repo-tools");

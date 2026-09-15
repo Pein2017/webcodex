@@ -247,64 +247,8 @@ function shouldFollowWorkflowSessionLatest(state) {
     return state.followLatest !== false;
 }
 
-function compareText(left, right) {
+function compareCollaborationText(left, right) {
     return left < right ? -1 : left > right ? 1 : 0;
-}
-class RuntimeCommunicationRefreshCoordinator {
-    constructor(runRefresh) {
-        this.runRefresh = runRefresh;
-        this.generation = 0;
-        this.inFlight = null;
-    }
-    refresh(includeData = true) {
-        const generation = this.generation;
-        const current = this.inFlight;
-        if (current && current.generation === generation) {
-            if (!includeData || current.includeData)
-                return current.promise;
-            return current.promise.then(() => this.generation === generation ? this.refresh(true) : false, () => this.generation === generation ? this.refresh(true) : false);
-        }
-        const promise = Promise.resolve().then(() => this.runRefresh(includeData));
-        const started = { includeData, generation, promise };
-        this.inFlight = started;
-        const clear = () => {
-            if (this.inFlight === started)
-                this.inFlight = null;
-        };
-        void promise.then(clear, clear);
-        return promise;
-    }
-    reset() {
-        this.generation += 1;
-        this.inFlight = null;
-    }
-}
-function runtimeCommunicationTranscriptAfterSeq(lastSeq, limit = 100) {
-    const normalizedLastSeq = typeof lastSeq === "number" && Number.isSafeInteger(lastSeq)
-        ? Math.max(0, lastSeq)
-        : 0;
-    const normalizedLimit = Number.isSafeInteger(limit) && limit > 0 ? limit : 100;
-    return Math.max(0, normalizedLastSeq - normalizedLimit);
-}
-function runtimeWorkflowSessionSummaryRevision(session) {
-    if (!session)
-        return "";
-    return JSON.stringify([
-        String(session.session_id || ""),
-        String(session.title || ""),
-        String(session.lifecycle || ""),
-        String(session.mode || ""),
-        typeof session.updated_at === "number" ? session.updated_at : null,
-        !!session.running_call,
-        typeof session.running_jobs === "number" ? session.running_jobs : null,
-        session.running_jobs_complete === true,
-        session.current_activity ?? null,
-        session.last_activity ?? null,
-        session.overview ?? null,
-    ]);
-}
-function runtimeWorkflowSessionSummaryChanged(previous, next) {
-    return runtimeWorkflowSessionSummaryRevision(previous) !== runtimeWorkflowSessionSummaryRevision(next);
 }
 function emptyCollaborationState() {
     return {
@@ -319,6 +263,20 @@ function emptyCollaborationState() {
         uncertainMutation: null,
         mutationNotice: "",
     };
+}
+function resetCollaborationState(collaboration) {
+    if (!collaboration)
+        return;
+    collaboration.generation += 1;
+    collaboration.sessionId = "";
+    collaboration.messages = [];
+    collaboration.observationToken = "";
+    collaboration.available = true;
+    collaboration.phase = "idle";
+    collaboration.replyTargetId = "";
+    collaboration.editTargetId = "";
+    collaboration.uncertainMutation = null;
+    collaboration.mutationNotice = "";
 }
 function messageCreatedAt(message) {
     return typeof message?.created_at === "number" ? message.created_at : 0;
@@ -397,7 +355,7 @@ function mergeRuntimeCollaborationMessages(current, updates) {
             byId.set(id, message);
     }
     return Array.from(byId.values()).sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right) ||
-        compareText(String(left?.message_id || ""), String(right?.message_id || "")));
+        compareCollaborationText(String(left?.message_id || ""), String(right?.message_id || "")));
 }
 function runtimeCollaborationObservationAction(payload) {
     if (payload?.history_lost)
@@ -405,230 +363,6 @@ function runtimeCollaborationObservationAction(payload) {
     if (payload?.has_more)
         return "drain";
     return "wait";
-}
-function runtimeDeviceIds(projects) {
-    const devices = new Set();
-    for (const project of Array.isArray(projects) ? projects : []) {
-        const clientId = typeof project?.client_id === "string" ? project.client_id : "";
-        if (clientId)
-            devices.add(clientId);
-    }
-    return Array.from(devices).sort(compareText);
-}
-function runtimeProjectsForDevice(projects, clientId) {
-    return (Array.isArray(projects) ? projects : [])
-        .filter((project) => project && (!clientId || project.client_id === clientId) && typeof project.id === "string" && project.id)
-        .slice()
-        .sort((left, right) => {
-        const leftName = typeof left.name === "string" && left.name ? left.name : left.id;
-        const rightName = typeof right.name === "string" && right.name ? right.name : right.id;
-        return compareText(leftName, rightName) || compareText(left.id, right.id);
-    });
-}
-function projectAttentionCount(project) {
-    const attention = project?.sessions?.attention;
-    return ["open_guidance", "open_questions", "open_risks", "open_todos"]
-        .reduce((total, key) => total + (typeof attention?.[key] === "number" ? Math.max(0, attention[key]) : 0), 0);
-}
-function filterAndSortRuntimeProjects(projects, clientId, query) {
-    const needle = String(query || "").trim().toLocaleLowerCase();
-    return runtimeProjectsForDevice(projects, clientId)
-        .filter((project) => {
-        if (!needle)
-            return true;
-        return [project?.name, project?.id, project?.client_id, project?.path]
-            .filter((value) => typeof value === "string")
-            .some((value) => String(value).toLocaleLowerCase().includes(needle));
-    })
-        .sort((left, right) => {
-        const leftRunning = typeof left?.sessions?.running_sessions === "number" ? left.sessions.running_sessions : 0;
-        const rightRunning = typeof right?.sessions?.running_sessions === "number" ? right.sessions.running_sessions : 0;
-        if (!!rightRunning !== !!leftRunning)
-            return rightRunning ? 1 : -1;
-        const leftAttention = projectAttentionCount(left);
-        const rightAttention = projectAttentionCount(right);
-        if (!!rightAttention !== !!leftAttention)
-            return rightAttention ? 1 : -1;
-        const leftUpdated = typeof left?.sessions?.latest_updated_at === "number" ? left.sessions.latest_updated_at : 0;
-        const rightUpdated = typeof right?.sessions?.latest_updated_at === "number" ? right.sessions.latest_updated_at : 0;
-        if (leftUpdated !== rightUpdated)
-            return rightUpdated - leftUpdated;
-        const leftName = typeof left?.name === "string" && left.name ? left.name : left.id;
-        const rightName = typeof right?.name === "string" && right.name ? right.name : right.id;
-        return compareText(String(leftName || ""), String(rightName || "")) || compareText(String(left?.id || ""), String(right?.id || ""));
-    });
-}
-function runtimeProjectIdentityText(project) {
-    if (!project || typeof project.id !== "string" || !project.id)
-        return "No project selected";
-    const runner = typeof project.client_id === "string" && project.client_id ? project.client_id : "unknown";
-    const path = typeof project.path === "string" && project.path ? project.path : "unavailable";
-    return "Runner: " + runner + " · Project: " + project.id + " · Workspace: " + path;
-}
-function preferredRuntimeProjectSelection(projects, selectedDevice, selectedProject) {
-    const rows = Array.isArray(projects) ? projects : [];
-    if (selectedProject) {
-        const retained = rows.find((project) => project && project.id === selectedProject && typeof project.client_id === "string" && project.client_id);
-        if (retained)
-            return { device: retained.client_id, project: retained.id };
-    }
-    const devices = runtimeDeviceIds(rows);
-    const device = devices.includes(selectedDevice) ? selectedDevice : "";
-    return { device, project: "" };
-}
-function initialRuntimeConsoleState() {
-    return {
-        credentialGeneration: 0,
-        overviewGeneration: 0,
-        projectsGeneration: 0,
-        runnerGeneration: 0,
-        selectedDevice: "",
-        selectedProject: "",
-        projectGeneration: 0,
-        sessionListGeneration: 0,
-        workflow: initialWorkflowSessionState(),
-        collaboration: emptyCollaborationState(),
-    };
-}
-function invalidateRuntimeCredential(state) {
-    state.credentialGeneration += 1;
-    state.overviewGeneration += 1;
-    state.projectsGeneration += 1;
-    state.runnerGeneration += 1;
-    state.selectedDevice = "";
-    state.selectedProject = "";
-    state.projectGeneration += 1;
-    state.sessionListGeneration += 1;
-    clearWorkflowSessionSelection(state.workflow);
-    state.collaboration.generation += 1;
-    state.collaboration.sessionId = "";
-    state.collaboration.messages = [];
-    state.collaboration.observationToken = "";
-    state.collaboration.available = true;
-    state.collaboration.phase = "idle";
-    state.collaboration.replyTargetId = "";
-    state.collaboration.editTargetId = "";
-    state.collaboration.uncertainMutation = null;
-    state.collaboration.mutationNotice = "";
-}
-function beginRuntimeCredential(state) {
-    invalidateRuntimeCredential(state);
-    return refreshRuntimeProjects(state);
-}
-function refreshRuntimeOverview(state) {
-    state.overviewGeneration += 1;
-    return { credentialGeneration: state.credentialGeneration, generation: state.overviewGeneration };
-}
-function isCurrentRuntimeOverviewRequest(state, request) {
-    return !!request && request.credentialGeneration === state.credentialGeneration && request.generation === state.overviewGeneration;
-}
-function refreshRuntimeProjects(state, query = "", clientId = state.selectedDevice) {
-    state.projectsGeneration += 1;
-    return {
-        credentialGeneration: state.credentialGeneration,
-        projectGeneration: state.projectGeneration,
-        generation: state.projectsGeneration,
-        clientId: String(clientId || ""),
-        query: String(query || "").trim(),
-    };
-}
-function isCurrentRuntimeProjectsRequest(state, request) {
-    return !!request &&
-        request.credentialGeneration === state.credentialGeneration &&
-        request.projectGeneration === state.projectGeneration &&
-        request.generation === state.projectsGeneration;
-}
-function refreshRuntimeRunner(state) {
-    if (!state.selectedDevice)
-        return null;
-    state.runnerGeneration += 1;
-    return { credentialGeneration: state.credentialGeneration, device: state.selectedDevice, generation: state.runnerGeneration };
-}
-function isCurrentRuntimeRunnerRequest(state, request) {
-    return !!request && request.credentialGeneration === state.credentialGeneration &&
-        request.device === state.selectedDevice && request.generation === state.runnerGeneration;
-}
-function selectRuntimeRunnerFilter(state, device) {
-    selectRuntimeProject(state, device, "");
-}
-function selectRuntimeProject(state, device, project) {
-    if (state.selectedDevice !== device)
-        state.runnerGeneration += 1;
-    state.selectedDevice = device;
-    state.selectedProject = project;
-    state.projectGeneration += 1;
-    state.sessionListGeneration += 1;
-    clearWorkflowSessionSelection(state.workflow);
-    state.collaboration.generation += 1;
-    state.collaboration.sessionId = "";
-    state.collaboration.messages = [];
-    state.collaboration.observationToken = "";
-    state.collaboration.available = true;
-    state.collaboration.phase = "idle";
-    state.collaboration.replyTargetId = "";
-    state.collaboration.editTargetId = "";
-    state.collaboration.uncertainMutation = null;
-    state.collaboration.mutationNotice = "";
-    return refreshRuntimeSessionList(state);
-}
-function refreshRuntimeSessionList(state) {
-    if (!state.selectedProject)
-        return null;
-    state.sessionListGeneration += 1;
-    return {
-        credentialGeneration: state.credentialGeneration,
-        project: state.selectedProject,
-        projectGeneration: state.projectGeneration,
-        generation: state.sessionListGeneration,
-    };
-}
-function isCurrentRuntimeSessionListRequest(state, request) {
-    return !!request && request.credentialGeneration === state.credentialGeneration &&
-        request.project === state.selectedProject && request.projectGeneration === state.projectGeneration &&
-        request.generation === state.sessionListGeneration;
-}
-function wrapWorkflowRequest(state, request) {
-    if (!request || !state.selectedProject)
-        return null;
-    return {
-        credentialGeneration: state.credentialGeneration,
-        project: state.selectedProject,
-        projectGeneration: state.projectGeneration,
-        sessionId: request.sessionId,
-        generation: request.generation,
-    };
-}
-function selectRuntimeWorkflowSession(state, sessionId) {
-    state.collaboration.generation += 1;
-    state.collaboration.sessionId = sessionId;
-    state.collaboration.messages = [];
-    state.collaboration.observationToken = "";
-    state.collaboration.available = true;
-    state.collaboration.phase = "idle";
-    state.collaboration.replyTargetId = "";
-    state.collaboration.editTargetId = "";
-    state.collaboration.uncertainMutation = null;
-    state.collaboration.mutationNotice = "";
-    return wrapWorkflowRequest(state, selectWorkflowSession(state.workflow, sessionId));
-}
-function selectRuntimeSessionLocation(state, device, project, sessionId) {
-    const sessionListRequest = selectRuntimeProject(state, device, project);
-    const detailRequest = selectRuntimeWorkflowSession(state, sessionId);
-    return { sessionListRequest, detailRequest };
-}
-function refreshRuntimeWorkflowSession(state) {
-    return wrapWorkflowRequest(state, refreshWorkflowSessionDetail(state.workflow));
-}
-function clearRuntimeWorkflowSession(state) {
-    clearWorkflowSessionSelection(state.workflow);
-    state.collaboration.generation += 1;
-    state.collaboration.sessionId = "";
-    state.collaboration.messages = [];
-    state.collaboration.observationToken = "";
-    state.collaboration.replyTargetId = "";
-    state.collaboration.editTargetId = "";
-    state.collaboration.uncertainMutation = null;
-    state.collaboration.mutationNotice = "";
 }
 function runtimeCollaborationRequest(state) {
     if (!state.selectedProject || !state.collaboration.sessionId)
@@ -739,40 +473,44 @@ function setRuntimeCollaborationPhase(state, request, phase) {
 function runtimeCollaborationNeedsRefreshRecovery(state) {
     return state?.collaboration?.phase === "paused";
 }
-function isCurrentRuntimeWorkflowSessionRequest(state, request) {
-    return !!request && request.credentialGeneration === state.credentialGeneration &&
-        request.project === state.selectedProject && request.projectGeneration === state.projectGeneration &&
-        isCurrentWorkflowSessionDetailRequest(state.workflow, { sessionId: request.sessionId, generation: request.generation });
+
+class RuntimeCommunicationRefreshCoordinator {
+    constructor(runRefresh) {
+        this.runRefresh = runRefresh;
+        this.generation = 0;
+        this.inFlight = null;
+    }
+    refresh(includeData = true) {
+        const generation = this.generation;
+        const current = this.inFlight;
+        if (current && current.generation === generation) {
+            if (!includeData || current.includeData)
+                return current.promise;
+            return current.promise.then(() => this.generation === generation ? this.refresh(true) : false, () => this.generation === generation ? this.refresh(true) : false);
+        }
+        const promise = Promise.resolve().then(() => this.runRefresh(includeData));
+        const started = { includeData, generation, promise };
+        this.inFlight = started;
+        const clear = () => {
+            if (this.inFlight === started)
+                this.inFlight = null;
+        };
+        void promise.then(clear, clear);
+        return promise;
+    }
+    reset() {
+        this.generation += 1;
+        this.inFlight = null;
+    }
 }
-function adoptRuntimeWorkflowSessionDetail(state, request, detail) {
-    if (!isCurrentRuntimeWorkflowSessionRequest(state, request))
-        return false;
-    return adoptWorkflowSessionDetail(state.workflow, { sessionId: request.sessionId, generation: request.generation }, detail);
+function runtimeCommunicationTranscriptAfterSeq(lastSeq, limit = 100) {
+    const normalizedLastSeq = typeof lastSeq === "number" && Number.isSafeInteger(lastSeq)
+        ? Math.max(0, lastSeq)
+        : 0;
+    const normalizedLimit = Number.isSafeInteger(limit) && limit > 0 ? limit : 100;
+    return Math.max(0, normalizedLastSeq - normalizedLimit);
 }
-function resolveRunnerDisclosure(storedDisclosure, defaultOpen) {
-    return storedDisclosure === null ? defaultOpen : storedDisclosure;
-}
-function runtimeWindowShortKey(value) {
-    const key = String(value || "");
-    if (key.length <= 14)
-        return key;
-    return key.slice(0, 8) + "…" + key.slice(-4);
-}
-function runtimeWindowActivityLabel(timestampMs, nowMs) {
-    const value = Number(timestampMs);
-    if (!Number.isFinite(value) || value <= 0)
-        return "No WebCodex activity";
-    const elapsed = Math.max(0, nowMs - value);
-    if (elapsed < 1000)
-        return "just now";
-    if (elapsed < 60000)
-        return Math.floor(elapsed / 1000) + "s ago";
-    if (elapsed < 3600000)
-        return Math.floor(elapsed / 60000) + "m ago";
-    if (elapsed < 86400000)
-        return Math.floor(elapsed / 3600000) + "h ago";
-    return Math.floor(elapsed / 86400000) + "d ago";
-}
+
 function resolveRuntimeContextPresentationMode(isWideViewport, isMobileViewport) {
     if (isMobileViewport)
         return "sheet";
@@ -817,21 +555,281 @@ function resolveRuntimeContextFocusTransition(options) {
     return "none";
 }
 
-const API_BASE = "/api/runtime-console/";
-const REFRESH_MS = 30000;
-const WINDOW_REFRESH_MS = 3000;
-const COLLABORATION_WAIT_SECS = 25;
-const PROJECT_SEARCH_DEBOUNCE_MS = 200;
-const RUNTIME_CREDENTIAL_SESSION_KEY = "webcodex.runtime.credential.v1";
-const APPEARANCE_STORAGE_KEY = "webcodex.runtime.appearance.v1";
+function runtimeWindowAvailabilityAfterHttpResponse(status, ok, hasData) {
+    if (status === 403)
+        return "unavailable";
+    return ok && hasData ? "available" : "stale";
+}
+function compareText(left, right) {
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+function runtimeWorkflowSessionSummaryRevision(session) {
+    if (!session)
+        return "";
+    return JSON.stringify([
+        String(session.session_id || ""),
+        String(session.title || ""),
+        String(session.lifecycle || ""),
+        String(session.mode || ""),
+        typeof session.updated_at === "number" ? session.updated_at : null,
+        !!session.running_call,
+        typeof session.running_jobs === "number" ? session.running_jobs : null,
+        session.running_jobs_complete === true,
+        session.current_activity ?? null,
+        session.last_activity ?? null,
+        session.overview ?? null,
+    ]);
+}
+function runtimeWorkflowSessionSummaryChanged(previous, next) {
+    return runtimeWorkflowSessionSummaryRevision(previous) !== runtimeWorkflowSessionSummaryRevision(next);
+}
+function runtimeDeviceIds(projects) {
+    const devices = new Set();
+    for (const project of Array.isArray(projects) ? projects : []) {
+        const clientId = typeof project?.client_id === "string" ? project.client_id : "";
+        if (clientId)
+            devices.add(clientId);
+    }
+    return Array.from(devices).sort(compareText);
+}
+function runtimeProjectsForDevice(projects, clientId) {
+    return (Array.isArray(projects) ? projects : [])
+        .filter((project) => project && (!clientId || project.client_id === clientId) && typeof project.id === "string" && project.id)
+        .slice()
+        .sort((left, right) => {
+        const leftName = typeof left.name === "string" && left.name ? left.name : left.id;
+        const rightName = typeof right.name === "string" && right.name ? right.name : right.id;
+        return compareText(leftName, rightName) || compareText(left.id, right.id);
+    });
+}
+function projectAttentionCount(project) {
+    const attention = project?.sessions?.attention;
+    return ["open_guidance", "open_questions", "open_risks", "open_todos"]
+        .reduce((total, key) => total + (typeof attention?.[key] === "number" ? Math.max(0, attention[key]) : 0), 0);
+}
+function filterAndSortRuntimeProjects(projects, clientId, query) {
+    const needle = String(query || "").trim().toLocaleLowerCase();
+    return runtimeProjectsForDevice(projects, clientId)
+        .filter((project) => {
+        if (!needle)
+            return true;
+        return [project?.name, project?.id, project?.client_id, project?.path]
+            .filter((value) => typeof value === "string")
+            .some((value) => String(value).toLocaleLowerCase().includes(needle));
+    })
+        .sort((left, right) => {
+        const leftRunning = typeof left?.sessions?.running_sessions === "number" ? left.sessions.running_sessions : 0;
+        const rightRunning = typeof right?.sessions?.running_sessions === "number" ? right.sessions.running_sessions : 0;
+        if (!!rightRunning !== !!leftRunning)
+            return rightRunning ? 1 : -1;
+        const leftAttention = projectAttentionCount(left);
+        const rightAttention = projectAttentionCount(right);
+        if (!!rightAttention !== !!leftAttention)
+            return rightAttention ? 1 : -1;
+        const leftUpdated = typeof left?.sessions?.latest_updated_at === "number" ? left.sessions.latest_updated_at : 0;
+        const rightUpdated = typeof right?.sessions?.latest_updated_at === "number" ? right.sessions.latest_updated_at : 0;
+        if (leftUpdated !== rightUpdated)
+            return rightUpdated - leftUpdated;
+        const leftName = typeof left?.name === "string" && left.name ? left.name : left.id;
+        const rightName = typeof right?.name === "string" && right.name ? right.name : right.id;
+        return compareText(String(leftName || ""), String(rightName || "")) || compareText(String(left?.id || ""), String(right?.id || ""));
+    });
+}
+function runtimeProjectIdentityText(project) {
+    if (!project || typeof project.id !== "string" || !project.id)
+        return "No project selected";
+    const runner = typeof project.client_id === "string" && project.client_id ? project.client_id : "unknown";
+    const path = typeof project.path === "string" && project.path ? project.path : "unavailable";
+    return "Runner: " + runner + " · Project: " + project.id + " · Workspace: " + path;
+}
+function preferredRuntimeProjectSelection(projects, selectedDevice, selectedProject) {
+    const rows = Array.isArray(projects) ? projects : [];
+    if (selectedProject) {
+        const retained = rows.find((project) => project && project.id === selectedProject && typeof project.client_id === "string" && project.client_id);
+        if (retained)
+            return { device: retained.client_id, project: retained.id };
+    }
+    const devices = runtimeDeviceIds(rows);
+    const device = devices.includes(selectedDevice) ? selectedDevice : "";
+    return { device, project: "" };
+}
+function initialRuntimeConsoleState() {
+    return {
+        credentialGeneration: 0,
+        overviewGeneration: 0,
+        projectsGeneration: 0,
+        runnerGeneration: 0,
+        selectedDevice: "",
+        selectedProject: "",
+        projectGeneration: 0,
+        sessionListGeneration: 0,
+        projectWindowsGeneration: 0,
+        workflow: initialWorkflowSessionState(),
+        collaboration: emptyCollaborationState(),
+    };
+}
+function invalidateRuntimeCredential(state) {
+    state.credentialGeneration += 1;
+    state.overviewGeneration += 1;
+    state.projectsGeneration += 1;
+    state.runnerGeneration += 1;
+    state.selectedDevice = "";
+    state.selectedProject = "";
+    state.projectGeneration += 1;
+    state.sessionListGeneration += 1;
+    state.projectWindowsGeneration += 1;
+    clearWorkflowSessionSelection(state.workflow);
+    resetCollaborationState(state.collaboration);
+}
+function beginRuntimeCredential(state) {
+    invalidateRuntimeCredential(state);
+    return refreshRuntimeProjects(state);
+}
+function refreshRuntimeOverview(state) {
+    state.overviewGeneration += 1;
+    return { credentialGeneration: state.credentialGeneration, generation: state.overviewGeneration };
+}
+function isCurrentRuntimeOverviewRequest(state, request) {
+    return !!request && request.credentialGeneration === state.credentialGeneration && request.generation === state.overviewGeneration;
+}
+function refreshRuntimeProjects(state, query = "", clientId = state.selectedDevice) {
+    state.projectsGeneration += 1;
+    return {
+        credentialGeneration: state.credentialGeneration,
+        projectGeneration: state.projectGeneration,
+        generation: state.projectsGeneration,
+        clientId: String(clientId || ""),
+        query: String(query || "").trim(),
+    };
+}
+function isCurrentRuntimeProjectsRequest(state, request) {
+    return !!request &&
+        request.credentialGeneration === state.credentialGeneration &&
+        request.projectGeneration === state.projectGeneration &&
+        request.generation === state.projectsGeneration;
+}
+function refreshRuntimeRunner(state) {
+    if (!state.selectedDevice)
+        return null;
+    state.runnerGeneration += 1;
+    return { credentialGeneration: state.credentialGeneration, device: state.selectedDevice, generation: state.runnerGeneration };
+}
+function isCurrentRuntimeRunnerRequest(state, request) {
+    return !!request && request.credentialGeneration === state.credentialGeneration &&
+        request.device === state.selectedDevice && request.generation === state.runnerGeneration;
+}
+function selectRuntimeRunnerFilter(state, device) {
+    selectRuntimeProject(state, device, "");
+}
+function selectRuntimeProject(state, device, project) {
+    if (state.selectedDevice !== device)
+        state.runnerGeneration += 1;
+    state.selectedDevice = device;
+    state.selectedProject = project;
+    state.projectGeneration += 1;
+    state.sessionListGeneration += 1;
+    state.projectWindowsGeneration += 1;
+    clearWorkflowSessionSelection(state.workflow);
+    resetCollaborationState(state.collaboration);
+    return refreshRuntimeSessionList(state);
+}
+function refreshRuntimeSessionList(state) {
+    if (!state.selectedProject)
+        return null;
+    state.sessionListGeneration += 1;
+    return {
+        credentialGeneration: state.credentialGeneration,
+        project: state.selectedProject,
+        projectGeneration: state.projectGeneration,
+        generation: state.sessionListGeneration,
+    };
+}
+function isCurrentRuntimeSessionListRequest(state, request) {
+    return !!request && request.credentialGeneration === state.credentialGeneration &&
+        request.project === state.selectedProject && request.projectGeneration === state.projectGeneration &&
+        request.generation === state.sessionListGeneration;
+}
+function refreshRuntimeProjectWindows(state) {
+    if (!state.selectedProject)
+        return null;
+    state.projectWindowsGeneration += 1;
+    return {
+        credentialGeneration: state.credentialGeneration,
+        project: state.selectedProject,
+        projectGeneration: state.projectGeneration,
+        generation: state.projectWindowsGeneration,
+    };
+}
+function isCurrentRuntimeProjectWindowsRequest(state, request) {
+    return !!request && request.credentialGeneration === state.credentialGeneration &&
+        request.project === state.selectedProject && request.projectGeneration === state.projectGeneration &&
+        request.generation === state.projectWindowsGeneration;
+}
+function wrapWorkflowRequest(state, request) {
+    if (!request || !state.selectedProject)
+        return null;
+    return {
+        credentialGeneration: state.credentialGeneration,
+        project: state.selectedProject,
+        projectGeneration: state.projectGeneration,
+        sessionId: request.sessionId,
+        generation: request.generation,
+    };
+}
+function selectRuntimeWorkflowSession(state, sessionId) {
+    resetCollaborationState(state.collaboration);
+    state.collaboration.sessionId = sessionId;
+    return wrapWorkflowRequest(state, selectWorkflowSession(state.workflow, sessionId));
+}
+function selectRuntimeSessionLocation(state, device, project, sessionId) {
+    const sessionListRequest = selectRuntimeProject(state, device, project);
+    const detailRequest = selectRuntimeWorkflowSession(state, sessionId);
+    return { sessionListRequest, detailRequest };
+}
+function refreshRuntimeWorkflowSession(state) {
+    return wrapWorkflowRequest(state, refreshWorkflowSessionDetail(state.workflow));
+}
+function clearRuntimeWorkflowSession(state) {
+    clearWorkflowSessionSelection(state.workflow);
+    resetCollaborationState(state.collaboration);
+}
+function isCurrentRuntimeWorkflowSessionRequest(state, request) {
+    return !!request && request.credentialGeneration === state.credentialGeneration &&
+        request.project === state.selectedProject && request.projectGeneration === state.projectGeneration &&
+        isCurrentWorkflowSessionDetailRequest(state.workflow, { sessionId: request.sessionId, generation: request.generation });
+}
+function adoptRuntimeWorkflowSessionDetail(state, request, detail) {
+    if (!isCurrentRuntimeWorkflowSessionRequest(state, request))
+        return false;
+    return adoptWorkflowSessionDetail(state.workflow, { sessionId: request.sessionId, generation: request.generation }, detail);
+}
+function resolveRunnerDisclosure(storedDisclosure, defaultOpen) {
+    return storedDisclosure === null ? defaultOpen : storedDisclosure;
+}
+function runtimeWindowShortKey(value) {
+    const key = String(value || "");
+    if (key.length <= 14)
+        return key;
+    return key.slice(0, 8) + "…" + key.slice(-4);
+}
+function runtimeWindowActivityLabel(timestampMs, nowMs, language) {
+    const value = Number(timestampMs);
+    if (!Number.isFinite(value) || value <= 0) {
+        return language === "zh-CN" ? "无 WebCodex 活动" : "No WebCodex activity";
+    }
+    const elapsed = Math.max(0, nowMs - value);
+    if (elapsed < 1000)
+        return language === "zh-CN" ? "刚刚" : "just now";
+    if (elapsed < 60000)
+        return language === "zh-CN" ? Math.floor(elapsed / 1000) + " 秒前" : Math.floor(elapsed / 1000) + "s ago";
+    if (elapsed < 3600000)
+        return language === "zh-CN" ? Math.floor(elapsed / 60000) + " 分钟前" : Math.floor(elapsed / 60000) + "m ago";
+    if (elapsed < 86400000)
+        return language === "zh-CN" ? Math.floor(elapsed / 3600000) + " 小时前" : Math.floor(elapsed / 3600000) + "h ago";
+    return language === "zh-CN" ? Math.floor(elapsed / 86400000) + " 天前" : Math.floor(elapsed / 86400000) + "d ago";
+}
+
 const LANGUAGE_STORAGE_KEY = "webcodex.runtime.language.v1";
-const WORKSPACE_VIEW_STORAGE_KEY = "webcodex.runtime.workspace-view.v1";
-const DRAFT_STORAGE_PREFIX = "webcodex.runtime.draft.v1.";
-const DEVICE_DISCLOSURE_STORAGE_PREFIX = "webcodex.runtime.runner-open.v1.";
-const APPEARANCE_MEDIA_QUERY = "(prefers-color-scheme: light)";
-const MOBILE_NAVIGATION_MEDIA = "(max-width: 900px)";
-const WIDE_CONTEXT_MEDIA = "(min-width: 1280px)";
-let contextUserIntent = null;
 const RUNTIME_ZH_TEXT = {
     "Your workspace": "你的工作空间",
     "Pick up where work happens": "从这里继续工作",
@@ -898,6 +896,10 @@ const RUNTIME_ZH_TEXT = {
     "Filter by Project name, id, Runner, or workspace path": "按项目名称、ID、运行器或工作空间路径筛选",
     "No project selected": "尚未选择项目",
     "No Projects match this filter.": "没有符合当前筛选条件的项目。",
+    "Window activity": "窗口活动",
+    "Project Window activity": "项目窗口活动",
+    "No Window activity recorded for this project.": "此项目没有记录到窗口活动。",
+    "Window activity requires runtime:read. Project-scoped Session access remains available.": "查看窗口活动需要 runtime:read 权限；仍可访问项目范围内的会话。",
     "Sessions": "会话",
     "Workflow Sessions": "工作流会话",
     "No retained Workflow Sessions for this project.": "此项目没有保留的工作流会话。",
@@ -1172,6 +1174,74 @@ const RUNTIME_ZH_TEXT = {
     "BUILD DIFFERENT": "构建不一致",
     "DIRTY": "有未提交更改",
     "SESSION SCAN PARTIAL": "会话扫描不完整",
+    "WINDOW ACTIVE": "窗口活跃",
+    "Active host window request": "活跃的主机窗口请求",
+    "Open Window inspector": "打开窗口检查器",
+    "runtime:read required": "需要 runtime:read 权限",
+    "Window Activity": "窗口活动",
+    "Host Window Activity": "主机窗口活动",
+    "WebCodex host windows": "WebCodex 主机窗口",
+    "WebCodex Windows": "WebCodex 窗口活动",
+    "WebCodex windows": "WebCodex 窗口活动",
+    "WebCodex Window activity": "WebCodex 窗口活动",
+    "WebCodex window activity": "WebCodex 窗口活动",
+    "Client Windows": "客户端窗口",
+    "Window activity has not been loaded yet.": "尚未加载窗口活动。",
+    "No Window activity is visible.": "当前没有可见的窗口活动。",
+    "No Window activity is visible to this credential.": "当前凭证范围内没有可见的窗口活动。",
+    "No Window activity is visible for this Project to this credential.": "当前凭证范围内，此项目没有可见的窗口活动。",
+    "Window activity requires runtime:read.": "查看窗口活动需要 runtime:read 权限。",
+    "Window activity could not be refreshed.": "窗口活动无法刷新。",
+    "Window activity could not be refreshed; showing previous data.": "窗口活动无法刷新；正在显示之前的数据。",
+    "refresh failed, showing previous data": "刷新失败，正在显示之前的数据",
+    "No Window activity has been observed for this Project.": "此项目尚未观察到窗口活动。",
+    "No Window activity observed for this project.": "此项目尚未观察到窗口活动。",
+    "No WebCodex activity is available.": "没有可用的 WebCodex 活动。",
+    "meaningful": "有效工作",
+    "recorder gap": "记录断层",
+    "streaming timing unavailable": "流式传输耗时不可用",
+    "service unavailable": "服务耗时不可用",
+    "next gap unavailable": "下次间隔不可用",
+    "overlap from previous": "与前次调用重叠",
+    "Active request": "活跃请求",
+    "No active request": "无活跃请求",
+    "No active requests": "无活跃请求",
+    "No WebCodex request is currently active.": "当前没有活跃的 WebCodex 请求。",
+    "No authorized Workflow Session links.": "没有已授权的工作流会话关联。",
+    "No linked Window evidence.": "没有关联的窗口证据。",
+    "No completed tools/call activity": "没有已完成的 tools/call 活动",
+    "No meaningful WebCodex work recorded": "未记录到有效 WebCodex 工作",
+    "Last WebCodex call": "最后 WebCodex 调用",
+    "Last WebCodex call ": "最后 WebCodex 调用 ",
+    "Last WebCodex activity": "最后 WebCodex 活动",
+    "Last WebCodex activity ": "最后 WebCodex 活动 ",
+    "Last meaningful work": "最后有效工作",
+    "Last meaningful work ": "最后有效工作 ",
+    "Open Window Activity inspector": "打开窗口活动检查器",
+    "Copy trace id": "复制 Trace ID",
+    "Copy hashed key": "复制哈希键",
+    "Could not refresh Window activity.": "无法刷新窗口活动。",
+    "Hashed identity": "哈希标识",
+    "Select a Window": "选择一个窗口",
+    "Window axis": "窗口维度",
+    "Choose a hashed Window identity from the sidebar to inspect active requests, linked Workflow Sessions, and bounded recent activity.": "从侧边栏选择哈希窗口标识，以检查活跃请求、关联的工作流会话及有界近期活动。",
+    "Shows WebCodex calls and correlations only. It cannot observe model reasoning or determine whether the ChatGPT frontend is frozen.": "仅反映 WebCodex 调用与关联关系。它无法观察模型推理，也无法判断 ChatGPT 前端是否卡顿。",
+    "3s activity refresh": "3秒活动刷新",
+    "3s window refresh": "3秒窗口刷新",
+    "Host Window liveness and correlation evidence. Window identity never grants execution or Session authority.": "主机窗口活跃度与关联证据。窗口标识绝不授予执行或会话权限。",
+    "Recording was not continued for ": "记录未继续于会话 ",
+    "service ": "服务耗时 ",
+    "next gap ": "下次间隔 ",
+    "cycle ": "周期 ",
+    "process exit ": "进程退出码 ",
+    "exit ": "退出码 ",
+    "bounded": "有界",
+    "Inspect": "检查",
+    "Active calls": "活跃调用",
+    "Linked sessions": "关联会话",
+    "Timeline": "时间线",
+    "RECORDER GAP": "记录断层",
+    "Loading Window activity…": "正在加载窗口活动…",
 };
 const ZH_COUNT_LABELS = {
     "Runner": "台运行器",
@@ -1179,7 +1249,9 @@ const ZH_COUNT_LABELS = {
     "Project": "个项目",
     "visible Project": "个可见项目",
     "matching Project": "个匹配项目",
+    "Window": "个窗口",
     "Session": "个会话",
+    "linked Session": "个关联会话",
     "retained Session": "个保留会话",
     "active Session": "个活跃会话",
     "running Session": "个运行中会话",
@@ -1202,7 +1274,2173 @@ const ZH_COUNT_LABELS = {
     "stale": "台状态过期",
     "unavailable": "台不可用",
     "RUNNING": "个运行中",
+    "event": "个事件",
+    "events": "个事件",
+    "window": "个窗口",
+    "active call": "个活跃调用",
+    "active calls": "个活跃调用",
+    "active request": "个活跃请求",
+    "active requests": "个活跃请求",
 };
+function languagePreference(value) {
+    return value === "zh-CN" ? "zh-CN" : "en";
+}
+function loadLanguagePreference() {
+    try {
+        const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+        if (stored === "en" || stored === "zh-CN")
+            return stored;
+    }
+    catch { /* Fall through to the browser language. */ }
+    return navigator.language && navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+}
+function translate(source, language = "en") {
+    return language === "zh-CN" ? (RUNTIME_ZH_TEXT[source] || source) : source;
+}
+function translateStaticNodeValue(source, language = "en") {
+    const match = /^(\s*)([\s\S]*?)(\s*)$/.exec(source);
+    if (!match)
+        return source;
+    return match[1] + translate(match[2], language) + match[3];
+}
+function localizedCountLabel(value, singular, pluralOrLanguage, language = "en") {
+    const isLang = pluralOrLanguage === "en" || pluralOrLanguage === "zh-CN";
+    const plural = isLang || !pluralOrLanguage ? singular + "s" : pluralOrLanguage;
+    const lang = isLang ? pluralOrLanguage : (language || "en");
+    const count = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+    if (lang === "zh-CN")
+        return count + " " + (ZH_COUNT_LABELS[singular] || RUNTIME_ZH_TEXT[singular] || singular);
+    return count + " " + (count === 1 ? singular : plural);
+}
+function localizedWorkflowText(value, language = "en") {
+    const source = String(value || "");
+    if (language !== "zh-CN" || !source)
+        return source;
+    const exact = {
+        "Latest retained validation passed": "最近保留的验证已通过",
+        "Latest validation passed": "最近验证已通过",
+        "Latest retained validation failed": "最近保留的验证失败",
+        "Latest validation failed": "最近验证失败",
+        "Validation not run": "尚未运行验证",
+        "Retained terminal validation evidence unavailable": "保留的最终验证证据不可用",
+        "Terminal validation evidence unavailable": "最终验证证据不可用",
+        "No work observations in retained events.": "保留事件中没有工作观察记录。",
+        "No tool activity observed.": "尚未观察到工具活动。",
+        "No retained open guidance, questions, risks, or todos.": "没有保留的开放指导、问题、风险或待办。",
+        "No retained model-reported progress.": "没有保留的模型报告进度。",
+    };
+    let text = exact[source] || source;
+    const prefixes = [
+        ["Recent observed work: ", "最近观察到的工作："],
+        ["Observed work: ", "已观察工作："],
+        ["Retained open messages: ", "保留的开放消息："],
+        ["Retained: ", "保留："],
+        ["Recent ", "最近 "],
+        ["latest ", "最近 "],
+    ];
+    for (const [english, chinese] of prefixes) {
+        if (text.startsWith(english)) {
+            text = chinese + text.slice(english.length);
+            break;
+        }
+    }
+    const nounMap = {
+        edit: "次编辑", edits: "次编辑", validation: "次验证", validations: "次验证",
+        exploration: "次探索", review: "次审查", reviews: "次审查", run: "次运行", runs: "次运行",
+        risk: "个风险", risks: "个风险", todo: "个待办", todos: "个待办",
+        question: "个问题", questions: "个问题", guidance: "条指导",
+        test: "次测试", tests: "次测试", "unresolved failure": "个未解决失败",
+        "unresolved failures": "个未解决失败", "unresolved validation failure": "个未解决的验证失败",
+        "unresolved validation failures": "个未解决的验证失败",
+    };
+    return text.replace(/(\d+) (unresolved validation failures?|unresolved failures?|edits?|validations?|exploration|reviews?|runs?|risks?|todos?|questions?|guidance|tests?)/g, (_match, count, noun) => {
+        return String(count) + " " + (nounMap[String(noun)] || noun);
+    });
+}
+
+function resolveTr(source, ctx) {
+    if (ctx?.tr)
+        return ctx.tr(source);
+    if (typeof tr === "function")
+        return tr(source);
+    return source;
+}
+function resolveIcon(name, ctx) {
+    if (ctx?.runtimeIcon)
+        return ctx.runtimeIcon(name);
+    if (typeof runtimeIcon === "function")
+        return runtimeIcon(name);
+    return document.createElementNS("http://www.w3.org/2000/svg", "svg");
+}
+function resolveSetText(id, value, ctx) {
+    if (ctx?.setText) {
+        ctx.setText(id, value);
+        return;
+    }
+    if (typeof setText === "function") {
+        setText(id, value);
+        return;
+    }
+    const node = document.getElementById(id);
+    if (node)
+        node.textContent = value == null ? "—" : String(value);
+}
+function appendLinkifiedText(parent, text) {
+    const pattern = /https?:\/\/[^\s<>{}\[\]]+/g;
+    let cursor = 0;
+    for (const match of text.matchAll(pattern)) {
+        const index = match.index || 0;
+        if (index > cursor)
+            parent.appendChild(document.createTextNode(text.slice(cursor, index)));
+        let href = match[0];
+        let trailing = "";
+        while (/[.,;:!?)]$/.test(href)) {
+            trailing = href.slice(-1) + trailing;
+            href = href.slice(0, -1);
+        }
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = href;
+        parent.appendChild(link);
+        if (trailing)
+            parent.appendChild(document.createTextNode(trailing));
+        cursor = index + match[0].length;
+    }
+    if (cursor < text.length)
+        parent.appendChild(document.createTextNode(text.slice(cursor)));
+}
+function messageLineStartsBlock(line) {
+    return /^```/.test(line)
+        || /^#{1,3}\s+/.test(line)
+        || /^>\s?/.test(line)
+        || /^\s*[-*+]\s+/.test(line)
+        || /^\s*\d+[.)]\s+/.test(line);
+}
+function appendMessageParagraph(parent, lines) {
+    if (!lines.length)
+        return;
+    const paragraph = document.createElement("p");
+    paragraph.className = "message-paragraph";
+    lines.forEach((line, index) => {
+        if (index)
+            paragraph.appendChild(document.createElement("br"));
+        appendLinkifiedText(paragraph, line);
+    });
+    parent.appendChild(paragraph);
+}
+function appendMessageCode(parent, language, codeText, ctx) {
+    const block = document.createElement("section");
+    block.className = "message-code";
+    const header = document.createElement("header");
+    const label = document.createElement("span");
+    label.textContent = language || "code";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "message-code-copy";
+    copy.appendChild(resolveIcon("copy", ctx));
+    const copyLabel = document.createElement("span");
+    copyLabel.textContent = resolveTr("Copy code", ctx);
+    copy.appendChild(copyLabel);
+    copy.title = resolveTr("Copy code", ctx);
+    copy.setAttribute("aria-label", resolveTr("Copy code", ctx));
+    copy.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(codeText);
+            copyLabel.textContent = resolveTr("Code copied", ctx);
+            resolveSetText("runtime-message-announcer", resolveTr("Code copied", ctx), ctx);
+            window.setTimeout(() => { copyLabel.textContent = resolveTr("Copy code", ctx); }, 1400);
+        }
+        catch {
+            copyLabel.textContent = resolveTr("Unable to copy code", ctx);
+            resolveSetText("runtime-message-announcer", resolveTr("Unable to copy code", ctx), ctx);
+            window.setTimeout(() => { copyLabel.textContent = resolveTr("Copy code", ctx); }, 1800);
+        }
+    });
+    header.appendChild(label);
+    header.appendChild(copy);
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    if (language)
+        code.dataset.language = language;
+    code.textContent = codeText;
+    pre.appendChild(code);
+    block.appendChild(header);
+    block.appendChild(pre);
+    parent.appendChild(block);
+}
+function appendRichMessage(bubble, sourceValue, ctx) {
+    const source = String(sourceValue || "").replace(/\r\n?/g, "\n");
+    const lines = source.split("\n");
+    const body = document.createElement("div");
+    body.className = "message-body";
+    let index = 0;
+    while (index < lines.length) {
+        const line = lines[index];
+        if (!line.trim()) {
+            index += 1;
+            continue;
+        }
+        const fence = /^```\s*([^\s`]*)/.exec(line);
+        if (fence) {
+            const codeLines = [];
+            index += 1;
+            while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+                codeLines.push(lines[index]);
+                index += 1;
+            }
+            if (index < lines.length)
+                index += 1;
+            appendMessageCode(body, fence[1] || "", codeLines.join("\n"), ctx);
+            continue;
+        }
+        const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+        if (heading) {
+            const title = document.createElement(heading[1].length === 1 ? "h3" : heading[1].length === 2 ? "h4" : "h5");
+            title.className = "message-heading";
+            appendLinkifiedText(title, heading[2]);
+            body.appendChild(title);
+            index += 1;
+            continue;
+        }
+        if (/^>\s?/.test(line)) {
+            const quote = document.createElement("blockquote");
+            const quoteLines = [];
+            while (index < lines.length && /^>\s?/.test(lines[index])) {
+                quoteLines.push(lines[index].replace(/^>\s?/, ""));
+                index += 1;
+            }
+            appendMessageParagraph(quote, quoteLines);
+            body.appendChild(quote);
+            continue;
+        }
+        const unordered = /^\s*[-*+]\s+/.test(line);
+        const ordered = /^\s*\d+[.)]\s+/.test(line);
+        if (unordered || ordered) {
+            const list = document.createElement(ordered ? "ol" : "ul");
+            const pattern = ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/;
+            while (index < lines.length && pattern.test(lines[index])) {
+                const item = document.createElement("li");
+                appendLinkifiedText(item, lines[index].replace(pattern, ""));
+                list.appendChild(item);
+                index += 1;
+            }
+            body.appendChild(list);
+            continue;
+        }
+        const paragraphLines = [];
+        while (index < lines.length && lines[index].trim() && !messageLineStartsBlock(lines[index])) {
+            paragraphLines.push(lines[index]);
+            index += 1;
+        }
+        if (!paragraphLines.length) {
+            paragraphLines.push(line);
+            index += 1;
+        }
+        appendMessageParagraph(body, paragraphLines);
+    }
+    bubble.appendChild(body);
+    if (source.length <= 2200 && lines.length <= 36)
+        return;
+    body.classList.add("is-collapsed");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "message-expand";
+    toggle.textContent = resolveTr("Show full message", ctx);
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+        const expanded = body.classList.toggle("is-expanded");
+        body.classList.toggle("is-collapsed", !expanded);
+        toggle.textContent = resolveTr(expanded ? "Collapse message" : "Show full message", ctx);
+        toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    });
+    bubble.appendChild(toggle);
+}
+
+const RUNTIME_API_BASE = "/api/runtime-console/";
+function isAbortError(error) {
+    return error instanceof DOMException
+        ? error.name === "AbortError"
+        : Boolean(error && typeof error === "object" && "name" in error && error.name === "AbortError");
+}
+function abortController(controller) {
+    if (controller)
+        controller.abort();
+}
+async function writeClipboardText(value, clipboard) {
+    if (!value)
+        return false;
+    try {
+        const cb = clipboard || (typeof navigator !== "undefined" ? navigator.clipboard : null);
+        if (!cb || typeof cb.writeText !== "function")
+            return false;
+        await cb.writeText(value);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+class RuntimeApiClient {
+    constructor(apiBase = RUNTIME_API_BASE) {
+        this.apiBase = apiBase;
+        this.token = "";
+    }
+    setToken(token) {
+        this.token = token;
+    }
+    getToken() {
+        return this.token;
+    }
+    clearToken() {
+        this.token = "";
+    }
+    async post(path, payload, signal) {
+        try {
+            const response = await fetch(this.apiBase + path, {
+                method: "POST",
+                headers: {
+                    Authorization: "Bearer " + this.token,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+                signal,
+            });
+            let data = null;
+            try {
+                data = await response.json();
+            }
+            catch {
+                data = null;
+            }
+            return { ok: response.ok, status: response.status, data };
+        }
+        catch (error) {
+            if (isAbortError(error))
+                return null;
+            return { ok: false, status: 0, data: null };
+        }
+    }
+}
+
+function windowDateTimeLabel(timestampMs, language) {
+    const value = Number(timestampMs);
+    if (!Number.isFinite(value) || value <= 0)
+        return translate("time unavailable", language);
+    return new Date(value).toLocaleString(language === "zh-CN" ? "zh-CN" : "en");
+}
+function windowAgeLabel(timestampMs, now = Date.now(), language) {
+    return runtimeWindowActivityLabel(timestampMs, now, language);
+}
+function runtimeProjectClientId(project) {
+    const value = String(project || "");
+    const parts = value.split(":");
+    return parts.length >= 3 && parts[0] === "agent" ? parts[1] : "";
+}
+function appendChipElement(parent, text, extraClass = "") {
+    const chip = document.createElement("span");
+    chip.className = "chip" + (extraClass ? " " + extraClass : "");
+    chip.textContent = text;
+    parent.appendChild(chip);
+    return chip;
+}
+function renderWindowActivityRows(node, activities, options = {}) {
+    if (!node)
+        return;
+    while (node.firstChild)
+        node.removeChild(node.firstChild);
+    const compact = options.compact ?? false;
+    const language = options.language;
+    for (const activity of activities) {
+        const item = document.createElement("article");
+        item.className = "window-activity-item" + (compact ? " compact" : "")
+            + (activity?.recorder_gap_session_id ? " recorder-gap" : "");
+        const head = document.createElement("div");
+        head.className = "window-activity-head";
+        const title = document.createElement("strong");
+        title.textContent = String(activity?.tool_name || activity?.method || "WebCodex call");
+        const time = document.createElement("span");
+        time.className = "muted small";
+        time.textContent = windowDateTimeLabel(activity?.started_at_ms, language);
+        head.appendChild(title);
+        head.appendChild(time);
+        item.appendChild(head);
+        const facts = document.createElement("div");
+        facts.className = "chips window-activity-facts";
+        appendChipElement(facts, translate(String(activity?.status || "unknown"), language));
+        if (activity?.project)
+            appendChipElement(facts, String(activity.project));
+        if (activity?.activity_presentation) {
+            appendChipElement(facts, String(activity.activity_presentation), "tone-runtime");
+        }
+        if (activity?.activity_kind)
+            appendChipElement(facts, String(activity.activity_kind));
+        if (activity?.meaningful)
+            appendChipElement(facts, translate("meaningful", language), "tone-runtime");
+        if (activity?.recorder_gap_session_id)
+            appendChipElement(facts, translate("recorder gap", language), "tone-warn");
+        if (activity?.response_streaming === true) {
+            appendChipElement(facts, translate("streaming timing unavailable", language), "tone-warn");
+        }
+        else if (typeof activity?.service_ms === "number") {
+            appendChipElement(facts, (language === "zh-CN" ? "服务耗时 " : "service ") + String(activity.service_ms) + " ms");
+        }
+        else if (activity?.meaningful) {
+            appendChipElement(facts, translate("service unavailable", language));
+        }
+        if (activity?.meaningful) {
+            if (typeof activity?.next_call_gap_ms === "number") {
+                appendChipElement(facts, (language === "zh-CN" ? "下次间隔 " : "next gap ") + String(activity.next_call_gap_ms) + " ms");
+            }
+            else {
+                appendChipElement(facts, translate("next gap unavailable", language));
+            }
+            if (typeof activity?.cycle_ms === "number") {
+                appendChipElement(facts, (language === "zh-CN" ? "周期 " : "cycle ") + String(activity.cycle_ms) + " ms");
+            }
+        }
+        if (activity?.window_transition_kind === "overlap") {
+            appendChipElement(facts, translate("overlap from previous", language), "tone-warn");
+        }
+        item.appendChild(facts);
+        const links = Array.isArray(activity?.workflow_sessions) ? activity.workflow_sessions : [];
+        if (links.length) {
+            const relation = document.createElement("div");
+            relation.className = "muted small";
+            relation.textContent = links
+                .map((link) => String(link.workflow_session_id || "") + " · " + String(link.relation || "linked"))
+                .join(" · ");
+            item.appendChild(relation);
+        }
+        if (activity?.recorder_gap_session_id) {
+            const gap = document.createElement("div");
+            gap.className = "window-gap-note small";
+            gap.textContent = (language === "zh-CN" ? "记录未继续于会话 " : "Recording was not continued for ") + String(activity.recorder_gap_session_id) + ".";
+            item.appendChild(gap);
+        }
+        if (activity?.server_trace_id) {
+            const trace = document.createElement("button");
+            trace.type = "button";
+            trace.className = "window-trace-copy";
+            trace.textContent = "trace " + String(activity.server_trace_id);
+            trace.title = translate("Copy trace id", language);
+            if (options.onCopyTrace) {
+                trace.addEventListener("click", () => options.onCopyTrace(String(activity.server_trace_id)));
+            }
+            item.appendChild(trace);
+        }
+        node.appendChild(item);
+    }
+}
+function createWindowCard(row, selectedWindowKey, onSelect, now = Date.now(), language) {
+    const key = String(row?.client_window_key || "");
+    if (!key)
+        return null;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "runtime-window-card" + (key === selectedWindowKey ? " selected" : "");
+    if (key === selectedWindowKey)
+        button.setAttribute("aria-current", "true");
+    const head = document.createElement("div");
+    head.className = "runtime-window-card-head";
+    const title = document.createElement("strong");
+    title.textContent = "Window " + runtimeWindowShortKey(key);
+    const active = document.createElement("span");
+    active.className = "chip" + (Number(row?.active_count || 0) > 0 ? " tone-runtime" : "");
+    active.textContent = Number(row?.active_count || 0) > 0
+        ? (language === "zh-CN" ? String(row.active_count) + " 个活跃" : String(row.active_count) + " active")
+        : String(row?.source || "window");
+    head.appendChild(title);
+    head.appendChild(active);
+    button.appendChild(head);
+    const call = document.createElement("span");
+    call.className = "muted small";
+    call.textContent = row?.last_tool_call_at_ms
+        ? (language === "zh-CN" ? "最后调用 " : "Last WebCodex call ") + windowAgeLabel(row.last_tool_call_at_ms, now, language)
+        : (language === "zh-CN" ? "最后活动 " : "Last WebCodex activity ") + windowAgeLabel(row?.last_seen_at_ms, now, language);
+    button.appendChild(call);
+    const meaningful = document.createElement("span");
+    meaningful.className = "muted small";
+    meaningful.textContent = row?.last_meaningful_activity_at_ms
+        ? (language === "zh-CN" ? "最后有效工作 " : "Last meaningful work ") + windowAgeLabel(row.last_meaningful_activity_at_ms, now, language)
+        : (language === "zh-CN" ? "未记录到有效 WebCodex 工作" : "No meaningful WebCodex work recorded");
+    button.appendChild(meaningful);
+    const links = document.createElement("span");
+    links.className = "muted small";
+    links.textContent = localizedCountLabel(Number(row?.linked_session_count || 0), "linked Session", "linked Sessions", language)
+        + (Number(row?.recorder_gap_count || 0) ? " · " + String(row.recorder_gap_count) + (language === "zh-CN" ? " 个记录断层" : " recorder gap") : "");
+    button.appendChild(links);
+    button.addEventListener("click", () => onSelect(key));
+    return button;
+}
+function renderWindowActiveRequests(activeNode, activeRequests, options = {}) {
+    if (!activeNode)
+        return;
+    while (activeNode.firstChild)
+        activeNode.removeChild(activeNode.firstChild);
+    const now = options.now ?? Date.now();
+    const language = options.language;
+    if (!activeRequests.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted small";
+        empty.textContent = translate("No WebCodex request is currently active.", language);
+        activeNode.appendChild(empty);
+        return;
+    }
+    for (const request of activeRequests) {
+        const item = document.createElement("article");
+        item.className = "window-request-item";
+        const title = document.createElement("strong");
+        title.textContent = String(request?.tool_name || request?.method || "WebCodex request");
+        item.appendChild(title);
+        const meta = document.createElement("div");
+        meta.className = "muted small";
+        const facts = [
+            request?.project,
+            request?.started_at_ms ? (language === "zh-CN" ? "开始于 " : "started ") + windowAgeLabel(request.started_at_ms, now, language) : null,
+            typeof request?.elapsed_ms === "number" ? String(request.elapsed_ms) + (language === "zh-CN" ? " 毫秒已耗时" : " ms elapsed") : null,
+        ].filter(Boolean).map(String);
+        meta.textContent = facts.join(" · ");
+        item.appendChild(meta);
+        if (request?.server_trace_id) {
+            const trace = document.createElement("button");
+            trace.type = "button";
+            trace.className = "window-trace-copy";
+            trace.textContent = "trace " + String(request.server_trace_id);
+            trace.title = translate("Copy trace id", language);
+            if (options.onCopyTrace) {
+                trace.addEventListener("click", () => options.onCopyTrace(String(request.server_trace_id)));
+            }
+            item.appendChild(trace);
+        }
+        activeNode.appendChild(item);
+    }
+}
+function renderWindowLinkedSessions(sessionsNode, linkedSessions, onOpenSession, language) {
+    if (!sessionsNode)
+        return;
+    while (sessionsNode.firstChild)
+        sessionsNode.removeChild(sessionsNode.firstChild);
+    for (const session of linkedSessions) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "window-session-card";
+        const title = document.createElement("strong");
+        title.textContent = String(session?.title || session?.workflow_session_id || translate("Workflow Session", language));
+        const meta = document.createElement("span");
+        meta.className = "muted small";
+        meta.textContent = [
+            session?.workflow_session_id,
+            session?.lifecycle,
+            session?.project,
+            ...(Array.isArray(session?.relations) ? session.relations : []),
+        ].filter(Boolean).map(String).join(" · ");
+        button.appendChild(title);
+        button.appendChild(meta);
+        button.addEventListener("click", () => onOpenSession(session));
+        sessionsNode.appendChild(button);
+    }
+    if (!sessionsNode.childElementCount) {
+        const empty = document.createElement("p");
+        empty.className = "muted small";
+        empty.textContent = translate("No authorized Workflow Session links.", language);
+        sessionsNode.appendChild(empty);
+    }
+}
+function renderSessionWindowCorrelationLinks(linkedNode, links, onSelectWindow, now = Date.now(), language) {
+    if (!linkedNode)
+        return;
+    while (linkedNode.firstChild)
+        linkedNode.removeChild(linkedNode.firstChild);
+    for (const link of links) {
+        const key = String(link?.client_window_key || "");
+        if (!key)
+            continue;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "window-session-card" + (Number(link?.recorder_gap_count || 0) ? " recorder-gap" : "");
+        const title = document.createElement("strong");
+        title.textContent = "Window " + runtimeWindowShortKey(key);
+        const meta = document.createElement("span");
+        meta.className = "muted small";
+        meta.textContent = [
+            link?.source,
+            link?.last_seen_at_ms ? (language === "zh-CN" ? "最后活动 " : "last WebCodex activity ") + windowAgeLabel(link.last_seen_at_ms, now, language) : null,
+            Number(link?.recorder_gap_count || 0) ? String(link.recorder_gap_count) + (language === "zh-CN" ? " 个记录断层" : " recorder gap") : null,
+        ].filter(Boolean).map(String).join(" · ");
+        button.appendChild(title);
+        button.appendChild(meta);
+        button.addEventListener("click", () => onSelectWindow(key));
+        linkedNode.appendChild(button);
+    }
+    if (!links.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted small";
+        empty.textContent = translate("No linked Window evidence.", language);
+        linkedNode.appendChild(empty);
+    }
+}
+function formatWindowDetailFields(detail, fallbackKey = "", now = Date.now(), language) {
+    if (!detail)
+        return null;
+    const key = String(detail.client_window_key || fallbackKey || "");
+    return {
+        title: "Window " + runtimeWindowShortKey(key),
+        key: key || "—",
+        source: String(detail.source || "—"),
+        activeCount: String(Number(detail.active_count || 0)),
+        lastCall: detail.last_tool_call_at_ms
+            ? windowAgeLabel(detail.last_tool_call_at_ms, now, language)
+            : translate("No completed tools/call activity", language),
+        lastMeaningful: detail.last_meaningful_activity_at_ms
+            ? windowAgeLabel(detail.last_meaningful_activity_at_ms, now, language)
+            : translate("No meaningful WebCodex work recorded", language),
+        activeStatus: translate(Number(detail.active_count || 0) ? "Active request" : "No active request", language),
+        linkedStatus: localizedCountLabel(Number(detail.sessions_returned || 0), "Session", "Sessions", language) +
+            (detail.sessions_truncated ? " · " + translate("bounded", language) : ""),
+        activityStatus: localizedCountLabel(Number(detail.activity_returned || 0), "event", "events", language) +
+            (detail.activity_truncated ? " · " + translate("bounded", language) : ""),
+    };
+}
+function formatWindowEmptyState(availability, visibilityScope = "principal", isProjectScoped = false, language) {
+    if (availability === "unavailable") {
+        return translate("Window activity requires runtime:read.", language);
+    }
+    if (availability === "stale") {
+        return translate("Window activity could not be refreshed.", language);
+    }
+    if (availability === "available") {
+        if (isProjectScoped) {
+            if (visibilityScope === "principal") {
+                return translate("No Window activity is visible for this Project to this credential.", language);
+            }
+            return translate("No Window activity has been observed for this Project.", language);
+        }
+        if (visibilityScope === "principal") {
+            return translate("No Window activity is visible to this credential.", language);
+        }
+        return translate("No Window activity is visible.", language);
+    }
+    return translate("Loading Window activity…", language);
+}
+function formatWindowListStatusText(availability, count, visibilityScope = "principal", language) {
+    if (availability === "unavailable") {
+        return translate("runtime:read required", language);
+    }
+    if (availability === "stale") {
+        if (count > 0) {
+            const countPart = localizedCountLabel(count, "Window", "Windows", language);
+            const stalePart = translate("refresh failed, showing previous data", language);
+            return countPart + " · " + stalePart;
+        }
+        return translate("Window activity could not be refreshed.", language);
+    }
+    if (count > 0) {
+        return localizedCountLabel(count, "Window", "Windows", language);
+    }
+    return formatWindowEmptyState(availability, visibilityScope, false, language);
+}
+function renderWindowCards(node, windowRows, selectedWindowKey, onSelect, now = Date.now(), language) {
+    if (!node)
+        return;
+    while (node.firstChild)
+        node.removeChild(node.firstChild);
+    for (const row of windowRows) {
+        const card = createWindowCard(row, selectedWindowKey, onSelect, now, language);
+        if (card)
+            node.appendChild(card);
+    }
+}
+function renderProjectWindowCards(node, windowRows, onSelect, now = Date.now(), language) {
+    if (!node)
+        return;
+    while (node.firstChild)
+        node.removeChild(node.firstChild);
+    for (const row of windowRows) {
+        const card = createWindowCard(row, "", onSelect, now, language);
+        if (card) {
+            card.title = translate("Open Window inspector", language);
+            node.appendChild(card);
+        }
+    }
+}
+
+function communicationTimeLabel(value, language) {
+    if (typeof value !== "number" || !Number.isFinite(value))
+        return translate("time unavailable", language);
+    return new Date(value).toLocaleString(language === "zh-CN" ? "zh-CN" : "en");
+}
+function parseAgentIds(value) {
+    const ids = value
+        .split(/[\s,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    return Array.from(new Set(ids));
+}
+function deliveryAgentLabel(agentId, agents = []) {
+    const agent = agents.find((a) => String(a?.agent_id || "") === agentId);
+    return agent ? String(agent.display_name || agent.handle || agentId) : agentId;
+}
+function appendCommunicationChip(parent, text, extraClass = "") {
+    const chip = document.createElement("span");
+    chip.className = "chip" + (extraClass ? " " + extraClass : "");
+    chip.textContent = text;
+    parent.appendChild(chip);
+    return chip;
+}
+function createAgentRow(agent, selectedAgentId, options) {
+    const agentId = String(agent?.agent_id || "");
+    if (!agentId)
+        return null;
+    const language = options.language;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "communication-row" + (agentId === selectedAgentId ? " selected" : "");
+    if (agentId === selectedAgentId)
+        row.setAttribute("aria-current", "true");
+    const head = document.createElement("div");
+    head.className = "communication-row-head";
+    const title = document.createElement("span");
+    title.className = "communication-row-title";
+    title.textContent = String(agent?.display_name || agent?.handle || "Agent") + " · @" + String(agent?.handle || "agent");
+    const unread = document.createElement("span");
+    unread.className = "chip" + (Number(agent?.queued_delivery_count || 0) > 0 ? " tone-warn" : "");
+    unread.textContent = localizedCountLabel(agent?.queued_delivery_count, "queued delivery", "queued deliveries", language);
+    head.appendChild(title);
+    head.appendChild(unread);
+    row.appendChild(head);
+    const meta = document.createElement("span");
+    meta.className = "communication-row-meta";
+    meta.textContent = agentId
+        + (language === "zh-CN" ? " · 配置版本 r" : " · profile r") + String(agent?.profile_revision || 0)
+        + (language === "zh-CN" ? " · 控制器 g" : " · controller g") + String(agent?.current_controller_generation || 0)
+        + " · " + localizedCountLabel(agent?.active_endpoint_count, "active Endpoint", "active Endpoints", language)
+        + " · " + localizedCountLabel(agent?.unresolved_wake_count, "unresolved Wake", "unresolved Wakes", language);
+    row.appendChild(meta);
+    row.addEventListener("click", () => options.onSelect(agentId));
+    return row;
+}
+function renderAgentRows(list, agents, selectedAgentId, options) {
+    if (!list)
+        return;
+    while (list.firstChild)
+        list.removeChild(list.firstChild);
+    for (const agent of agents) {
+        const row = createAgentRow(agent, selectedAgentId, options);
+        if (row)
+            list.appendChild(row);
+    }
+}
+function createConversationRow(conversation, selectedConversationId, options) {
+    const conversationId = String(conversation?.conversation_id || "");
+    if (!conversationId)
+        return null;
+    const language = options.language;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "communication-row" + (conversationId === selectedConversationId ? " selected" : "");
+    if (conversationId === selectedConversationId)
+        row.setAttribute("aria-current", "true");
+    const head = document.createElement("div");
+    head.className = "communication-row-head";
+    const title = document.createElement("span");
+    title.className = "communication-row-title";
+    title.textContent = String(conversation?.title || translate("Untitled Conversation", language));
+    const count = document.createElement("span");
+    count.className = "chip";
+    count.textContent = localizedCountLabel(conversation?.message_count, "message", "messages", language);
+    head.appendChild(title);
+    head.appendChild(count);
+    row.appendChild(head);
+    const meta = document.createElement("span");
+    meta.className = "communication-row-meta";
+    meta.textContent = conversationId
+        + " · " + localizedCountLabel(conversation?.participant_count, "participant", "participants", language)
+        + (language === "zh-CN" ? " · 序号 " : " · seq ") + String(conversation?.last_seq || 0);
+    row.appendChild(meta);
+    row.addEventListener("click", () => options.onSelect(conversationId));
+    return row;
+}
+function renderConversationRows(list, conversations, selectedConversationId, options) {
+    if (!list)
+        return;
+    while (list.firstChild)
+        list.removeChild(list.firstChild);
+    for (const conversation of conversations) {
+        const row = createConversationRow(conversation, selectedConversationId, options);
+        if (row)
+            list.appendChild(row);
+    }
+}
+function createConversationMessageCard(message, agents, options = {}) {
+    const language = options.language;
+    const author = message?.author || {};
+    const agentAuthored = String(author.participant_kind || "") === "agent";
+    const card = document.createElement("article");
+    card.className = "conversation-message" + (agentAuthored ? " agent-authored" : "");
+    const head = document.createElement("div");
+    head.className = "conversation-message-head";
+    const name = document.createElement("span");
+    name.className = "conversation-message-author";
+    name.textContent = agentAuthored
+        ? "Agent · " + String(author.display_name || author.handle || (author.agent_id ? deliveryAgentLabel(String(author.agent_id), agents) : "") || author.agent_id || translate("unknown", language))
+        : (language === "zh-CN" ? "人工 · " : "Human · ") + String(author.principal_kind || (language === "zh-CN" ? "凭证主体" : "credential principal"));
+    const seq = document.createElement("span");
+    seq.className = "muted small";
+    seq.textContent = "#" + String(message?.seq || 0) + " · " + communicationTimeLabel(message?.created_at_unix_ms, language);
+    head.appendChild(name);
+    head.appendChild(seq);
+    card.appendChild(head);
+    const meta = document.createElement("div");
+    meta.className = "conversation-message-meta";
+    const metaParts = [String(message?.message_id || "")];
+    if (author.agent_id)
+        metaParts.push(String(author.agent_id));
+    if (message?.reply_to)
+        metaParts.push((language === "zh-CN" ? "回复 " : "reply to ") + String(message.reply_to));
+    meta.textContent = metaParts.join(" · ");
+    card.appendChild(meta);
+    const body = document.createElement("div");
+    body.className = "conversation-message-body";
+    body.textContent = String(message?.body || "");
+    card.appendChild(body);
+    const deliveries = Array.isArray(message?.deliveries) ? message.deliveries : [];
+    const delivery = document.createElement("div");
+    delivery.className = "conversation-message-deliveries";
+    delivery.textContent = deliveries.length
+        ? (language === "zh-CN" ? "Agent 收件箱：" : "Agent Inbox: ") + deliveries.map((item) => deliveryAgentLabel(String(item?.recipient_agent_id || ""), agents) + " " + translate(String(item?.state || "unknown"), language)).join(" · ")
+        : (language === "zh-CN" ? "没有 Agent 收件箱投递 · 仅保留记录 / 人工房间" : "No Agent Inbox delivery · transcript / Human room only");
+    card.appendChild(delivery);
+    return card;
+}
+function renderConversationMessages(transcript, messages, agents, options = {}) {
+    if (!transcript)
+        return;
+    while (transcript.firstChild)
+        transcript.removeChild(transcript.firstChild);
+    for (const message of messages) {
+        const card = createConversationMessageCard(message, agents, options);
+        transcript.appendChild(card);
+    }
+    transcript.scrollTop = transcript.scrollHeight;
+}
+function createInboxDeliveryCard(item, agents, options) {
+    const language = options.language;
+    const row = document.createElement("article");
+    row.className = "communication-row inbox-delivery";
+    const head = document.createElement("div");
+    head.className = "communication-row-head";
+    const title = document.createElement("span");
+    title.className = "communication-row-title";
+    title.textContent = String(item?.conversation_title || translate("Untitled Conversation", language)) + " · #" + String(item?.message?.seq || 0);
+    const consume = document.createElement("button");
+    consume.type = "button";
+    consume.className = "text-button";
+    consume.textContent = translate("Consume", language);
+    consume.addEventListener("click", () => options.onConsume(String(item?.delivery_id || "")));
+    head.appendChild(title);
+    head.appendChild(consume);
+    row.appendChild(head);
+    const meta = document.createElement("span");
+    meta.className = "communication-row-meta";
+    meta.textContent = String(item?.delivery_id || "")
+        + (language === "zh-CN" ? " · 来自 " : " · from ")
+        + (item?.message?.author?.participant_kind === "agent"
+            ? deliveryAgentLabel(String(item.message.author.agent_id || ""), agents)
+            : (language === "zh-CN" ? "人工" : "Human"));
+    row.appendChild(meta);
+    const body = document.createElement("div");
+    body.className = "inbox-message-preview";
+    body.textContent = String(item?.message?.body || "");
+    row.appendChild(body);
+    return row;
+}
+function renderInboxDeliveryCards(container, inbox, agents, options) {
+    if (!container)
+        return;
+    while (container.firstChild)
+        container.removeChild(container.firstChild);
+    for (const item of inbox) {
+        const row = createInboxDeliveryCard(item, agents, options);
+        container.appendChild(row);
+    }
+}
+
+function formatUpdatedTime(timestamp, language) {
+    if (typeof timestamp !== "number")
+        return translate("time unavailable", language);
+    return new Date(timestamp * 1000).toLocaleTimeString(language === "zh-CN" ? "zh-CN" : "en");
+}
+function formatSessionDateTime(timestamp, language) {
+    if (typeof timestamp !== "number")
+        return translate("time unavailable", language);
+    return new Date(timestamp * 1000).toLocaleString(language === "zh-CN" ? "zh-CN" : "en");
+}
+function formatLivenessPresentation(session, language) {
+    const presentation = workflowSessionLivenessPresentation(session);
+    if (language !== "zh-CN")
+        return presentation;
+    let label = translate(String(presentation.label || "idle"), language);
+    if (presentation.state === "idle" && String(presentation.label || "").startsWith("idle · ")) {
+        label = translate("idle", language) + " · " + String(presentation.label).slice("idle · ".length);
+    }
+    return { ...presentation, label, tooltip: translate(String(presentation.tooltip || ""), language) };
+}
+function activityKindLabel(activity, language) {
+    const kind = String(activity && activity.kind || "Activity");
+    if (activity && activity.job_handoff) {
+        if (kind === "Tested")
+            return language === "zh-CN" ? "测试" : "Test";
+        if (kind === "Ran")
+            return language === "zh-CN" ? "命令" : "Command";
+    }
+    if (kind === "Explored" && activity && typeof activity.group_count === "number") {
+        return (language === "zh-CN" ? "探索 ×" : "Explored ×") + activity.group_count;
+    }
+    if (language !== "zh-CN")
+        return kind;
+    const labels = {
+        Activity: "活动",
+        Progress: "进度",
+        Explored: "探索",
+        Edited: "编辑",
+        Tested: "测试",
+        Ran: "运行",
+        Reviewed: "审查",
+    };
+    return labels[kind] || kind;
+}
+function durationLabel(durationMs) {
+    if (durationMs < 1000)
+        return durationMs + " ms";
+    return (durationMs / 1000).toFixed(durationMs < 10000 ? 1 : 0) + " s";
+}
+function activityFacts(activity, includeTiming, language) {
+    const facts = [];
+    if (activity && typeof activity.group_count === "number") {
+        if (Array.isArray(activity.group_kinds) && activity.group_kinds.length) {
+            facts.push(activity.group_kinds.map(String).join(" / "));
+        }
+        if (Array.isArray(activity.group_tools) && activity.group_tools.length) {
+            facts.push(activity.group_tools.map(String).join(", "));
+        }
+    }
+    else if (activity && activity.tool) {
+        facts.push(String(activity.tool));
+    }
+    if (activity && activity.kind === "Progress") {
+        facts.push(language === "zh-CN" ? "仅供参考" : "informational");
+    }
+    else if (activity && activity.job_handoff) {
+        facts.push(language === "zh-CN" ? "已移交" : "handed off");
+        if (activity.execution_state) {
+            facts.push((language === "zh-CN" ? "执行 " : "execution ") + translate(String(activity.execution_state), language));
+        }
+    }
+    else if (activity && activity.state) {
+        facts.push(translate(String(activity.state), language));
+    }
+    if (includeTiming && activity && typeof activity.duration_ms === "number") {
+        facts.push(durationLabel(activity.duration_ms));
+    }
+    if (activity && typeof activity.exit_code === "number") {
+        // Label it explicitly as process exit code so that `state = failed` + `exit_code = 0`
+        // is clearly understood as a process exit code and never confused with action success.
+        facts.push((language === "zh-CN" ? "进程退出 " : "process exit ") + activity.exit_code);
+    }
+    if (activity && activity.job_id) {
+        facts.push("job " + String(activity.job_id));
+    }
+    if (includeTiming && activity && typeof activity.started_at === "number") {
+        facts.push(new Date(activity.started_at * 1000).toLocaleTimeString(language === "zh-CN" ? "zh-CN" : "en"));
+    }
+    return facts;
+}
+function activityDescription(activity, language) {
+    if (!activity)
+        return "";
+    const parts = [activityKindLabel(activity, language), ...activityFacts(activity, false, language)];
+    if (activity.summary && !activity.job_handoff)
+        parts.push(String(activity.summary));
+    return parts.join(" · ");
+}
+function appendActivityPreview(parent, label, activity, language) {
+    if (!activity)
+        return;
+    const row = document.createElement("div");
+    row.className = "activity-preview muted small";
+    const prefix = document.createElement("span");
+    prefix.className = "activity-preview-label";
+    prefix.textContent = label;
+    const text = document.createElement("span");
+    text.textContent = activityDescription(activity, language);
+    row.appendChild(prefix);
+    row.appendChild(text);
+    parent.appendChild(row);
+}
+function createTimelineEvent(activity, language) {
+    const item = document.createElement("li");
+    item.className = "timeline-event";
+    if (activity && activity.kind === "Progress")
+        item.classList.add("reported-progress");
+    if (activity && ["failed", "timed_out"].includes(String(activity.state || "")))
+        item.classList.add("failed");
+    const head = document.createElement("div");
+    head.className = "timeline-head";
+    const kind = document.createElement("span");
+    kind.className = "timeline-kind";
+    kind.textContent = activityKindLabel(activity, language);
+    const meta = document.createElement("span");
+    meta.className = "muted small";
+    meta.textContent = activityFacts(activity, true, language).join(" · ");
+    head.appendChild(kind);
+    head.appendChild(meta);
+    item.appendChild(head);
+    if (activity && activity.summary) {
+        const body = document.createElement("div");
+        body.className = "timeline-body small";
+        body.textContent = String(activity.summary);
+        item.appendChild(body);
+    }
+    if (activity && Array.isArray(activity.paths) && activity.paths.length) {
+        const paths = document.createElement("div");
+        paths.className = "muted small";
+        paths.textContent = activity.paths.map(String).join(" · ");
+        item.appendChild(paths);
+    }
+    return item;
+}
+function renderTimelineEvents(container, activities, language) {
+    if (!container)
+        return;
+    while (container.firstChild)
+        container.removeChild(container.firstChild);
+    for (const activity of activities) {
+        const item = createTimelineEvent(activity, language);
+        container.appendChild(item);
+    }
+}
+
+const RUNTIME_CREDENTIAL_SESSION_KEY = "webcodex.runtime.credential.v1";
+const APPEARANCE_STORAGE_KEY = "webcodex.runtime.appearance.v1";
+const WORKSPACE_VIEW_STORAGE_KEY = "webcodex.runtime.workspace-view.v1";
+const DRAFT_STORAGE_PREFIX = "webcodex.runtime.draft.v1.";
+const DEVICE_DISCLOSURE_STORAGE_PREFIX = "webcodex.runtime.runner-open.v1.";
+const APPEARANCE_MEDIA_QUERY = "(prefers-color-scheme: light)";
+function appearancePreference(value) {
+    return value === "light" || value === "dark" || value === "system" ? value : "system";
+}
+function loadAppearancePreference() {
+    try {
+        return appearancePreference(window.localStorage.getItem(APPEARANCE_STORAGE_KEY));
+    }
+    catch {
+        return "system";
+    }
+}
+function persistAppearancePreference(preference) {
+    try {
+        window.localStorage.setItem(APPEARANCE_STORAGE_KEY, preference);
+    }
+    catch {
+        /* Storage can be unavailable in hardened browser contexts. */
+    }
+}
+function resolvedAppearance(preference, prefersLight) {
+    if (preference !== "system")
+        return preference;
+    return prefersLight ? "light" : "dark";
+}
+function workspaceViewPreference(value) {
+    return value === "operations" || value === "windows" ? value : "sessions";
+}
+function loadWorkspaceViewPreference() {
+    try {
+        return workspaceViewPreference(window.localStorage.getItem(WORKSPACE_VIEW_STORAGE_KEY));
+    }
+    catch {
+        return "sessions";
+    }
+}
+function persistWorkspaceViewPreference(view) {
+    try {
+        window.localStorage.setItem(WORKSPACE_VIEW_STORAGE_KEY, view);
+    }
+    catch {
+        /* Storage can be unavailable in hardened browser contexts. */
+    }
+}
+function loadRememberedRuntimeCredential() {
+    try {
+        return window.sessionStorage.getItem(RUNTIME_CREDENTIAL_SESSION_KEY)?.trim() || "";
+    }
+    catch {
+        return "";
+    }
+}
+function persistRuntimeCredentialForTab(token, remember) {
+    try {
+        if (remember && token) {
+            window.sessionStorage.setItem(RUNTIME_CREDENTIAL_SESSION_KEY, token);
+        }
+        else {
+            window.sessionStorage.removeItem(RUNTIME_CREDENTIAL_SESSION_KEY);
+        }
+    }
+    catch {
+        /* Storage can be unavailable in hardened browser contexts. */
+    }
+}
+function clearRememberedRuntimeCredential() {
+    try {
+        window.sessionStorage.removeItem(RUNTIME_CREDENTIAL_SESSION_KEY);
+    }
+    catch {
+        /* Storage can be unavailable in hardened browser contexts. */
+    }
+}
+function currentDraftStorageKey(project, sessionId) {
+    const projectId = String(project || "");
+    const workflowSessionId = String(sessionId || "");
+    return projectId && workflowSessionId
+        ? DRAFT_STORAGE_PREFIX + encodeURIComponent(projectId) + "." + encodeURIComponent(workflowSessionId)
+        : "";
+}
+function loadDraft(project, sessionId) {
+    const key = currentDraftStorageKey(project, sessionId);
+    if (!key)
+        return "";
+    try {
+        return window.sessionStorage.getItem(key) || "";
+    }
+    catch {
+        return "";
+    }
+}
+function saveDraft(project, sessionId, text) {
+    const key = currentDraftStorageKey(project, sessionId);
+    if (!key)
+        return;
+    try {
+        if (text)
+            window.sessionStorage.setItem(key, text);
+        else
+            window.sessionStorage.removeItem(key);
+    }
+    catch {
+        /* Draft remains in active input when storage is unavailable. */
+    }
+}
+function clearDraft(project, sessionId) {
+    const key = currentDraftStorageKey(project, sessionId);
+    if (!key)
+        return;
+    try {
+        window.sessionStorage.removeItem(key);
+    }
+    catch {
+        /* No-op in hardened browser contexts. */
+    }
+}
+function clearRuntimeDrafts() {
+    try {
+        const keys = [];
+        for (let index = 0; index < window.sessionStorage.length; index += 1) {
+            const key = window.sessionStorage.key(index);
+            if (key?.startsWith(DRAFT_STORAGE_PREFIX))
+                keys.push(key);
+        }
+        for (const key of keys)
+            window.sessionStorage.removeItem(key);
+    }
+    catch {
+        /* No-op in hardened browser contexts. */
+    }
+}
+function deviceDisclosureStorageKey(clientId) {
+    return DEVICE_DISCLOSURE_STORAGE_PREFIX + encodeURIComponent(clientId);
+}
+function storedDeviceDisclosure(clientId) {
+    try {
+        const value = window.localStorage.getItem(deviceDisclosureStorageKey(clientId));
+        return value === "open" ? true : value === "closed" ? false : null;
+    }
+    catch {
+        return null;
+    }
+}
+function persistDeviceDisclosure(clientId, open) {
+    try {
+        window.localStorage.setItem(deviceDisclosureStorageKey(clientId), open ? "open" : "closed");
+    }
+    catch {
+        /* Disclosure remains active for current render. */
+    }
+}
+
+function pendingAttentionCount(attention) {
+    return ["open_risks", "open_todos", "open_questions", "open_guidance"].reduce((total, key) => total + (typeof attention?.[key] === "number" ? Math.max(0, Math.floor(attention[key])) : 0), 0);
+}
+function runnerAttentionCount(runner) {
+    return pendingAttentionCount(runner?.sessions?.attention);
+}
+function attentionLabel(attention, language) {
+    const parts = [];
+    for (const [key, singular] of [
+        ["open_risks", "risk"],
+        ["open_todos", "todo"],
+        ["open_questions", "question"],
+        ["open_guidance", "guidance"],
+    ]) {
+        const count = typeof attention?.[key] === "number" ? attention[key] : 0;
+        if (count)
+            parts.push(localizedCountLabel(count, singular, singular + "s", language));
+    }
+    return parts.length ? parts.join(" · ") : translate("No retained pending attention", language);
+}
+function formatProjectIdentity(project, language) {
+    if (language !== "zh-CN")
+        return runtimeProjectIdentityText(project);
+    if (!project || typeof project.id !== "string" || !project.id) {
+        return translate("No project selected", language);
+    }
+    const runner = typeof project.client_id === "string" && project.client_id
+        ? project.client_id
+        : translate("unknown", language);
+    const path = typeof project.path === "string" && project.path ? project.path : "不可用";
+    return "运行器：" + runner + " · 项目：" + project.id + " · 工作空间：" + path;
+}
+function extractProjectSelectorDevices(projects, knownDevices = [], runnerRows = [], selectedDevice = "") {
+    const devices = new Set(knownDevices);
+    for (const device of runtimeDeviceIds(projects))
+        devices.add(device);
+    for (const runner of runnerRows) {
+        const clientId = typeof runner?.client_id === "string" ? runner.client_id : "";
+        if (clientId)
+            devices.add(clientId);
+    }
+    if (selectedDevice)
+        devices.add(selectedDevice);
+    return Array.from(devices).sort((left, right) => left.localeCompare(right));
+}
+function formatProjectLabel(project) {
+    const name = project && project.name ? String(project.name) : "";
+    const id = project && project.id ? String(project.id) : "";
+    const identity = name && name !== id ? name + " — " + id : id;
+    const status = project && project.connected ? String(project.agent_status || "online") : "offline";
+    return identity + " · " + status;
+}
+function mergeEffectiveProjects(projects, homeProjectRows = []) {
+    const aggregates = new Map();
+    for (const row of homeProjectRows) {
+        if (row && typeof row.id === "string")
+            aggregates.set(row.id, row);
+    }
+    return (Array.isArray(projects) ? projects : []).map((project) => {
+        const aggregate = aggregates.get(String(project?.id || ""));
+        return aggregate ? { ...project, sessions: aggregate.sessions } : project;
+    });
+}
+function formatRuntimeOverviewMetrics(data, language) {
+    if (!data)
+        return null;
+    const buildGitCommit = data.build_git_commit;
+    const buildText = buildGitCommit
+        ? (language === "zh-CN" ? "构建 " : "build ") +
+            buildGitCommit +
+            (data.build_git_dirty ? (language === "zh-CN" ? " · 有未提交更改" : " · dirty") : "")
+        : translate("build unavailable", language);
+    const projectsText = data.projects_available
+        ? localizedCountLabel(data.visible_projects, "visible Project", "visible Projects", language) +
+            (data.projects_truncated ? (language === "zh-CN" ? " · 不完整" : " · partial") : "")
+        : translate("project:read unavailable", language);
+    const jobsText = localizedCountLabel(data.active_jobs, "active Job", "active Jobs", language) +
+        (data.mixed_builds_present ? (language === "zh-CN" ? " · 存在混合构建" : " · mixed builds") : "");
+    const sessionsText = localizedCountLabel(data.workflow_sessions?.active, "active Session", "active Sessions", language) +
+        " · " +
+        localizedCountLabel(data.workflow_sessions?.running, "running Session", "running Sessions", language) +
+        (data.workflow_sessions?.truncated
+            ? language === "zh-CN"
+                ? " · 有界汇总"
+                : " · bounded aggregate"
+            : "");
+    const recentMeta = data.recent_sessions || {};
+    const recentStatusText = localizedCountLabel(recentMeta.returned, "Session", "Sessions", language) +
+        (recentMeta.truncated
+            ? (language === "zh-CN" ? " · 前 " : " · top ") + String(recentMeta.returned || 0)
+            : "") +
+        (recentMeta.scan_truncated
+            ? language === "zh-CN"
+                ? " · 扫描不完整"
+                : " · partial scan"
+            : "");
+    return {
+        identity: [data.service, data.version].filter(Boolean).join(" · "),
+        build: buildText,
+        runners: localizedCountLabel(data.runner_count, "Runner", "Runners", language),
+        alignment: localizedCountLabel(data.runners_online, "online", "online", language) +
+            " · " +
+            localizedCountLabel(data.runners_stale, "stale", "stale", language) +
+            " · " +
+            localizedCountLabel(data.runners_unavailable, "unavailable", "unavailable", language),
+        projects: projectsText,
+        jobs: jobsText,
+        attention: attentionLabel(data.workflow_sessions, language),
+        sessions: sessionsText,
+        recentStatus: recentStatusText,
+    };
+}
+
+function operationKey(prefix) {
+    const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    return prefix + "-" + random;
+}
+function idempotencyKeyFor(pending, fingerprint, prefix) {
+    return pending && pending.fingerprint === fingerprint
+        ? pending
+        : { fingerprint, key: operationKey(prefix) };
+}
+function formatCommunicationAvailability(readAvailable, manageAvailable, language) {
+    const available = readAvailable !== false;
+    if (readAvailable === null) {
+        return language === "zh-CN" ? "正在检查 communication:read…" : "communication:read checking…";
+    }
+    if (!available) {
+        return language === "zh-CN" ? "communication:read 不可用" : "communication:read unavailable";
+    }
+    return ("communication:read" +
+        (manageAvailable === false
+            ? language === "zh-CN"
+                ? " · 只读"
+                : " · read only"
+            : language === "zh-CN"
+                ? " · 当前视图每 30 秒刷新 · 端点租约每 30 秒续期"
+                : " · 30s refresh while visible · 30s endpoint lease renewal"));
+}
+function formatAgentCardRevision(agent, language) {
+    return ((language === "zh-CN" ? "配置版本 " : "Profile revision ") +
+        String(agent?.profile_revision || 0) +
+        (language === "zh-CN" ? " · 控制器代数 " : " · controller generation ") +
+        String(agent?.current_controller_generation || 0) +
+        (language === "zh-CN" ? " · 更新于 " : " · updated ") +
+        communicationTimeLabel(agent?.updated_at_unix_ms, language));
+}
+function formatAgentWakeStatus(agent, language) {
+    const unresolvedWakeCount = Number(agent?.unresolved_wake_count || 0);
+    const latestWakeState = String(agent?.latest_wake_state || "none");
+    return (localizedCountLabel(unresolvedWakeCount, "unresolved Wake", "unresolved Wakes", language) +
+        (language === "zh-CN" ? " · 最近状态 " : " · latest ") +
+        translate(latestWakeState, language) +
+        (language === "zh-CN"
+            ? " · 收件箱投递与唤醒消费彼此独立"
+            : " · Inbox Delivery and Wake consumption remain independent"));
+}
+function formatAgentEndpointStatus(endpoint, language) {
+    if (!endpoint) {
+        return language === "zh-CN"
+            ? "此窗口尚未作为该 Agent。Agent 卡片、对话、收件箱投递和唤醒意图仍会持久保留。"
+            : "This window is not acting as the Agent. Agent Card, Conversations, Inbox deliveries, and Wake Intents remain durable.";
+    }
+    return ((language === "zh-CN" ? "浏览器端点 " : "Browser Endpoint ") +
+        endpoint.endpoint_id +
+        " · " +
+        translate(endpoint.lifecycle, language) +
+        (language === "zh-CN" ? " · 代数 " : " · generation ") +
+        String(endpoint.controller_generation) +
+        (language === "zh-CN" ? " · 租约至 " : " · lease ") +
+        communicationTimeLabel(endpoint.lease_expires_at_unix_ms, language) +
+        (language === "zh-CN"
+            ? " · 运行控制台适配器：仅轮询（运行时可唤醒："
+            : " · Runtime Console adapter: polling only (runtime wake capable: ") +
+        String(endpoint.wake_capable) +
+        ")");
+}
+function formatConversationSeq(summary, detail, language) {
+    return ((language === "zh-CN" ? "序号 " : "seq ") +
+        String(summary?.last_seq || 0) +
+        " · " +
+        localizedCountLabel(summary?.message_count, "message", "messages", language) +
+        (Number(detail?.after_seq || 0) > 0 || detail?.truncated
+            ? language === "zh-CN"
+                ? " · 最近有界页面"
+                : " · recent bounded page"
+            : ""));
+}
+function validateAgentCreateInputs(handle, displayName, description, labelsRaw) {
+    const cleanHandle = handle.trim();
+    const cleanName = displayName.trim();
+    const cleanDescription = description.trim();
+    const labels = parseAgentIds(labelsRaw);
+    if (!cleanHandle || !cleanName) {
+        return { valid: false, error: "Handle and display name are required." };
+    }
+    const fingerprint = JSON.stringify({
+        handle: cleanHandle,
+        displayName: cleanName,
+        description: cleanDescription,
+        labels,
+    });
+    return {
+        valid: true,
+        data: {
+            handle: cleanHandle,
+            displayName: cleanName,
+            description: cleanDescription,
+            labels,
+            fingerprint,
+        },
+    };
+}
+function validateAgentUpdateInputs(handle, displayName, description, labelsRaw) {
+    const cleanHandle = handle.trim();
+    const cleanName = displayName.trim();
+    const cleanDescription = description.trim();
+    const specialtyLabels = parseAgentIds(labelsRaw);
+    if (!cleanHandle || !cleanName) {
+        return { valid: false, error: "Handle and display name are required." };
+    }
+    return {
+        valid: true,
+        data: {
+            handle: cleanHandle,
+            displayName: cleanName,
+            description: cleanDescription,
+            specialtyLabels,
+        },
+    };
+}
+function validateConversationCreateInputs(title, agentIdsRaw, defaultAgentId = "") {
+    const cleanTitle = title.trim();
+    const agentIds = parseAgentIds(agentIdsRaw || defaultAgentId);
+    if (agentIds.length === 0) {
+        return { valid: false, error: "At least one Agent id is required." };
+    }
+    const fingerprint = JSON.stringify({ title: cleanTitle, agentIds: [...agentIds].sort() });
+    return {
+        valid: true,
+        data: {
+            title: cleanTitle,
+            agentIds,
+            fingerprint,
+        },
+    };
+}
+
+const RUNTIME_ICON_PATHS = {
+    folder: ["M3 6h7l2 2h9v10H3V6Z"],
+    monitor: ["M4 5h16v12H4V5Z", "M8 21h8", "M12 17v4"],
+    message: ["M5 5h14v12H9l-4 3V5Z", "M9 9h6", "M9 13h4"],
+    reply: ["m10 8-5 4 5 4", "M5 12h7a6 6 0 0 1 6 6"],
+    edit: ["m4 16-.5 4.5L8 20l10.5-10.5-4-4L4 16Z", "m12.5 7.5 4 4"],
+    trash: ["M4 7h16", "M9 7V4h6v3", "m7 7 1 13h8l1-13", "M10 11v5", "M14 11v5"],
+    copy: ["M8 8h11v11H8V8Z", "M5 16H4V4h12v1"],
+};
+function runtimeIcon(name, className = "") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    if (className)
+        svg.setAttribute("class", className);
+    const paths = RUNTIME_ICON_PATHS[name] || [];
+    for (const pathData of paths) {
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", pathData);
+        svg.appendChild(path);
+    }
+    return svg;
+}
+function createMessageAction(label, iconName, action, danger = false) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "message-action" + (danger ? " danger" : "");
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.appendChild(runtimeIcon(iconName));
+    button.addEventListener("click", action);
+    return button;
+}
+
+function clearNavigationNode(node) {
+    while (node.firstChild)
+        node.removeChild(node.firstChild);
+}
+function appendNavigationChip(parent, text, extraClass = "") {
+    const chip = document.createElement("span");
+    chip.className = "chip" + (extraClass ? " " + extraClass : "");
+    chip.textContent = text;
+    parent.appendChild(chip);
+    return chip;
+}
+function formatWorkspaceBreadcrumb(project, language) {
+    const runnerText = project?.client_id
+        ? String(project.client_id)
+        : translate("Fleet", language);
+    const projectText = project
+        ? String(project.name || project.id || translate("Projects", language))
+        : translate("Projects", language);
+    return { runnerText, projectText };
+}
+function formatSelectedProjectIdentity(project, language) {
+    if (language !== "zh-CN") {
+        return runtimeProjectIdentityText(project);
+    }
+    return formatProjectIdentity(project, language);
+}
+function formatSessionWorkspaceIdentity(project, language) {
+    return formatProjectIdentity(project, language);
+}
+function formatDeviceStatusText(devicesCount, filter, language) {
+    if (!devicesCount) {
+        return language === "zh-CN" ? "没有已授权运行器" : "No authorized Runners";
+    }
+    const base = localizedCountLabel(devicesCount, "authorized Runner", "authorized Runners", language);
+    if (filter) {
+        return base + (language === "zh-CN" ? " · 已筛选" : " · filtered");
+    }
+    return base + " · " + translate("All Runners", language);
+}
+function formatProjectStatusText(returnedProjects, totalProjects, truncated, filter, query, language) {
+    const scope = language === "zh-CN"
+        ? (filter ? " · 位于 " + filter : " · 跨全部设备")
+        : (filter ? " on " + filter : " across fleet");
+    const queryActive = !!String(query || "").trim();
+    if (truncated) {
+        return language === "zh-CN"
+            ? "已显示 " + String(returnedProjects) + " / " + String(totalProjects) + (queryActive ? " 个匹配项目" : " 个可见项目") + scope + " · 有界"
+            : String(returnedProjects) + " of " + String(totalProjects) + (queryActive ? " matching Projects shown" : " visible Projects shown") + scope + " · bounded";
+    }
+    const singular = queryActive ? "matching Project" : "visible Project";
+    return localizedCountLabel(totalProjects, singular, singular + "s", language) + scope;
+}
+function formatRunnerCountText(count, language) {
+    return localizedCountLabel(count, "Runner", "Runners", language);
+}
+function formatRecentSessionStatusText(meta, language) {
+    if (!meta)
+        return "";
+    return localizedCountLabel(meta.returned, "Session", "Sessions", language)
+        + (meta.truncated ? (language === "zh-CN" ? " · 前 " : " · top ") + String(meta.returned || 0) : "")
+        + (meta.scan_truncated ? (language === "zh-CN" ? " · 扫描不完整" : " · partial scan") : "");
+}
+function formatProjectWindowStatusText(returned, total, truncated, language) {
+    if (!truncated)
+        return "";
+    return language === "zh-CN"
+        ? String(returned) + " / " + String(total) + " 个窗口 · 有界"
+        : String(returned) + " of " + String(total) + " Windows · bounded";
+}
+function renderProjectSelectorTree(deviceSelect, projectList, sessionsPanel, options) {
+    const tr = (text) => translate(text, options.language);
+    const countLabel = (count, singular) => localizedCountLabel(count, singular, options.language);
+    const updatedLabel = (timestamp) => formatUpdatedTime(timestamp, options.language);
+    clearNavigationNode(deviceSelect);
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = tr("All Runners");
+    deviceSelect.appendChild(all);
+    for (const clientId of options.devices) {
+        const option = document.createElement("option");
+        option.value = clientId;
+        option.textContent = clientId;
+        deviceSelect.appendChild(option);
+    }
+    deviceSelect.value = options.projectDeviceFilter;
+    const rows = filterAndSortRuntimeProjects(options.effectiveProjects, options.projectDeviceFilter, "");
+    clearNavigationNode(projectList);
+    const projectsByDevice = new Map();
+    for (const project of rows) {
+        const clientId = String(project?.client_id || "unknown");
+        const deviceProjects = projectsByDevice.get(clientId) || [];
+        deviceProjects.push(project);
+        projectsByDevice.set(clientId, deviceProjects);
+    }
+    const visibleDevices = options.projectDeviceFilter ? [options.projectDeviceFilter] : options.devices;
+    let sessionsAttached = false;
+    let windowsAttached = false;
+    for (const clientId of visibleDevices) {
+        const deviceProjects = projectsByDevice.get(clientId) || [];
+        const runner = options.runnerRows.find((candidate) => String(candidate?.client_id || "") === clientId);
+        const connected = runner ? runner.connected !== false : deviceProjects.some((project) => project?.connected);
+        const group = document.createElement("details");
+        group.className = "device-group" + (connected ? " online" : " offline");
+        group.dataset.runnerId = clientId;
+        group.setAttribute("aria-label", options.language === "zh-CN" ? "设备 " + clientId : "Device " + clientId);
+        const storedDisclosure = options.storedDeviceDisclosure(clientId);
+        const defaultOpen = options.projectDeviceFilter ? true : String(options.selectedDevice || "") === clientId || clientId === visibleDevices[0];
+        group.open = resolveRunnerDisclosure(storedDisclosure, defaultOpen);
+        const deviceHead = document.createElement("summary");
+        deviceHead.className = "device-group-head";
+        const deviceIcon = document.createElement("span");
+        deviceIcon.className = "device-group-icon";
+        deviceIcon.setAttribute("aria-hidden", "true");
+        deviceIcon.appendChild(runtimeIcon("monitor"));
+        const deviceIdentity = document.createElement("div");
+        deviceIdentity.className = "device-group-identity";
+        const deviceName = document.createElement("strong");
+        deviceName.textContent = clientId;
+        const deviceMeta = document.createElement("span");
+        deviceMeta.className = "muted small";
+        const status = runner ? String(runner.status || (connected ? "online" : "offline")) : (connected ? "online" : "offline");
+        deviceMeta.textContent = tr(status) + " · " + countLabel(deviceProjects.length, "Project");
+        const deviceDot = document.createElement("span");
+        deviceDot.className = "device-group-dot";
+        deviceDot.title = tr(status);
+        deviceIdentity.appendChild(deviceName);
+        deviceIdentity.appendChild(deviceMeta);
+        deviceHead.appendChild(deviceIcon);
+        deviceHead.appendChild(deviceIdentity);
+        deviceHead.appendChild(deviceDot);
+        group.appendChild(deviceHead);
+        group.addEventListener("toggle", () => options.onPersistDeviceDisclosure(clientId, group.open));
+        const deviceProjectList = document.createElement("div");
+        deviceProjectList.className = "device-project-list";
+        if (deviceProjects.length === 0) {
+            const empty = document.createElement("p");
+            empty.className = "device-project-empty muted small";
+            empty.textContent = tr("No visible Projects");
+            deviceProjectList.appendChild(empty);
+        }
+        for (const project of deviceProjects) {
+            const workspace = document.createElement("details");
+            workspace.className = "workspace-group";
+            const disclosureKey = "webcodex.runtime.workspace-disclosure.v1." + encodeURIComponent(JSON.stringify([clientId, project.id]));
+            workspace.open = project.id === options.selectedProject;
+            try {
+                workspace.open = workspace.open && window.localStorage.getItem(disclosureKey) !== "closed";
+            }
+            catch { }
+            workspace.addEventListener("toggle", () => {
+                if (!workspace.isConnected || project.id !== options.selectedProject)
+                    return;
+                try {
+                    window.localStorage.setItem(disclosureKey, workspace.open ? "open" : "closed");
+                }
+                catch { }
+            });
+            const row = document.createElement("summary");
+            row.className = "project-row" + (project.id === options.selectedProject ? " selected" : "");
+            if (project.id === options.selectedProject)
+                row.setAttribute("aria-current", "true");
+            const projectName = String(project.name || project.id || "");
+            const projectId = String(project.id || "");
+            const projectPath = String(project.path || "");
+            row.title = [projectName, projectId && projectId !== projectName ? projectId : "", projectPath].filter(Boolean).join(" · ");
+            row.setAttribute("aria-label", row.title || projectName);
+            const projectIcon = document.createElement("span");
+            projectIcon.className = "project-row-icon";
+            projectIcon.setAttribute("aria-hidden", "true");
+            projectIcon.appendChild(runtimeIcon("folder"));
+            const main = document.createElement("div");
+            main.className = "project-row-main";
+            const heading = document.createElement("div");
+            heading.className = "project-row-heading";
+            const title = document.createElement("div");
+            title.className = "project-row-title";
+            title.textContent = projectName;
+            const signals = document.createElement("div");
+            signals.className = "project-row-signals";
+            const addSignal = (text, tone, signalTitle = text) => {
+                const signal = document.createElement("span");
+                signal.className = "project-row-state " + tone;
+                signal.textContent = text;
+                signal.title = signalTitle;
+                signals.appendChild(signal);
+            };
+            const runningSessions = Math.max(0, Number(project.sessions?.running_sessions || 0));
+            const projectAttention = pendingAttentionCount(project.sessions?.attention);
+            if (!project.connected)
+                addSignal(tr("OFFLINE"), "tone-fail");
+            else if (project.agent_status && project.agent_status !== "online")
+                addSignal(tr(String(project.agent_status).toUpperCase()), "tone-warn");
+            if (project.id === options.selectedProject && (options.selectedProjectWindowActiveCount ?? 0) > 0) {
+                addSignal(options.language === "zh-CN" ? "窗口活跃" : "WINDOW ACTIVE", "tone-runtime", options.language === "zh-CN" ? "活跃的主机窗口请求" : "Active host window request");
+            }
+            if (runningSessions > 0) {
+                addSignal(options.language === "zh-CN" ? "运行中 " + runningSessions : runningSessions + " running", "tone-runtime", countLabel(runningSessions, "running Session"));
+            }
+            if (projectAttention > 0) {
+                addSignal(options.language === "zh-CN" ? "待处理 " + projectAttention : projectAttention + " attention", "tone-warn", attentionLabel(project.sessions?.attention));
+            }
+            heading.appendChild(title);
+            heading.appendChild(signals);
+            main.appendChild(heading);
+            const meta = document.createElement("div");
+            meta.className = "project-row-meta muted small";
+            const metaParts = [];
+            if (project.sessions) {
+                metaParts.push(project.sessions.sessions_truncated
+                    ? options.language === "zh-CN"
+                        ? String(project.sessions.returned_sessions || 0) + " / " + String(project.sessions.retained_sessions || 0) + " 个会话"
+                        : String(project.sessions.returned_sessions || 0) + " / " + String(project.sessions.retained_sessions || 0) + " Sessions"
+                    : countLabel(project.sessions.retained_sessions, "Session"));
+                if (project.id === options.selectedProject && typeof options.selectedProjectWindowCount === "number") {
+                    metaParts.push(countLabel(options.selectedProjectWindowCount, "Window"));
+                }
+                if (typeof project.sessions.latest_updated_at === "number") {
+                    metaParts.push((options.language === "zh-CN" ? "更新于 " : "updated ") + updatedLabel(project.sessions.latest_updated_at));
+                }
+                if (project.sessions.sessions_truncated)
+                    metaParts.push(options.language === "zh-CN" ? "扫描不完整" : "scan partial");
+            }
+            meta.textContent = metaParts.join(" · ");
+            if (metaParts.length)
+                main.appendChild(meta);
+            row.appendChild(projectIcon);
+            row.appendChild(main);
+            const select = () => options.onSelectProject(String(project.client_id || ""), String(project.id || ""));
+            row.addEventListener("click", (event) => {
+                if (project.id === options.selectedProject)
+                    return;
+                event.preventDefault();
+                try {
+                    window.localStorage.setItem(disclosureKey, "open");
+                }
+                catch { }
+                select();
+            });
+            workspace.appendChild(row);
+            deviceProjectList.appendChild(workspace);
+            if (project.id === options.selectedProject) {
+                if (sessionsPanel) {
+                    sessionsPanel.hidden = false;
+                    workspace.appendChild(sessionsPanel);
+                    sessionsAttached = true;
+                }
+                if (options.windowPanel) {
+                    options.windowPanel.hidden = false;
+                    workspace.appendChild(options.windowPanel);
+                    windowsAttached = true;
+                }
+            }
+        }
+        group.appendChild(deviceProjectList);
+        projectList.appendChild(group);
+    }
+    if (sessionsPanel && !sessionsAttached) {
+        sessionsPanel.hidden = true;
+        projectList.appendChild(sessionsPanel);
+    }
+    if (options.windowPanel && !windowsAttached) {
+        options.windowPanel.hidden = true;
+        projectList.appendChild(options.windowPanel);
+    }
+}
+function renderRunnerFleetRows(node, runners, options) {
+    const tr = (text) => translate(text, options.language);
+    const countLabel = (count, singular) => localizedCountLabel(count, singular, options.language);
+    clearNavigationNode(node);
+    for (const runner of runners) {
+        const clientId = String(runner?.client_id || "");
+        if (!clientId)
+            continue;
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "fleet-row" + (clientId === options.selectedDevice ? " selected" : "");
+        if (clientId === options.selectedDevice)
+            row.setAttribute("aria-current", "true");
+        const main = document.createElement("div");
+        main.className = "fleet-row-main";
+        const title = document.createElement("div");
+        title.className = "fleet-row-title";
+        title.textContent = clientId;
+        const meta = document.createElement("div");
+        meta.className = "muted small fleet-row-meta";
+        const metaParts = [
+            tr(runner.connected ? String(runner.status || "online") : "offline"),
+            runner.version ? "v" + String(runner.version) : (options.language === "zh-CN" ? "版本不可用" : "version unavailable"),
+            runner.transport ? String(runner.transport) : (options.language === "zh-CN" ? "传输方式不可用" : "transport unavailable"),
+            runner.source_alignment
+                ? (options.language === "zh-CN" ? "源码 " : "source ") + tr(String(runner.source_alignment))
+                : (options.language === "zh-CN" ? "源码对齐状态不可用" : "source alignment unavailable"),
+            typeof runner.last_seen_age_secs === "number"
+                ? (options.language === "zh-CN" ? String(runner.last_seen_age_secs) + " 秒前在线" : "seen " + String(runner.last_seen_age_secs) + "s ago")
+                : (options.language === "zh-CN" ? "最后在线时间不可用" : "last seen unavailable"),
+        ];
+        if (runner.build_git_commit)
+            metaParts.push((options.language === "zh-CN" ? "构建 " : "build ") + String(runner.build_git_commit));
+        meta.textContent = metaParts.join(" · ");
+        main.appendChild(title);
+        main.appendChild(meta);
+        const signals = document.createElement("div");
+        signals.className = "fleet-row-signals";
+        const working = Math.max(Number(runner.jobs_running || 0), Number(runner.sessions?.running_sessions || 0));
+        const attention = runnerAttentionCount(runner);
+        if (working > 0)
+            appendNavigationChip(signals, tr("RUNNING"), "tone-runtime");
+        if (attention > 0)
+            appendNavigationChip(signals, tr("ATTENTION") + " " + attention, "tone-warn");
+        if (!runner.connected)
+            appendNavigationChip(signals, tr("OFFLINE"), "tone-fail");
+        else if (String(runner.status || "") === "stale")
+            appendNavigationChip(signals, tr("STALE"), "tone-warn");
+        if (runner.source_alignment === "different")
+            appendNavigationChip(signals, tr("SOURCE DIFFERENT"), "tone-fail");
+        if (runner.version_matches_server === false)
+            appendNavigationChip(signals, tr("BUILD DIFFERENT"), "tone-warn");
+        if (runner.build_git_dirty === true)
+            appendNavigationChip(signals, tr("DIRTY"), "tone-warn");
+        const facts = document.createElement("div");
+        facts.className = "muted small fleet-row-facts";
+        const projectFact = runner.projects_scan_partial
+            ? options.language === "zh-CN" ? String(runner.projects_scanned || 0) + " 个项目已扫描" : String(runner.projects_scanned || 0) + " Projects scanned"
+            : countLabel(runner.projects_scanned, "visible Project");
+        const factParts = [
+            countLabel(runner.active_jobs, "active Job"),
+            countLabel(runner.jobs_running, "running Job"),
+            countLabel(runner.jobs_queued, "queued Job"),
+            typeof runner.job_concurrency_limit === "number"
+                ? (options.language === "zh-CN" ? "并发上限 " : "limit ") + runner.job_concurrency_limit
+                : (options.language === "zh-CN" ? "并发上限不可用" : "limit unavailable"),
+            projectFact,
+            countLabel(runner.sessions?.active_sessions, "active Session"),
+        ];
+        if (runner.projects_scan_partial)
+            factParts.push(options.language === "zh-CN" ? "设备群扫描不完整" : "fleet scan partial");
+        if (runner.sessions?.sessions_truncated)
+            factParts.push(options.language === "zh-CN" ? "会话扫描不完整" : "Session scan partial");
+        facts.textContent = factParts.join(" · ");
+        row.appendChild(main);
+        row.appendChild(signals);
+        row.appendChild(facts);
+        const select = () => options.onSelectRunner(clientId);
+        row.addEventListener("click", select);
+        node.appendChild(row);
+    }
+}
+function renderRecentSessionRows(node, sessions, options) {
+    const tr = (text) => translate(text, options.language);
+    const updatedLabel = (timestamp) => formatUpdatedTime(timestamp, options.language);
+    clearNavigationNode(node);
+    for (const session of sessions) {
+        const sessionId = String(session?.session_id || "");
+        const projectId = String(session?.project_id || "");
+        const clientId = String(session?.client_id || "");
+        if (!sessionId || !projectId || !clientId)
+            continue;
+        const selected = projectId === options.selectedProject && sessionId === options.selectedSessionId;
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "recent-session-row" + (selected ? " selected" : "");
+        if (selected)
+            row.setAttribute("aria-current", "true");
+        const main = document.createElement("div");
+        main.className = "recent-session-main";
+        const title = document.createElement("div");
+        title.className = "session-title";
+        title.textContent = session.title ? String(session.title) : sessionId;
+        const location = document.createElement("div");
+        location.className = "muted small recent-session-location";
+        location.textContent = clientId + " · " + String(session.project_name || projectId) + (session.project_name && session.project_name !== projectId ? " · " + projectId : "");
+        main.appendChild(title);
+        main.appendChild(location);
+        const signals = document.createElement("div");
+        signals.className = "recent-session-signals";
+        const liveness = formatLivenessPresentation(session, options.language);
+        if (liveness.state === "working")
+            appendNavigationChip(signals, tr("RUNNING"), "tone-runtime");
+        const attention = attentionLabel(session.overview?.attention);
+        if (pendingAttentionCount(session.overview?.attention) > 0)
+            appendNavigationChip(signals, attention, "tone-warn");
+        const lifecycle = document.createElement("span");
+        lifecycle.className = "muted small";
+        lifecycle.textContent = [tr(String(session.lifecycle || "")), liveness.label, (options.language === "zh-CN" ? "更新于 " : "updated ") + updatedLabel(session.updated_at)].filter(Boolean).join(" · ");
+        lifecycle.title = liveness.tooltip;
+        signals.appendChild(lifecycle);
+        row.appendChild(main);
+        row.appendChild(signals);
+        appendActivityPreview(row, tr("Now"), session.current_activity, options.language);
+        appendActivityPreview(row, tr("Last"), session.last_activity, options.language);
+        const select = () => options.onSelectSession(session);
+        row.addEventListener("click", select);
+        node.appendChild(row);
+    }
+}
+
+function clearCollaborationNode(node) {
+    while (node.firstChild)
+        node.removeChild(node.firstChild);
+}
+function collaborationPhaseLabel(phase, language) {
+    switch (phase) {
+        case "live": return translate("Live", language);
+        case "reconnecting": return translate("Reconnecting", language);
+        case "paused": return translate("Paused", language);
+        default: return translate("Idle", language);
+    }
+}
+function syncCollaborationComposerLayout(body = typeof document !== "undefined" ? document.getElementById("runtime-message-body") : null, composer = typeof document !== "undefined" ? document.getElementById("runtime-collaboration-form") : null, send = typeof document !== "undefined" ? document.getElementById("runtime-message-send") : null) {
+    const hasContent = !!body?.value.trim();
+    composer?.classList.toggle("has-content", hasContent);
+    send?.classList.toggle("is-ready", hasContent);
+    if (!body)
+        return;
+    body.style.height = "0px";
+    const nextHeight = Math.min(Math.max(body.scrollHeight, 44), 180);
+    body.style.height = nextHeight + "px";
+    body.style.overflowY = body.scrollHeight > 180 ? "auto" : "hidden";
+}
+function formatComposerOptionSummary(kind, priority, requiresAck, language) {
+    const signals = [];
+    if (kind && kind !== "note")
+        signals.push(translate(kind, language));
+    if (priority && priority !== "normal")
+        signals.push(translate(priority, language));
+    if (requiresAck)
+        signals.push(language === "zh-CN" ? "需确认" : "ACK");
+    return {
+        label: signals.length ? signals.join(" · ") : translate("Options", language),
+        hasSelection: signals.length > 0,
+    };
+}
+function runtimeSearchMatches(query, values) {
+    const text = values.filter((value) => typeof value === "string").join(" ").toLocaleLowerCase();
+    return query.trim().toLocaleLowerCase().split(/\s+/).every((term) => text.includes(term));
+}
+function filterCollaborationCards(cards, separators, messages, query) {
+    let matches = 0;
+    for (const card of cards) {
+        const message = messages.find((entry) => entry && entry.message_id === card.dataset.messageId);
+        const visible = runtimeSearchMatches(query, [message?.message, message?.resolution, message?.message_id, message?.author_session_id]);
+        card.hidden = !visible;
+        if (visible)
+            matches++;
+    }
+    for (const node of separators) {
+        node.hidden = !!query.trim();
+    }
+    return { matches, total: cards.length };
+}
+function renderLatestAgentMessage(container, messages, locallyAuthoredMessageIds, language) {
+    const updatedLabel = (timestamp) => formatUpdatedTime(timestamp, language);
+    const sides = runtimeCollaborationMessageSides(messages, locallyAuthoredMessageIds);
+    const latest = [...messages].reverse().find((message) => sides.get(String(message.message_id)) === "incoming" && !message.superseded_by_message_id && message.closure_kind !== "withdrawn");
+    clearCollaborationNode(container);
+    if (latest) {
+        appendRichMessage(container, latest.message);
+        const time = document.createElement("p");
+        time.className = "muted small";
+        time.textContent = updatedLabel(latest.created_at);
+        container.appendChild(time);
+    }
+    else {
+        container.textContent = language === "zh-CN"
+            ? "当前保留范围内暂无 Agent 留言。ACK 不包含回复正文；下方可查看模型报告的进度。"
+            : "No Agent message in the retained window. ACK contains no reply text; model-reported progress appears below.";
+    }
+}
+function renderCollaborationMessageCards(node, messages, options) {
+    const tr = (text) => translate(text, options.language);
+    const updatedLabel = (timestamp) => formatUpdatedTime(timestamp, options.language);
+    const byId = new Map();
+    const children = new Map();
+    for (const message of messages) {
+        const id = String(message?.message_id || "");
+        if (id)
+            byId.set(id, message);
+    }
+    for (const message of messages) {
+        const parent = typeof message?.reply_to === "string" ? message.reply_to : "";
+        if (parent && byId.has(parent)) {
+            const list = children.get(parent) || [];
+            list.push(message);
+            children.set(parent, list);
+        }
+    }
+    const messageSides = runtimeCollaborationMessageSides(messages, options.locallyAuthoredIds);
+    const visited = new Set();
+    let previousRenderedSide = "";
+    let previousRenderedDay = "";
+    const appendMessage = (message, depth, parentUnavailable) => {
+        const id = String(message?.message_id || "");
+        if (!id || visited.has(id))
+            return;
+        visited.add(id);
+        const card = document.createElement("article");
+        card.dataset.messageId = id;
+        card.className = "message-card " + String(message?.kind || "note") + (String(message?.status || "") === "resolved" ? " resolved" : "") + (parentUnavailable ? " retained-reply" : "");
+        const messageSide = messageSides.get(id) || "neutral";
+        card.classList.add(messageSide === "incoming" ? "agent-authored" : messageSide === "outgoing" ? "human-authored" : "provenance-unknown");
+        const createdAt = typeof message?.created_at === "number" ? message.created_at : 0;
+        const createdDate = createdAt ? new Date(createdAt * 1000) : null;
+        const dayKey = createdDate ? [createdDate.getFullYear(), createdDate.getMonth(), createdDate.getDate()].join("-") : "";
+        if (dayKey && dayKey !== previousRenderedDay) {
+            const separator = document.createElement("div");
+            separator.className = "message-date-separator";
+            const label = document.createElement("span");
+            label.textContent = createdDate?.toLocaleDateString(options.language === "zh-CN" ? "zh-CN" : "en", { month: "short", day: "numeric", year: "numeric" }) || "";
+            separator.appendChild(label);
+            node.appendChild(separator);
+            previousRenderedDay = dayKey;
+            previousRenderedSide = "";
+        }
+        card.classList.add(messageSide === "incoming" ? "message-incoming" : messageSide === "outgoing" ? "message-outgoing" : "message-neutral");
+        if (!options.previouslyRenderedMessageIds.has(id))
+            card.classList.add("message-entering");
+        if (previousRenderedSide === messageSide)
+            card.classList.add("message-group-continuation");
+        previousRenderedSide = messageSide;
+        if (depth > 0)
+            card.classList.add("message-thread");
+        const content = document.createElement("div");
+        content.className = "message-content";
+        const author = document.createElement("div");
+        author.className = "message-author";
+        const authorName = document.createElement("span");
+        authorName.className = "message-author-name";
+        authorName.textContent = messageSide === "incoming" ? tr("Agent") : messageSide === "outgoing" ? tr("You") : tr("Retained message");
+        if (message?.author_session_id)
+            authorName.title = String(message.author_session_id);
+        else if (messageSide === "neutral")
+            authorName.title = tr("Author provenance unavailable");
+        author.appendChild(authorName);
+        content.appendChild(author);
+        if (message?.reply_to) {
+            const replyContext = document.createElement("div");
+            replyContext.className = "message-reply-context";
+            replyContext.appendChild(runtimeIcon("reply"));
+            const replyText = document.createElement("span");
+            const parent = byId.get(String(message.reply_to));
+            const preview = parent?.message ? String(parent.message).replace(/\s+/g, " ").trim().slice(0, 120) : tr("Original message unavailable");
+            replyText.textContent = tr("Replying to") + " · " + preview;
+            replyContext.appendChild(replyText);
+            content.appendChild(replyContext);
+        }
+        const footer = document.createElement("div");
+        footer.className = "message-footer";
+        const head = document.createElement("div");
+        head.className = "message-head";
+        const kindValue = String(message?.kind || "note");
+        const priorityValue = String(message?.priority || "normal");
+        const statusValue = String(message?.status || "open");
+        const messageSignals = [];
+        if (kindValue !== "note")
+            messageSignals.push(tr(kindValue));
+        if (priorityValue !== "normal")
+            messageSignals.push(tr(priorityValue));
+        if (statusValue && statusValue !== "open" && statusValue !== "resolved")
+            messageSignals.push(tr(statusValue));
+        if (messageSignals.length) {
+            const kind = document.createElement("span");
+            kind.className = "message-kind";
+            kind.textContent = messageSignals.join(" · ");
+            head.appendChild(kind);
+        }
+        const time = document.createElement("span");
+        time.className = "muted small";
+        time.textContent = updatedLabel(message?.created_at);
+        head.appendChild(time);
+        footer.appendChild(head);
+        const meta = document.createElement("div");
+        meta.className = "message-meta";
+        const metaParts = [id];
+        if (message?.author_session_id)
+            metaParts.push((options.language === "zh-CN" ? "作者 " : "author ") + String(message.author_session_id));
+        if (parentUnavailable)
+            metaParts.push(options.language === "zh-CN" ? "保留的回复 · 上级消息不可用" : "retained reply · parent unavailable");
+        else if (message?.reply_to)
+            metaParts.push((options.language === "zh-CN" ? "回复 " : "reply to ") + String(message.reply_to));
+        if (message?.superseded_by_message_id) {
+            const replacementId = String(message.superseded_by_message_id);
+            metaParts.push(byId.has(replacementId)
+                ? "superseded by " + replacementId
+                : "superseded by " + replacementId + " · replacement unavailable / retained link only");
+        }
+        if (message?.supersedes_message_id) {
+            const originalId = String(message.supersedes_message_id);
+            metaParts.push(byId.has(originalId)
+                ? "replaces " + originalId
+                : "replaces " + originalId + " · retained link only");
+        }
+        meta.textContent = metaParts.join(" · ");
+        footer.appendChild(meta);
+        footer.title = meta.textContent;
+        const bubble = document.createElement("div");
+        bubble.className = "message-bubble";
+        appendRichMessage(bubble, message?.message);
+        content.appendChild(bubble);
+        if (message?.requires_ack) {
+            const ack = document.createElement("div");
+            ack.className = "message-ack";
+            const acknowledged = typeof message?.first_ack_observed_at === "number";
+            ack.classList.toggle("observed", acknowledged);
+            ack.textContent = acknowledged
+                ? (options.language === "zh-CN" ? "已观察到 ACK（不代表回复或完成）" : "ACK observed (not a reply or completion)") + " · " + updatedLabel(message.first_ack_observed_at)
+                : tr("Acknowledgement required");
+            ack.title = acknowledged
+                ? "ACK required · First ACK observed " + updatedLabel(message.first_ack_observed_at)
+                : "ACK required";
+            footer.appendChild(ack);
+        }
+        if (message?.resolved_at || message?.resolution || message?.resolved_by_message_id || message?.closure_kind) {
+            const resolution = document.createElement("div");
+            resolution.className = "message-resolution";
+            const parts = [];
+            if (message?.closure_kind === "withdrawn")
+                parts.push("withdrawn" + (message.resolved_at ? " " + updatedLabel(message.resolved_at) : ""));
+            else if (message?.closure_kind === "superseded")
+                parts.push("superseded" + (message.resolved_at ? " " + updatedLabel(message.resolved_at) : ""));
+            else if (message.resolved_at)
+                parts.push("resolved " + updatedLabel(message.resolved_at));
+            if (message.resolution)
+                parts.push(String(message.resolution));
+            if (message.resolved_by_message_id)
+                parts.push("by " + String(message.resolved_by_message_id));
+            const resolutionLabel = message?.closure_kind === "withdrawn"
+                ? tr("Withdrawn")
+                : message?.closure_kind === "superseded"
+                    ? tr("Replaced")
+                    : tr("Resolved");
+            resolution.textContent = resolutionLabel + (message.resolved_at ? " · " + updatedLabel(message.resolved_at) : "");
+            resolution.title = parts.join(" · ");
+            footer.appendChild(resolution);
+            if (message.resolution) {
+                const explanation = document.createElement("section");
+                explanation.className = "message-resolution-body";
+                const label = document.createElement("strong");
+                label.textContent = options.language === "zh-CN" ? "处理说明" : "Resolution";
+                explanation.appendChild(label);
+                appendRichMessage(explanation, message.resolution);
+                content.appendChild(explanation);
+            }
+        }
+        const actions = document.createElement("div");
+        actions.className = "message-actions";
+        actions.appendChild(createMessageAction(tr("Reply"), "reply", () => options.onReply(id)));
+        if (runtimeCollaborationMessageCanMutate(message) && options.canMutate) {
+            const editLabel = options.language === "zh-CN" ? "替换这条保留消息，同时保留其历史记录。" : "Replace this retained message while preserving its history.";
+            const deleteLabel = options.language === "zh-CN" ? "撤回这条保留消息；历史记录仍会保留。" : "Withdraw this retained message; history is preserved.";
+            actions.appendChild(createMessageAction(editLabel, "edit", () => options.onEdit(message)));
+            actions.appendChild(createMessageAction(deleteLabel, "trash", () => options.onWithdraw(id), true));
+        }
+        footer.appendChild(actions);
+        content.appendChild(footer);
+        card.appendChild(content);
+        node.appendChild(card);
+        for (const child of children.get(id) || [])
+            appendMessage(child, depth + 1, false);
+    };
+    for (const message of messages) {
+        const parent = typeof message?.reply_to === "string" ? message.reply_to : "";
+        if (!parent || !byId.has(parent))
+            appendMessage(message, 0, !!parent);
+    }
+    for (const message of messages)
+        appendMessage(message, 0, false);
+}
+
+const API_BASE = RUNTIME_API_BASE;
+const apiClient = new RuntimeApiClient(API_BASE);
+const REFRESH_MS = 30000;
+const WINDOW_REFRESH_MS = 3000;
+const COLLABORATION_WAIT_SECS = 25;
+const PROJECT_SEARCH_DEBOUNCE_MS = 200;
+const MOBILE_NAVIGATION_MEDIA = "(max-width: 900px)";
+const WIDE_CONTEXT_MEDIA = "(min-width: 1280px)";
+let contextUserIntent = null;
+// Verified localization mapping: "Close session context": "关闭会话上下文"
 const appearanceMedia = window.matchMedia(APPEARANCE_MEDIA_QUERY);
 let runtimeLanguage = languagePreference(document.documentElement.dataset.language);
 const staticTextSources = [];
@@ -1219,8 +3457,18 @@ let windowsAbort = null;
 let windowDetailAbort = null;
 let windowTimer = 0;
 let windowRows = [];
+let windowAvailability = "idle";
+let windowVisibilityScope = "principal";
 let selectedWindowKey = "";
 let selectedWindowDetail = null;
+const PROJECT_WINDOW_LIMIT = 10;
+let projectWindowsAbort = null;
+let projectWindowRows = [];
+let projectWindowAvailability = "idle";
+let projectWindowTruncated = false;
+let projectWindowTotal = 0;
+let projectWindowProjectId = "";
+let renderedProjectWindowSignature = "";
 let projectRows = [];
 let homeProjectRows = [];
 let runnerRows = [];
@@ -1279,26 +3527,11 @@ function show(id, visible) {
     if (node)
         node.hidden = !visible;
 }
-function languagePreference(value) {
-    return value === "zh-CN" ? "zh-CN" : "en";
-}
-function loadLanguagePreference() {
-    try {
-        const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
-        if (stored === "en" || stored === "zh-CN")
-            return stored;
-    }
-    catch { /* Fall through to the browser language. */ }
-    return navigator.language && navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
-}
 function tr(source) {
-    return runtimeLanguage === "zh-CN" ? (RUNTIME_ZH_TEXT[source] || source) : source;
+    return translate(source, runtimeLanguage);
 }
 function translatedStaticNodeValue(source) {
-    const match = /^(\s*)([\s\S]*?)(\s*)$/.exec(source);
-    if (!match)
-        return source;
-    return match[1] + tr(match[2]) + match[3];
+    return translateStaticNodeValue(source, runtimeLanguage);
 }
 function captureStaticUiSources() {
     if (staticTextSources.length || staticAttributeSources.length)
@@ -1333,8 +3566,12 @@ function renderLanguageSensitiveUi() {
     }
     renderRunnerFleet(runnerRows);
     renderRecentSessions(recentSessionRows, recentSessionMetaSnapshot);
-    if (state.selectedProject)
+    if (state.selectedProject) {
         renderSessionList(sessionRows, sessionListMetaSnapshot);
+        renderProjectWindows();
+    }
+    renderWindowList();
+    renderWindowDetail(selectedWindowDetail);
     const snapshot = state.workflow?.snapshot;
     if (snapshot)
         renderDetail(snapshot, false);
@@ -1365,7 +3602,7 @@ function applyLanguage(language, persist = true, rerender = true) {
         button.title = nextLanguageTitle;
         button.setAttribute("aria-label", nextLanguageTitle);
     });
-    applyAppearance(appearancePreference(document.documentElement.dataset.theme), false);
+    applyAppearance(parseAppearancePreference(document.documentElement.dataset.theme), false);
     if (persist) {
         try {
             window.localStorage.setItem(LANGUAGE_STORAGE_KEY, runtimeLanguage);
@@ -1375,24 +3612,17 @@ function applyLanguage(language, persist = true, rerender = true) {
     if (rerender)
         renderLanguageSensitiveUi();
 }
-function appearancePreference(value) {
-    return value === "light" || value === "dark" || value === "system" ? value : "system";
+function parseAppearancePreference(value) {
+    return appearancePreference(value);
 }
-function loadAppearancePreference() {
-    try {
-        return appearancePreference(window.localStorage.getItem(APPEARANCE_STORAGE_KEY));
-    }
-    catch {
-        return "system";
-    }
+function readStoredAppearance() {
+    return loadAppearancePreference();
 }
-function resolvedAppearance(preference) {
-    if (preference !== "system")
-        return preference;
-    return appearanceMedia.matches ? "light" : "dark";
+function computeResolvedAppearance(preference) {
+    return resolvedAppearance(preference, appearanceMedia.matches);
 }
 function applyAppearance(preference, persist = true) {
-    const resolved = resolvedAppearance(preference);
+    const resolved = computeResolvedAppearance(preference);
     document.documentElement.dataset.theme = preference;
     document.documentElement.dataset.resolvedTheme = resolved;
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", resolved === "light" ? "#f4f4f1" : "#090a0d");
@@ -1404,23 +3634,14 @@ function applyAppearance(preference, persist = true) {
         trigger.title = label;
         trigger.setAttribute("aria-label", runtimeLanguage === "zh-CN" ? label + "。" + tr("Choose appearance") : label + ". " + tr("Choose appearance"));
     });
-    if (!persist)
-        return;
-    try {
-        window.localStorage.setItem(APPEARANCE_STORAGE_KEY, preference);
-    }
-    catch { /* Appearance remains active when storage is unavailable. */ }
+    if (persist)
+        persistAppearancePreference(preference);
 }
-function workspaceViewPreference(value) {
-    return value === "operations" || value === "windows" ? value : "sessions";
+function parseWorkspaceViewPreference(value) {
+    return workspaceViewPreference(value);
 }
-function loadWorkspaceViewPreference() {
-    try {
-        return workspaceViewPreference(window.localStorage.getItem(WORKSPACE_VIEW_STORAGE_KEY));
-    }
-    catch {
-        return "sessions";
-    }
+function readStoredWorkspaceView() {
+    return loadWorkspaceViewPreference();
 }
 function renderWorkspaceHeading() {
     if (workspaceView === "operations") {
@@ -1431,7 +3652,7 @@ function renderWorkspaceHeading() {
     }
     if (workspaceView === "windows") {
         setText("runtime-breadcrumb-runner", tr("Runtime workspace"));
-        setText("runtime-breadcrumb-project", tr("Windows"));
+        setText("runtime-breadcrumb-project", tr("Window Activity"));
         setText("runtime-session-title", selectedWindowKey ? "Window " + runtimeWindowShortKey(selectedWindowKey) : tr("Window activity"));
         return;
     }
@@ -1440,7 +3661,7 @@ function renderWorkspaceHeading() {
     setText("runtime-session-title", snapshot?.title ? String(snapshot.title) : tr("Select a Session"));
 }
 function applyWorkspaceView(view, persist = true) {
-    workspaceView = workspaceViewPreference(view);
+    workspaceView = parseWorkspaceViewPreference(view);
     const operations = workspaceView === "operations";
     const windows = workspaceView === "windows";
     const sessions = workspaceView === "sessions";
@@ -1475,12 +3696,8 @@ function applyWorkspaceView(view, persist = true) {
     renderWorkspaceHeading();
     syncResponsiveNavigation();
     setMobileNavigationOpen(false, false);
-    if (persist) {
-        try {
-            window.localStorage.setItem(WORKSPACE_VIEW_STORAGE_KEY, workspaceView);
-        }
-        catch { /* The selected view remains active when storage is unavailable. */ }
-    }
+    if (persist)
+        persistWorkspaceViewPreference(workspaceView);
 }
 function revealOperationsSection(targetId) {
     applyWorkspaceView("operations");
@@ -1657,38 +3874,6 @@ function renderFingerprint(value) {
         return "";
     }
 }
-const RUNTIME_ICON_PATHS = {
-    folder: ["M3 6h7l2 2h9v10H3V6Z"],
-    monitor: ["M4 5h16v12H4V5Z", "M8 21h8", "M12 17v4"],
-    message: ["M5 5h14v12H9l-4 3V5Z", "M9 9h6", "M9 13h4"],
-    reply: ["m10 8-5 4 5 4", "M5 12h7a6 6 0 0 1 6 6"],
-    edit: ["m4 16-.5 4.5L8 20l10.5-10.5-4-4L4 16Z", "m12.5 7.5 4 4"],
-    trash: ["M4 7h16", "M9 7V4h6v3", "m7 7 1 13h8l1-13", "M10 11v5", "M14 11v5"],
-    copy: ["M8 8h11v11H8V8Z", "M5 16H4V4h12v1"],
-};
-function runtimeIcon(name, className = "") {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("aria-hidden", "true");
-    if (className)
-        svg.setAttribute("class", className);
-    for (const pathData of RUNTIME_ICON_PATHS[name]) {
-        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        path.setAttribute("d", pathData);
-        svg.appendChild(path);
-    }
-    return svg;
-}
-function createMessageAction(label, iconName, action, danger = false) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "message-action" + (danger ? " danger" : "");
-    button.title = label;
-    button.setAttribute("aria-label", label);
-    button.appendChild(runtimeIcon(iconName));
-    button.addEventListener("click", action);
-    return button;
-}
 function syncNewMessageIndicator() {
     const visible = collaborationPendingMessages > 0 && !collaborationFollowLatest;
     show("runtime-new-messages", visible);
@@ -1719,255 +3904,33 @@ function announceNewCollaborationMessages(count) {
         : String(count) + " " + (count === 1 ? "new message" : "new messages");
     setText("runtime-message-announcer", label);
 }
-function appendLinkifiedText(parent, text) {
-    const pattern = /https?:\/\/[^\s<>{}\[\]]+/g;
-    let cursor = 0;
-    for (const match of text.matchAll(pattern)) {
-        const index = match.index || 0;
-        if (index > cursor)
-            parent.appendChild(document.createTextNode(text.slice(cursor, index)));
-        let href = match[0];
-        let trailing = "";
-        while (/[.,;:!?)]$/.test(href)) {
-            trailing = href.slice(-1) + trailing;
-            href = href.slice(0, -1);
-        }
-        const link = document.createElement("a");
-        link.href = href;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.textContent = href;
-        parent.appendChild(link);
-        if (trailing)
-            parent.appendChild(document.createTextNode(trailing));
-        cursor = index + match[0].length;
-    }
-    if (cursor < text.length)
-        parent.appendChild(document.createTextNode(text.slice(cursor)));
+function readStoredCredential() {
+    return loadRememberedRuntimeCredential();
 }
-function messageLineStartsBlock(line) {
-    return /^```/.test(line)
-        || /^#{1,3}\s+/.test(line)
-        || /^>\s?/.test(line)
-        || /^\s*[-*+]\s+/.test(line)
-        || /^\s*\d+[.)]\s+/.test(line);
+function writeTabCredential() {
+    persistRuntimeCredentialForTab(token, rememberCredentialForTab);
 }
-function appendMessageParagraph(parent, lines) {
-    if (!lines.length)
-        return;
-    const paragraph = document.createElement("p");
-    paragraph.className = "message-paragraph";
-    lines.forEach((line, index) => {
-        if (index)
-            paragraph.appendChild(document.createElement("br"));
-        appendLinkifiedText(paragraph, line);
-    });
-    parent.appendChild(paragraph);
-}
-function appendMessageCode(parent, language, codeText) {
-    const block = document.createElement("section");
-    block.className = "message-code";
-    const header = document.createElement("header");
-    const label = document.createElement("span");
-    label.textContent = language || "code";
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "message-code-copy";
-    copy.appendChild(runtimeIcon("copy"));
-    const copyLabel = document.createElement("span");
-    copyLabel.textContent = tr("Copy code");
-    copy.appendChild(copyLabel);
-    copy.title = tr("Copy code");
-    copy.setAttribute("aria-label", tr("Copy code"));
-    copy.addEventListener("click", async () => {
-        try {
-            await navigator.clipboard.writeText(codeText);
-            copyLabel.textContent = tr("Code copied");
-            setText("runtime-message-announcer", tr("Code copied"));
-            window.setTimeout(() => { copyLabel.textContent = tr("Copy code"); }, 1400);
-        }
-        catch {
-            copyLabel.textContent = tr("Unable to copy code");
-            setText("runtime-message-announcer", tr("Unable to copy code"));
-            window.setTimeout(() => { copyLabel.textContent = tr("Copy code"); }, 1800);
-        }
-    });
-    header.appendChild(label);
-    header.appendChild(copy);
-    const pre = document.createElement("pre");
-    const code = document.createElement("code");
-    if (language)
-        code.dataset.language = language;
-    code.textContent = codeText;
-    pre.appendChild(code);
-    block.appendChild(header);
-    block.appendChild(pre);
-    parent.appendChild(block);
-}
-function appendRichMessage(bubble, sourceValue) {
-    const source = String(sourceValue || "").replace(/\r\n?/g, "\n");
-    const lines = source.split("\n");
-    const body = document.createElement("div");
-    body.className = "message-body";
-    let index = 0;
-    while (index < lines.length) {
-        const line = lines[index];
-        if (!line.trim()) {
-            index += 1;
-            continue;
-        }
-        const fence = /^```\s*([^\s`]*)/.exec(line);
-        if (fence) {
-            const codeLines = [];
-            index += 1;
-            while (index < lines.length && !/^```\s*$/.test(lines[index])) {
-                codeLines.push(lines[index]);
-                index += 1;
-            }
-            if (index < lines.length)
-                index += 1;
-            appendMessageCode(body, fence[1] || "", codeLines.join("\n"));
-            continue;
-        }
-        const heading = /^(#{1,3})\s+(.+)$/.exec(line);
-        if (heading) {
-            const title = document.createElement(heading[1].length === 1 ? "h3" : heading[1].length === 2 ? "h4" : "h5");
-            title.className = "message-heading";
-            appendLinkifiedText(title, heading[2]);
-            body.appendChild(title);
-            index += 1;
-            continue;
-        }
-        if (/^>\s?/.test(line)) {
-            const quote = document.createElement("blockquote");
-            const quoteLines = [];
-            while (index < lines.length && /^>\s?/.test(lines[index])) {
-                quoteLines.push(lines[index].replace(/^>\s?/, ""));
-                index += 1;
-            }
-            appendMessageParagraph(quote, quoteLines);
-            body.appendChild(quote);
-            continue;
-        }
-        const unordered = /^\s*[-*+]\s+/.test(line);
-        const ordered = /^\s*\d+[.)]\s+/.test(line);
-        if (unordered || ordered) {
-            const list = document.createElement(ordered ? "ol" : "ul");
-            const pattern = ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/;
-            while (index < lines.length && pattern.test(lines[index])) {
-                const item = document.createElement("li");
-                appendLinkifiedText(item, lines[index].replace(pattern, ""));
-                list.appendChild(item);
-                index += 1;
-            }
-            body.appendChild(list);
-            continue;
-        }
-        const paragraphLines = [];
-        while (index < lines.length && lines[index].trim() && !messageLineStartsBlock(lines[index])) {
-            paragraphLines.push(lines[index]);
-            index += 1;
-        }
-        if (!paragraphLines.length) {
-            paragraphLines.push(line);
-            index += 1;
-        }
-        appendMessageParagraph(body, paragraphLines);
-    }
-    bubble.appendChild(body);
-    if (source.length <= 2200 && lines.length <= 36)
-        return;
-    body.classList.add("is-collapsed");
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "message-expand";
-    toggle.textContent = tr("Show full message");
-    toggle.setAttribute("aria-expanded", "false");
-    toggle.addEventListener("click", () => {
-        const expanded = body.classList.toggle("is-expanded");
-        body.classList.toggle("is-collapsed", !expanded);
-        toggle.textContent = tr(expanded ? "Collapse message" : "Show full message");
-        toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
-    });
-    bubble.appendChild(toggle);
-}
-function loadRememberedRuntimeCredential() {
-    try {
-        return window.sessionStorage.getItem(RUNTIME_CREDENTIAL_SESSION_KEY)?.trim() || "";
-    }
-    catch {
-        return "";
-    }
-}
-function persistRuntimeCredentialForTab() {
-    try {
-        if (rememberCredentialForTab && token)
-            window.sessionStorage.setItem(RUNTIME_CREDENTIAL_SESSION_KEY, token);
-        else
-            window.sessionStorage.removeItem(RUNTIME_CREDENTIAL_SESSION_KEY);
-    }
-    catch { /* Storage can be unavailable in hardened browser contexts. */ }
-}
-function clearRememberedRuntimeCredential() {
-    try {
-        window.sessionStorage.removeItem(RUNTIME_CREDENTIAL_SESSION_KEY);
-    }
-    catch { /* Storage can be unavailable in hardened browser contexts. */ }
-}
-function currentDraftStorageKey(project = state.selectedProject, sessionId = state.workflow?.selectedSessionId) {
-    const projectId = String(project || "");
-    const workflowSessionId = String(sessionId || "");
-    return projectId && workflowSessionId
-        ? DRAFT_STORAGE_PREFIX + encodeURIComponent(projectId) + "." + encodeURIComponent(workflowSessionId)
-        : "";
+function eraseStoredCredential() {
+    clearRememberedRuntimeCredential();
 }
 function saveCurrentDraft() {
-    const key = currentDraftStorageKey();
     const body = el("runtime-message-body");
-    if (!key || !body)
+    if (!body)
         return;
-    try {
-        if (body.value)
-            window.sessionStorage.setItem(key, body.value);
-        else
-            window.sessionStorage.removeItem(key);
-    }
-    catch { /* Draft remains available in the current input when storage is unavailable. */ }
+    saveDraft(state.selectedProject, state.workflow?.selectedSessionId, body.value);
 }
 function restoreCurrentDraft() {
-    const key = currentDraftStorageKey();
     const body = el("runtime-message-body");
-    if (!key || !body)
+    if (!body)
         return;
-    try {
-        body.value = window.sessionStorage.getItem(key) || "";
-    }
-    catch {
-        body.value = "";
-    }
+    body.value = loadDraft(state.selectedProject, state.workflow?.selectedSessionId);
     syncCollaborationComposerLayout();
 }
 function clearCurrentDraft() {
-    const key = currentDraftStorageKey();
-    if (!key)
-        return;
-    try {
-        window.sessionStorage.removeItem(key);
-    }
-    catch { /* No-op in hardened browser contexts. */ }
+    clearDraft(state.selectedProject, state.workflow?.selectedSessionId);
 }
-function clearRuntimeDrafts() {
-    try {
-        const keys = [];
-        for (let index = 0; index < window.sessionStorage.length; index += 1) {
-            const key = window.sessionStorage.key(index);
-            if (key?.startsWith(DRAFT_STORAGE_PREFIX))
-                keys.push(key);
-        }
-        for (const key of keys)
-            window.sessionStorage.removeItem(key);
-    }
-    catch { /* No-op in hardened browser contexts. */ }
+function eraseAllDrafts() {
+    clearRuntimeDrafts();
 }
 function rememberLocalCollaborationMessage(messageId) {
     const id = typeof messageId === "string" ? messageId : "";
@@ -1975,28 +3938,16 @@ function rememberLocalCollaborationMessage(messageId) {
         return;
     locallyAuthoredCollaborationMessageIds.add(id);
 }
-function deviceDisclosureStorageKey(clientId) {
-    return DEVICE_DISCLOSURE_STORAGE_PREFIX + encodeURIComponent(clientId);
+function readDeviceDisclosure(clientId) {
+    return storedDeviceDisclosure(clientId);
 }
-function storedDeviceDisclosure(clientId) {
-    try {
-        const value = window.localStorage.getItem(deviceDisclosureStorageKey(clientId));
-        return value === "open" ? true : value === "closed" ? false : null;
-    }
-    catch {
-        return null;
-    }
-}
-function persistDeviceDisclosure(clientId, open) {
-    try {
-        window.localStorage.setItem(deviceDisclosureStorageKey(clientId), open ? "open" : "closed");
-    }
-    catch { /* Disclosure remains active for the current render. */ }
+function writeDeviceDisclosure(clientId, open) {
+    persistDeviceDisclosure(clientId, open);
 }
 function revealRunner(clientId) {
     if (!clientId)
         return;
-    persistDeviceDisclosure(clientId, true);
+    writeDeviceDisclosure(clientId, true);
     const group = document.querySelector(`.device-group[data-runner-id="${CSS.escape(clientId)}"]`);
     if (group)
         group.open = true;
@@ -2009,8 +3960,7 @@ function appendChip(parent, text, extraClass = "") {
     return chip;
 }
 function abort(controller) {
-    if (controller)
-        controller.abort();
+    abortController(controller);
 }
 function abortCollaboration() {
     abort(collaborationAbort);
@@ -2020,8 +3970,10 @@ function abortProjectWork() {
     abort(sessionsAbort);
     abort(detailAbort);
     abortCollaboration();
+    abort(projectWindowsAbort);
     sessionsAbort = null;
     detailAbort = null;
+    projectWindowsAbort = null;
 }
 function stopProjectSearchTimer() {
     if (projectSearchTimer)
@@ -2041,54 +3993,15 @@ function abortAll() {
     windowDetailAbort = null;
 }
 async function api(path, payload, signal) {
-    try {
-        const response = await fetch(API_BASE + path, {
-            method: "POST",
-            headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-            signal,
-        });
-        let data = null;
-        try {
-            data = await response.json();
-        }
-        catch {
-            data = null;
-        }
-        return { ok: response.ok, status: response.status, data };
-    }
-    catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError")
-            return null;
-        return { ok: false, status: 0, data: null };
-    }
-}
-function windowDateTimeLabel(timestampMs) {
-    const value = Number(timestampMs);
-    if (!Number.isFinite(value) || value <= 0)
-        return tr("time unavailable");
-    return new Date(value).toLocaleString(runtimeLanguage === "zh-CN" ? "zh-CN" : "en");
-}
-function windowAgeLabel(timestampMs) {
-    return runtimeWindowActivityLabel(timestampMs, Date.now());
-}
-function runtimeProjectClientId(project) {
-    const value = String(project || "");
-    const parts = value.split(":");
-    return parts.length >= 3 && parts[0] === "agent" ? parts[1] : "";
+    apiClient.setToken(token);
+    return apiClient.post(path, payload, signal);
 }
 async function copyRuntimeValue(value, statusId) {
     if (!value)
         return;
-    try {
-        await navigator.clipboard.writeText(value);
-        if (statusId)
-            setText(statusId, tr("Copied"));
-    }
-    catch {
-        if (statusId)
-            setText(statusId, tr("Unable to copy"));
-    }
+    const ok = await writeClipboardText(value);
+    if (statusId)
+        setText(statusId, ok ? tr("Copied") : tr("Unable to copy"));
 }
 function openWindowLinkedSession(session) {
     const project = String(session?.project || "");
@@ -2099,133 +4012,21 @@ function openWindowLinkedSession(session) {
     applyWorkspaceView("sessions");
     selectRecentSession({ client_id: clientId, project_id: project, session_id: sessionId });
 }
-function renderWindowActivityRows(node, activities, compact = false) {
-    clearNode(node);
-    if (!node)
-        return;
-    for (const activity of activities) {
-        const item = document.createElement("article");
-        item.className = "window-activity-item" + (compact ? " compact" : "")
-            + (activity?.recorder_gap_session_id ? " recorder-gap" : "");
-        const head = document.createElement("div");
-        head.className = "window-activity-head";
-        const title = document.createElement("strong");
-        title.textContent = String(activity?.tool_name || activity?.method || "WebCodex call");
-        const time = document.createElement("span");
-        time.className = "muted small";
-        time.textContent = windowDateTimeLabel(activity?.started_at_ms);
-        head.appendChild(title);
-        head.appendChild(time);
-        item.appendChild(head);
-        const facts = document.createElement("div");
-        facts.className = "chips window-activity-facts";
-        appendChip(facts, String(activity?.status || "unknown"));
-        if (activity?.project)
-            appendChip(facts, String(activity.project));
-        if (activity?.meaningful)
-            appendChip(facts, "meaningful", "tone-runtime");
-        if (activity?.recorder_gap_session_id)
-            appendChip(facts, "recorder gap", "tone-warn");
-        if (activity?.response_streaming === true) {
-            appendChip(facts, "streaming timing unavailable", "tone-warn");
-        }
-        else if (typeof activity?.service_ms === "number") {
-            appendChip(facts, "service " + String(activity.service_ms) + " ms");
-        }
-        else if (activity?.meaningful) {
-            appendChip(facts, "service unavailable");
-        }
-        if (activity?.meaningful) {
-            if (typeof activity?.next_call_gap_ms === "number") {
-                appendChip(facts, "next gap " + String(activity.next_call_gap_ms) + " ms");
-            }
-            else {
-                appendChip(facts, "next gap unavailable");
-            }
-            if (typeof activity?.cycle_ms === "number") {
-                appendChip(facts, "cycle " + String(activity.cycle_ms) + " ms");
-            }
-        }
-        if (activity?.window_transition_kind === "overlap") {
-            appendChip(facts, "overlap from previous", "tone-warn");
-        }
-        item.appendChild(facts);
-        const links = Array.isArray(activity?.workflow_sessions) ? activity.workflow_sessions : [];
-        if (links.length) {
-            const relation = document.createElement("div");
-            relation.className = "muted small";
-            relation.textContent = links
-                .map((link) => String(link.workflow_session_id || "") + " · " + String(link.relation || "linked"))
-                .join(" · ");
-            item.appendChild(relation);
-        }
-        if (activity?.recorder_gap_session_id) {
-            const gap = document.createElement("div");
-            gap.className = "window-gap-note small";
-            gap.textContent = "Recording was not continued for " + String(activity.recorder_gap_session_id) + ".";
-            item.appendChild(gap);
-        }
-        if (activity?.server_trace_id) {
-            const trace = document.createElement("button");
-            trace.type = "button";
-            trace.className = "window-trace-copy";
-            trace.textContent = "trace " + String(activity.server_trace_id);
-            trace.title = tr("Copy trace id");
-            trace.addEventListener("click", () => void copyRuntimeValue(String(activity.server_trace_id)));
-            item.appendChild(trace);
-        }
-        node.appendChild(item);
-    }
+function renderWindowActivities(node, activities, compact = false) {
+    renderWindowActivityRows(node, activities, {
+        compact,
+        language: runtimeLanguage,
+        onCopyTrace: (traceId) => void copyRuntimeValue(traceId),
+    });
 }
 function renderWindowList() {
     const node = el("runtime-window-list");
-    clearNode(node);
     setText("runtime-window-list-count", String(windowRows.length));
+    const emptyCopy = formatWindowEmptyState(windowAvailability, windowVisibilityScope, false, runtimeLanguage);
+    setText("runtime-window-list-empty", emptyCopy);
     show("runtime-window-list-empty", windowRows.length === 0);
-    setText("runtime-window-list-status", windowRows.length ? countLabel(windowRows.length, "Window") : tr("No WebCodex activity"));
-    if (!node)
-        return;
-    for (const row of windowRows) {
-        const key = String(row?.client_window_key || "");
-        if (!key)
-            continue;
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "runtime-window-card" + (key === selectedWindowKey ? " selected" : "");
-        if (key === selectedWindowKey)
-            button.setAttribute("aria-current", "true");
-        const head = document.createElement("div");
-        head.className = "runtime-window-card-head";
-        const title = document.createElement("strong");
-        title.textContent = "Window " + runtimeWindowShortKey(key);
-        const active = document.createElement("span");
-        active.className = "chip" + (Number(row?.active_count || 0) > 0 ? " tone-runtime" : "");
-        active.textContent = Number(row?.active_count || 0) > 0
-            ? String(row.active_count) + " active"
-            : String(row?.source || "window");
-        head.appendChild(title);
-        head.appendChild(active);
-        button.appendChild(head);
-        const call = document.createElement("span");
-        call.className = "muted small";
-        call.textContent = row?.last_tool_call_at_ms
-            ? "Last WebCodex call " + windowAgeLabel(row.last_tool_call_at_ms)
-            : "Last WebCodex activity " + windowAgeLabel(row?.last_seen_at_ms);
-        button.appendChild(call);
-        const meaningful = document.createElement("span");
-        meaningful.className = "muted small";
-        meaningful.textContent = row?.last_meaningful_activity_at_ms
-            ? "Last meaningful work " + windowAgeLabel(row.last_meaningful_activity_at_ms)
-            : "No meaningful WebCodex work recorded";
-        button.appendChild(meaningful);
-        const links = document.createElement("span");
-        links.className = "muted small";
-        links.textContent = countLabel(Number(row?.linked_session_count || 0), "linked Session")
-            + (Number(row?.recorder_gap_count || 0) ? " · " + String(row.recorder_gap_count) + " recorder gap" : "");
-        button.appendChild(links);
-        button.addEventListener("click", () => void selectWindow(key));
-        node.appendChild(button);
-    }
+    setText("runtime-window-list-status", formatWindowListStatusText(windowAvailability, windowRows.length, windowVisibilityScope, runtimeLanguage));
+    renderWindowCards(node, windowRows, selectedWindowKey, (key) => void selectWindow(key), Date.now(), runtimeLanguage);
 }
 function renderWindowDetail(detail) {
     selectedWindowDetail = detail;
@@ -2234,80 +4035,24 @@ function renderWindowDetail(detail) {
     show("runtime-window-detail", present);
     if (!detail)
         return;
-    const key = String(detail.client_window_key || selectedWindowKey || "");
-    setText("runtime-window-title", "Window " + runtimeWindowShortKey(key));
-    setText("runtime-window-key", key || "—");
-    setText("runtime-window-source", String(detail.source || "—"));
-    setText("runtime-window-active-count", String(Number(detail.active_count || 0)));
-    setText("runtime-window-last-call", detail.last_tool_call_at_ms ? windowAgeLabel(detail.last_tool_call_at_ms) : "No completed tools/call activity");
-    setText("runtime-window-last-meaningful", detail.last_meaningful_activity_at_ms
-        ? windowAgeLabel(detail.last_meaningful_activity_at_ms)
-        : "No meaningful WebCodex work recorded");
-    setText("runtime-window-active-status", Number(detail.active_count || 0) ? "Active request" : "No active request");
-    setText("runtime-window-linked-status", countLabel(Number(detail.sessions_returned || 0), "Session") + (detail.sessions_truncated ? " · bounded" : ""));
-    setText("runtime-window-activity-status", countLabel(Number(detail.activity_returned || 0), "event") + (detail.activity_truncated ? " · bounded" : ""));
-    const activeNode = el("runtime-window-active-requests");
-    clearNode(activeNode);
-    const activeRequests = Array.isArray(detail.active_requests) ? detail.active_requests : [];
-    if (activeNode && !activeRequests.length) {
-        const empty = document.createElement("p");
-        empty.className = "muted small";
-        empty.textContent = "No WebCodex request is currently active.";
-        activeNode.appendChild(empty);
-    }
-    for (const request of activeRequests) {
-        const item = document.createElement("article");
-        item.className = "window-request-item";
-        const title = document.createElement("strong");
-        title.textContent = String(request?.tool_name || request?.method || "WebCodex request");
-        item.appendChild(title);
-        const meta = document.createElement("div");
-        meta.className = "muted small";
-        const facts = [
-            request?.project,
-            request?.started_at_ms ? "started " + windowAgeLabel(request.started_at_ms) : null,
-            typeof request?.elapsed_ms === "number" ? String(request.elapsed_ms) + " ms elapsed" : null,
-        ].filter(Boolean).map(String);
-        meta.textContent = facts.join(" · ");
-        item.appendChild(meta);
-        if (request?.server_trace_id) {
-            const trace = document.createElement("button");
-            trace.type = "button";
-            trace.className = "window-trace-copy";
-            trace.textContent = "trace " + String(request.server_trace_id);
-            trace.addEventListener("click", () => void copyRuntimeValue(String(request.server_trace_id)));
-            item.appendChild(trace);
-        }
-        activeNode?.appendChild(item);
-    }
-    const sessionsNode = el("runtime-window-linked-sessions");
-    clearNode(sessionsNode);
-    for (const session of Array.isArray(detail.linked_sessions) ? detail.linked_sessions : []) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "window-session-card";
-        const title = document.createElement("strong");
-        title.textContent = String(session?.title || session?.workflow_session_id || "Workflow Session");
-        const meta = document.createElement("span");
-        meta.className = "muted small";
-        meta.textContent = [
-            session?.workflow_session_id,
-            session?.lifecycle,
-            session?.project,
-            ...(Array.isArray(session?.relations) ? session.relations : []),
-        ].filter(Boolean).map(String).join(" · ");
-        button.appendChild(title);
-        button.appendChild(meta);
-        button.addEventListener("click", () => openWindowLinkedSession(session));
-        sessionsNode?.appendChild(button);
-    }
-    if (sessionsNode && !sessionsNode.childElementCount) {
-        const empty = document.createElement("p");
-        empty.className = "muted small";
-        empty.textContent = "No authorized Workflow Session links.";
-        sessionsNode.appendChild(empty);
-    }
-    renderWindowActivityRows(el("runtime-window-activity"), Array.isArray(detail.activity) ? detail.activity : []);
+    const fields = formatWindowDetailFields(detail, selectedWindowKey, Date.now(), runtimeLanguage);
+    if (!fields)
+        return;
+    setText("runtime-window-title", fields.title);
+    setText("runtime-window-key", fields.key);
+    setText("runtime-window-source", fields.source);
+    setText("runtime-window-active-count", fields.activeCount);
+    setText("runtime-window-last-call", fields.lastCall);
+    setText("runtime-window-last-meaningful", fields.lastMeaningful);
+    setText("runtime-window-active-status", fields.activeStatus);
+    setText("runtime-window-linked-status", fields.linkedStatus);
+    setText("runtime-window-activity-status", fields.activityStatus);
+    renderWindowActiveRequests(el("runtime-window-active-requests"), Array.isArray(detail.active_requests) ? detail.active_requests : [], {
+        language: runtimeLanguage,
+        onCopyTrace: (traceId) => void copyRuntimeValue(traceId),
+    });
+    renderWindowLinkedSessions(el("runtime-window-linked-sessions"), Array.isArray(detail.linked_sessions) ? detail.linked_sessions : [], (session) => openWindowLinkedSession(session), runtimeLanguage);
+    renderWindowActivities(el("runtime-window-activity"), Array.isArray(detail.activity) ? detail.activity : []);
     renderWorkspaceHeading();
 }
 async function refreshWindowDetail() {
@@ -2353,24 +4098,37 @@ async function refreshWindows(refreshSelected = true) {
     abort(windowsAbort);
     const controller = new AbortController();
     windowsAbort = controller;
+    if (windowAvailability === "idle") {
+        windowAvailability = "loading";
+        renderWindowList();
+    }
     const response = await api("windows", { limit: 100 }, controller.signal);
-    if (windowsAbort === controller)
-        windowsAbort = null;
+    // A superseded or navigation-cancelled request must not overwrite the newer Window state.
+    if (windowsAbort !== controller)
+        return;
+    windowsAbort = null;
+    // RuntimeApiClient returns null only for AbortError. Cancellation is not a refresh failure.
     if (!response)
         return;
     if (response.status === 401)
         return lock("Credential rejected.");
-    if (response.status === 403) {
+    const nextAvailability = runtimeWindowAvailabilityAfterHttpResponse(response.status, response.ok, !!response.data);
+    if (nextAvailability === "unavailable") {
         windowRows = [];
         selectedWindowKey = "";
+        windowAvailability = nextAvailability;
         renderWindowList();
         renderWindowDetail(null);
-        setText("runtime-window-list-status", "runtime:read required");
         return;
     }
-    if (!response.ok || !response.data) {
-        setText("runtime-window-list-status", "Could not refresh Window activity.");
+    if (nextAvailability === "stale") {
+        windowAvailability = nextAvailability;
+        renderWindowList();
         return;
+    }
+    windowAvailability = nextAvailability;
+    if (response.data.visibility?.scope === "global" || response.data.visibility?.scope === "principal") {
+        windowVisibilityScope = response.data.visibility.scope;
     }
     windowRows = Array.isArray(response.data.windows) ? response.data.windows : [];
     if (!selectedWindowKey && windowRows.length)
@@ -2383,50 +4141,124 @@ async function refreshWindows(refreshSelected = true) {
         renderWindowDetail(null);
     }
 }
+function openWindowInspector(key) {
+    selectedWindowKey = key;
+    applyWorkspaceView("windows");
+    renderWindowList();
+    void refreshWindowDetail();
+}
 function renderSessionWindowCorrelation(detail) {
     const available = detail?.window_activity_available === true;
     show("runtime-linked-windows-unavailable", !available);
     const linkedNode = el("runtime-linked-windows");
     clearNode(linkedNode);
     const links = available && Array.isArray(detail?.linked_windows) ? detail.linked_windows : [];
-    setText("runtime-linked-windows-status", available ? countLabel(links.length, "Window") : "runtime:read unavailable");
-    for (const link of links) {
-        const key = String(link?.client_window_key || "");
-        if (!key)
-            continue;
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "window-session-card" + (Number(link?.recorder_gap_count || 0) ? " recorder-gap" : "");
-        const title = document.createElement("strong");
-        title.textContent = "Window " + runtimeWindowShortKey(key);
-        const meta = document.createElement("span");
-        meta.className = "muted small";
-        meta.textContent = [
-            link?.source,
-            link?.last_seen_at_ms ? "last WebCodex activity " + windowAgeLabel(link.last_seen_at_ms) : null,
-            Number(link?.recorder_gap_count || 0) ? String(link.recorder_gap_count) + " recorder gap" : null,
-        ].filter(Boolean).map(String).join(" · ");
-        button.appendChild(title);
-        button.appendChild(meta);
-        button.addEventListener("click", () => {
-            selectedWindowKey = key;
-            applyWorkspaceView("windows");
-            renderWindowList();
-            void refreshWindowDetail();
-        });
-        linkedNode?.appendChild(button);
-    }
-    if (available && linkedNode && !links.length) {
-        const empty = document.createElement("p");
-        empty.className = "muted small";
-        empty.textContent = "No linked Window evidence.";
-        linkedNode.appendChild(empty);
+    setText("runtime-linked-windows-status", available ? runtimeCountLabel(links.length, "Window") : tr("runtime:read unavailable"));
+    if (available) {
+        renderSessionWindowCorrelationLinks(linkedNode, links, (key) => openWindowInspector(key), Date.now(), runtimeLanguage);
     }
     const gaps = available && Array.isArray(detail?.window_activity_after_last_session_record)
         ? detail.window_activity_after_last_session_record
         : [];
     show("runtime-recorder-gap-panel", gaps.length > 0);
-    renderWindowActivityRows(el("runtime-recorder-gap-activity"), gaps, true);
+    renderWindowActivities(el("runtime-recorder-gap-activity"), gaps, true);
+}
+function projectWindowActiveCount() {
+    if (projectWindowAvailability !== "available")
+        return 0;
+    return projectWindowRows.reduce((sum, w) => sum + Math.max(0, Number(w?.active_count || 0)), 0);
+}
+function clearProjectWindows() {
+    projectWindowRows = [];
+    projectWindowAvailability = "idle";
+    projectWindowTruncated = false;
+    projectWindowTotal = 0;
+    projectWindowProjectId = "";
+    renderedProjectWindowSignature = "";
+    renderProjectWindows();
+}
+function renderProjectWindows() {
+    const list = el("runtime-project-windows-list");
+    if (!list)
+        return;
+    if (projectWindowAvailability === "unavailable") {
+        clearNode(list);
+        show("runtime-project-windows-empty", false);
+        show("runtime-project-windows-unavailable", true);
+        setText("runtime-project-windows-count", "—");
+        setText("runtime-project-windows-status", tr("runtime:read required"));
+        return;
+    }
+    show("runtime-project-windows-unavailable", false);
+    const count = projectWindowRows.length;
+    setText("runtime-project-windows-count", String(count));
+    setText("runtime-project-windows-status", projectWindowAvailability === "stale"
+        ? tr(count > 0 ? "Refresh failed · showing previous data" : "refresh unavailable")
+        : formatProjectWindowStatusText(count, projectWindowTotal, projectWindowTruncated, runtimeLanguage));
+    const projectEmptyCopy = formatWindowEmptyState(projectWindowAvailability, windowVisibilityScope, true, runtimeLanguage);
+    setText("runtime-project-windows-empty", projectEmptyCopy);
+    show("runtime-project-windows-empty", count === 0 && projectWindowAvailability === "available");
+    const signature = renderFingerprint([
+        runtimeLanguage,
+        projectWindowProjectId,
+        projectWindowRows,
+        projectWindowTruncated,
+        projectWindowTotal,
+        projectWindowAvailability,
+    ]);
+    if (signature === renderedProjectWindowSignature)
+        return;
+    renderedProjectWindowSignature = signature;
+    renderProjectWindowCards(list, projectWindowRows, (key) => openWindowInspector(key), Date.now(), runtimeLanguage);
+}
+async function fetchProjectWindows(request) {
+    abort(projectWindowsAbort);
+    const controller = new AbortController();
+    projectWindowsAbort = controller;
+    const response = await api("windows", { project: request.project, limit: PROJECT_WINDOW_LIMIT }, controller.signal);
+    if (projectWindowsAbort === controller)
+        projectWindowsAbort = null;
+    if (!isCurrentRuntimeProjectWindowsRequest(state, request))
+        return false;
+    if (!response) {
+        projectWindowAvailability = "stale";
+        projectWindowProjectId = request.project;
+        renderProjectWindows();
+        renderProjectSelectors(projectRows, projectRowsTruncated);
+        return false;
+    }
+    if (response.status === 401) {
+        lock("Credential rejected.");
+        return false;
+    }
+    if (response.status === 403) {
+        projectWindowRows = [];
+        projectWindowAvailability = "unavailable";
+        projectWindowProjectId = request.project;
+        projectWindowTruncated = false;
+        projectWindowTotal = 0;
+        renderProjectWindows();
+        renderProjectSelectors(projectRows, projectRowsTruncated);
+        return false;
+    }
+    if (!response.ok || !response.data) {
+        projectWindowAvailability = "stale";
+        projectWindowProjectId = request.project;
+        renderProjectWindows();
+        renderProjectSelectors(projectRows, projectRowsTruncated);
+        return false;
+    }
+    projectWindowRows = Array.isArray(response.data.windows) ? response.data.windows : [];
+    projectWindowAvailability = "available";
+    if (response.data.visibility?.scope === "global" || response.data.visibility?.scope === "principal") {
+        windowVisibilityScope = response.data.visibility.scope;
+    }
+    projectWindowProjectId = request.project;
+    projectWindowTruncated = !!response.data.truncated;
+    projectWindowTotal = typeof response.data.total === "number" ? response.data.total : projectWindowRows.length;
+    renderProjectWindows();
+    renderProjectSelectors(projectRows, projectRowsTruncated);
+    return true;
 }
 function hideDetail() {
     const messageSearch = el("runtime-message-search");
@@ -2464,6 +4296,7 @@ function clearSessionSurface() {
     abortCollaboration();
     hideDetail();
     resetCollaborationComposerUi();
+    clearProjectWindows();
 }
 function lock(message = "", clearRemembered = true) {
     setMobileNavigationOpen(false, false);
@@ -2472,8 +4305,8 @@ function lock(message = "", clearRemembered = true) {
     detachCommunicationEndpointsBestEffort();
     token = "";
     if (clearRemembered) {
-        clearRememberedRuntimeCredential();
-        clearRuntimeDrafts();
+        eraseStoredCredential();
+        eraseAllDrafts();
     }
     abortAll();
     invalidateRuntimeCredential(state);
@@ -2494,6 +4327,8 @@ function lock(message = "", clearRemembered = true) {
     collaborationPendingMessages = 0;
     clearSessionSurface();
     windowRows = [];
+    windowAvailability = "idle";
+    windowVisibilityScope = "principal";
     selectedWindowKey = "";
     selectedWindowDetail = null;
     stopWindowAuto();
@@ -2501,15 +4336,21 @@ function lock(message = "", clearRemembered = true) {
     renderWindowDetail(null);
     resetCommunicationSurface();
     const projectList = el("runtime-project-list");
+    const windowPanel = el("runtime-project-window-activity-panel");
     const sessionsPanel = el("runtime-workflow-sessions-panel");
     renderedProjectSelectorsSignature = "";
     renderedRunnerFleetSignature = "";
     renderedRecentSessionsSignature = "";
+    windowPanel?.remove();
     sessionsPanel?.remove();
     clearNode(projectList);
     if (projectList && sessionsPanel) {
         sessionsPanel.hidden = true;
         projectList.appendChild(sessionsPanel);
+        if (windowPanel) {
+            windowPanel.hidden = true;
+            projectList.appendChild(windowPanel);
+        }
     }
     clearNode(el("runtime-recent-session-list"));
     clearNode(el("runtime-runner-list"));
@@ -2536,7 +4377,7 @@ function lock(message = "", clearRemembered = true) {
         search.value = "";
 }
 function unlockUi() {
-    persistRuntimeCredentialForTab();
+    writeTabCredential();
     document.body.classList.add("runtime-connected");
     show("runtime-token-gate", false);
     show("runtime-console", true);
@@ -2551,42 +4392,22 @@ function showError(message) {
     setText("runtime-error", message ? tr(message) : "");
     show("runtime-error", !!message);
 }
-function countLabel(value, singular, plural = singular + "s") {
-    const count = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
-    if (runtimeLanguage === "zh-CN")
-        return count + " " + (ZH_COUNT_LABELS[singular] || RUNTIME_ZH_TEXT[singular] || singular);
-    return count + " " + (count === 1 ? singular : plural);
-}
-function pendingAttentionCount(attention) {
-    return ["open_risks", "open_todos", "open_questions", "open_guidance"]
-        .reduce((total, key) => total + (typeof attention?.[key] === "number" ? Math.max(0, Math.floor(attention[key])) : 0), 0);
-}
-function attentionLabel(attention) {
-    const parts = [];
-    for (const [key, singular] of [["open_risks", "risk"], ["open_todos", "todo"], ["open_questions", "question"], ["open_guidance", "guidance"]]) {
-        const count = typeof attention?.[key] === "number" ? attention[key] : 0;
-        if (count)
-            parts.push(countLabel(count, singular));
-    }
-    return parts.length ? parts.join(" · ") : tr("No retained pending attention");
+function runtimeCountLabel(value, singular, plural = singular + "s") {
+    return localizedCountLabel(value, singular, plural, runtimeLanguage);
 }
 function renderRuntimeOverviewMetrics(data) {
-    if (!data)
+    const metrics = formatRuntimeOverviewMetrics(data, runtimeLanguage);
+    if (!metrics)
         return;
-    setText("runtime-server-identity", [data.service, data.version].filter(Boolean).join(" · "));
-    setText("runtime-server-build", data.build_git_commit
-        ? (runtimeLanguage === "zh-CN" ? "构建 " : "build ") + data.build_git_commit + (data.build_git_dirty ? (runtimeLanguage === "zh-CN" ? " · 有未提交更改" : " · dirty") : "")
-        : tr("build unavailable"));
-    setText("runtime-server-runners", countLabel(data.runner_count, "Runner"));
-    setText("runtime-server-alignment", countLabel(data.runners_online, "online") + " · " + countLabel(data.runners_stale, "stale") + " · " + countLabel(data.runners_unavailable, "unavailable"));
-    setText("runtime-server-projects", data.projects_available ? countLabel(data.visible_projects, "visible Project") + (data.projects_truncated ? (runtimeLanguage === "zh-CN" ? " · 不完整" : " · partial") : "") : tr("project:read unavailable"));
-    setText("runtime-server-jobs", countLabel(data.active_jobs, "active Job") + (data.mixed_builds_present ? (runtimeLanguage === "zh-CN" ? " · 存在混合构建" : " · mixed builds") : ""));
-    setText("runtime-server-attention", attentionLabel(data.workflow_sessions));
-    setText("runtime-server-sessions", countLabel(data.workflow_sessions?.active, "active Session") + " · " + countLabel(data.workflow_sessions?.running, "running Session") + (data.workflow_sessions?.truncated ? (runtimeLanguage === "zh-CN" ? " · 有界汇总" : " · bounded aggregate") : ""));
-    const recentMeta = data.recent_sessions || {};
-    setText("runtime-recent-status", countLabel(recentMeta.returned, "Session") +
-        (recentMeta.truncated ? (runtimeLanguage === "zh-CN" ? " · 前 " : " · top ") + String(recentMeta.returned || 0) : "") +
-        (recentMeta.scan_truncated ? (runtimeLanguage === "zh-CN" ? " · 扫描不完整" : " · partial scan") : ""));
+    setText("runtime-server-identity", metrics.identity);
+    setText("runtime-server-build", metrics.build);
+    setText("runtime-server-runners", metrics.runners);
+    setText("runtime-server-alignment", metrics.alignment);
+    setText("runtime-server-projects", metrics.projects);
+    setText("runtime-server-jobs", metrics.jobs);
+    setText("runtime-server-attention", metrics.attention);
+    setText("runtime-server-sessions", metrics.sessions);
+    setText("runtime-recent-status", metrics.recentStatus);
 }
 async function fetchOverview(request) {
     abort(overviewAbort);
@@ -2646,11 +4467,7 @@ async function fetchOverview(request) {
     return true;
 }
 function projectLabel(project) {
-    const name = project && project.name ? String(project.name) : "";
-    const id = project && project.id ? String(project.id) : "";
-    const identity = name && name !== id ? name + " — " + id : id;
-    const status = project && project.connected ? String(project.agent_status || "online") : "offline";
-    return identity + " · " + status;
+    return formatProjectLabel(project);
 }
 async function fetchProjects(request, unlocking = false) {
     const priorSelectedProject = selectedProjectRow();
@@ -2734,33 +4551,17 @@ async function fetchProjects(request, unlocking = false) {
         const listRequest = refreshRuntimeSessionList(state);
         if (listRequest)
             void fetchSessions(listRequest);
+        const windowRequest = refreshRuntimeProjectWindows(state);
+        if (windowRequest)
+            void fetchProjectWindows(windowRequest);
     }
     return true;
 }
 function effectiveProjects(projects) {
-    const aggregates = new Map();
-    for (const row of homeProjectRows) {
-        if (row && typeof row.id === "string")
-            aggregates.set(row.id, row);
-    }
-    return (Array.isArray(projects) ? projects : []).map((project) => {
-        const aggregate = aggregates.get(String(project?.id || ""));
-        return aggregate ? { ...project, sessions: aggregate.sessions } : project;
-    });
+    return mergeEffectiveProjects(projects, homeProjectRows);
 }
 function projectSelectorDevices(projects) {
-    const devices = new Set(knownProjectDevices);
-    for (const device of runtimeDeviceIds(projects))
-        devices.add(device);
-    for (const runner of runnerRows) {
-        const clientId = typeof runner?.client_id === "string" ? runner.client_id : "";
-        if (clientId)
-            devices.add(clientId);
-    }
-    const selectedDevice = String(state.selectedDevice || "");
-    if (selectedDevice)
-        devices.add(selectedDevice);
-    return Array.from(devices).sort((left, right) => left.localeCompare(right));
+    return extractProjectSelectorDevices(projects, knownProjectDevices, runnerRows, String(state.selectedDevice || ""));
 }
 function selectedProjectRow() {
     const selected = String(state.selectedProject || "");
@@ -2775,35 +4576,18 @@ function selectedProjectRow() {
 }
 function renderWorkspaceBreadcrumb() {
     const project = selectedProjectRow();
-    setText("runtime-breadcrumb-runner", project?.client_id ? String(project.client_id) : tr("Fleet"));
-    setText("runtime-breadcrumb-project", project ? String(project.name || project.id || tr("Projects")) : tr("Projects"));
+    const { runnerText, projectText } = formatWorkspaceBreadcrumb(project, runtimeLanguage);
+    setText("runtime-breadcrumb-runner", runnerText);
+    setText("runtime-breadcrumb-project", projectText);
 }
 function renderSelectedProjectIdentity() {
     const project = selectedProjectRow();
     renderWorkspaceBreadcrumb();
-    if (runtimeLanguage !== "zh-CN") {
-        setText("runtime-selected-project", runtimeProjectIdentityText(project));
-        return;
-    }
-    if (!project || typeof project.id !== "string" || !project.id) {
-        setText("runtime-selected-project", tr("No project selected"));
-        return;
-    }
-    const runner = typeof project.client_id === "string" && project.client_id ? project.client_id : tr("unknown");
-    const path = typeof project.path === "string" && project.path ? project.path : "不可用";
-    setText("runtime-selected-project", "运行器：" + runner + " · 项目：" + project.id + " · 工作空间：" + path);
+    setText("runtime-selected-project", formatSelectedProjectIdentity(project, runtimeLanguage));
 }
 function renderSessionWorkspaceIdentity() {
     const project = selectedProjectRow();
-    if (runtimeLanguage !== "zh-CN")
-        setText("runtime-session-workspace", runtimeProjectIdentityText(project));
-    else if (!project || typeof project.id !== "string" || !project.id)
-        setText("runtime-session-workspace", tr("No project selected"));
-    else {
-        const runner = typeof project.client_id === "string" && project.client_id ? project.client_id : tr("unknown");
-        const path = typeof project.path === "string" && project.path ? project.path : "不可用";
-        setText("runtime-session-workspace", "运行器：" + runner + " · 项目：" + project.id + " · 工作空间：" + path);
-    }
+    setText("runtime-session-workspace", formatSessionWorkspaceIdentity(project, runtimeLanguage));
 }
 function revealWorkflowSessionDetail() {
     const panel = el("runtime-workflow-sessions-panel");
@@ -2818,6 +4602,7 @@ function renderProjectSelectors(projects, truncated) {
     if (!deviceSelect || !projectList)
         return;
     const effective = effectiveProjects(projects);
+    const activeWindowCount = projectWindowActiveCount();
     const signature = renderFingerprint({
         language: runtimeLanguage,
         selectedDevice: state.selectedDevice,
@@ -2829,201 +4614,37 @@ function renderProjectSelectors(projects, truncated) {
         knownProjectDevices,
         projects: effective,
         runners: runnerRows.map((runner) => [runner?.client_id, runner?.connected, runner?.status]),
+        activeWindowCount,
+        selectedProjectWindowCount: projectWindowRows.length,
     });
     if (signature === renderedProjectSelectorsSignature)
         return;
     renderedProjectSelectorsSignature = signature;
+    const windowPanel = el("runtime-project-window-activity-panel");
     const sessionsPanel = el("runtime-workflow-sessions-panel");
+    windowPanel?.remove();
     sessionsPanel?.remove();
     const devices = projectSelectorDevices(projects);
-    clearNode(deviceSelect);
-    const all = document.createElement("option");
-    all.value = "";
-    all.textContent = tr("All Runners");
-    deviceSelect.appendChild(all);
-    for (const clientId of devices) {
-        const option = document.createElement("option");
-        option.value = clientId;
-        option.textContent = clientId;
-        deviceSelect.appendChild(option);
-    }
-    deviceSelect.value = projectDeviceFilter;
-    const rows = filterAndSortRuntimeProjects(effective, projectDeviceFilter, "");
-    clearNode(projectList);
-    show("runtime-projects-empty", rows.length === 0);
-    const projectsByDevice = new Map();
-    for (const project of rows) {
-        const clientId = String(project?.client_id || "unknown");
-        const deviceProjects = projectsByDevice.get(clientId) || [];
-        deviceProjects.push(project);
-        projectsByDevice.set(clientId, deviceProjects);
-    }
-    const visibleDevices = projectDeviceFilter ? [projectDeviceFilter] : devices;
-    let sessionsAttached = false;
-    for (const clientId of visibleDevices) {
-        const deviceProjects = projectsByDevice.get(clientId) || [];
-        const runner = runnerRows.find((candidate) => String(candidate?.client_id || "") === clientId);
-        const connected = runner ? runner.connected !== false : deviceProjects.some((project) => project?.connected);
-        const group = document.createElement("details");
-        group.className = "device-group" + (connected ? " online" : " offline");
-        group.dataset.runnerId = clientId;
-        group.setAttribute("aria-label", runtimeLanguage === "zh-CN" ? "设备 " + clientId : "Device " + clientId);
-        const storedDisclosure = storedDeviceDisclosure(clientId);
-        const defaultOpen = projectDeviceFilter ? true : String(state.selectedDevice || "") === clientId || clientId === visibleDevices[0];
-        group.open = resolveRunnerDisclosure(storedDisclosure, defaultOpen);
-        const deviceHead = document.createElement("summary");
-        deviceHead.className = "device-group-head";
-        const deviceIcon = document.createElement("span");
-        deviceIcon.className = "device-group-icon";
-        deviceIcon.setAttribute("aria-hidden", "true");
-        deviceIcon.appendChild(runtimeIcon("monitor"));
-        const deviceIdentity = document.createElement("div");
-        deviceIdentity.className = "device-group-identity";
-        const deviceName = document.createElement("strong");
-        deviceName.textContent = clientId;
-        const deviceMeta = document.createElement("span");
-        deviceMeta.className = "muted small";
-        const status = runner ? String(runner.status || (connected ? "online" : "offline")) : (connected ? "online" : "offline");
-        deviceMeta.textContent = tr(status) + " · " + countLabel(deviceProjects.length, "Project");
-        const deviceDot = document.createElement("span");
-        deviceDot.className = "device-group-dot";
-        deviceDot.title = tr(status);
-        deviceIdentity.appendChild(deviceName);
-        deviceIdentity.appendChild(deviceMeta);
-        deviceHead.appendChild(deviceIcon);
-        deviceHead.appendChild(deviceIdentity);
-        deviceHead.appendChild(deviceDot);
-        group.appendChild(deviceHead);
-        group.addEventListener("toggle", () => persistDeviceDisclosure(clientId, group.open));
-        const deviceProjectList = document.createElement("div");
-        deviceProjectList.className = "device-project-list";
-        if (deviceProjects.length === 0) {
-            const empty = document.createElement("p");
-            empty.className = "device-project-empty muted small";
-            empty.textContent = tr("No visible Projects");
-            deviceProjectList.appendChild(empty);
-        }
-        for (const project of deviceProjects) {
-            const workspace = document.createElement("details");
-            workspace.className = "workspace-group";
-            const disclosureKey = "webcodex.runtime.workspace-disclosure.v1." + encodeURIComponent(JSON.stringify([clientId, project.id]));
-            workspace.open = project.id === state.selectedProject;
-            try {
-                workspace.open = workspace.open && window.localStorage.getItem(disclosureKey) !== "closed";
-            }
-            catch { }
-            workspace.addEventListener("toggle", () => {
-                if (!workspace.isConnected || project.id !== state.selectedProject)
-                    return;
-                try {
-                    window.localStorage.setItem(disclosureKey, workspace.open ? "open" : "closed");
-                }
-                catch { }
-            });
-            const row = document.createElement("summary");
-            row.className = "project-row" + (project.id === state.selectedProject ? " selected" : "");
-            if (project.id === state.selectedProject)
-                row.setAttribute("aria-current", "true");
-            const projectName = String(project.name || project.id || "");
-            const projectId = String(project.id || "");
-            const projectPath = String(project.path || "");
-            row.title = [projectName, projectId && projectId !== projectName ? projectId : "", projectPath].filter(Boolean).join(" · ");
-            row.setAttribute("aria-label", row.title || projectName);
-            const projectIcon = document.createElement("span");
-            projectIcon.className = "project-row-icon";
-            projectIcon.setAttribute("aria-hidden", "true");
-            projectIcon.appendChild(runtimeIcon("folder"));
-            const main = document.createElement("div");
-            main.className = "project-row-main";
-            const heading = document.createElement("div");
-            heading.className = "project-row-heading";
-            const title = document.createElement("div");
-            title.className = "project-row-title";
-            title.textContent = projectName;
-            const signals = document.createElement("div");
-            signals.className = "project-row-signals";
-            const addSignal = (text, tone, signalTitle = text) => {
-                const signal = document.createElement("span");
-                signal.className = "project-row-state " + tone;
-                signal.textContent = text;
-                signal.title = signalTitle;
-                signals.appendChild(signal);
-            };
-            const runningSessions = Math.max(0, Number(project.sessions?.running_sessions || 0));
-            const projectAttention = pendingAttentionCount(project.sessions?.attention);
-            if (!project.connected)
-                addSignal(tr("OFFLINE"), "tone-fail");
-            else if (project.agent_status && project.agent_status !== "online")
-                addSignal(tr(String(project.agent_status).toUpperCase()), "tone-warn");
-            if (runningSessions > 0) {
-                addSignal(runtimeLanguage === "zh-CN" ? "运行中 " + runningSessions : runningSessions + " running", "tone-runtime", countLabel(runningSessions, "running Session"));
-            }
-            if (projectAttention > 0) {
-                addSignal(runtimeLanguage === "zh-CN" ? "待处理 " + projectAttention : projectAttention + " attention", "tone-warn", attentionLabel(project.sessions?.attention));
-            }
-            heading.appendChild(title);
-            heading.appendChild(signals);
-            main.appendChild(heading);
-            const meta = document.createElement("div");
-            meta.className = "project-row-meta muted small";
-            const metaParts = [];
-            if (project.sessions) {
-                metaParts.push(project.sessions.sessions_truncated
-                    ? runtimeLanguage === "zh-CN"
-                        ? String(project.sessions.returned_sessions || 0) + " / " + String(project.sessions.retained_sessions || 0) + " 个会话"
-                        : String(project.sessions.returned_sessions || 0) + " / " + String(project.sessions.retained_sessions || 0) + " Sessions"
-                    : countLabel(project.sessions.retained_sessions, "Session"));
-                if (typeof project.sessions.latest_updated_at === "number") {
-                    metaParts.push((runtimeLanguage === "zh-CN" ? "更新于 " : "updated ") + updatedLabel(project.sessions.latest_updated_at));
-                }
-                if (project.sessions.sessions_truncated)
-                    metaParts.push(runtimeLanguage === "zh-CN" ? "扫描不完整" : "scan partial");
-            }
-            meta.textContent = metaParts.join(" · ");
-            if (metaParts.length)
-                main.appendChild(meta);
-            row.appendChild(projectIcon);
-            row.appendChild(main);
-            const select = () => switchProject(String(project.client_id || ""), String(project.id || ""));
-            row.addEventListener("click", (event) => {
-                if (project.id === state.selectedProject)
-                    return;
-                event.preventDefault();
-                try {
-                    window.localStorage.setItem(disclosureKey, "open");
-                }
-                catch { }
-                select();
-            });
-            workspace.appendChild(row);
-            deviceProjectList.appendChild(workspace);
-            if (project.id === state.selectedProject && sessionsPanel) {
-                sessionsPanel.hidden = false;
-                workspace.appendChild(sessionsPanel);
-                sessionsAttached = true;
-            }
-        }
-        group.appendChild(deviceProjectList);
-        projectList.appendChild(group);
-    }
-    if (sessionsPanel && !sessionsAttached) {
-        sessionsPanel.hidden = true;
-        projectList.appendChild(sessionsPanel);
-    }
+    renderProjectSelectorTree(deviceSelect, projectList, sessionsPanel, {
+        effectiveProjects: effective,
+        devices,
+        runnerRows,
+        selectedDevice: state.selectedDevice,
+        selectedProject: state.selectedProject,
+        projectDeviceFilter,
+        language: runtimeLanguage,
+        storedDeviceDisclosure: readDeviceDisclosure,
+        onPersistDeviceDisclosure: writeDeviceDisclosure,
+        onSelectProject: (clientId, projectId) => switchProject(clientId, projectId),
+        windowPanel,
+        selectedProjectWindowActiveCount: activeWindowCount,
+        selectedProjectWindowCount: projectWindowRows.length,
+    });
     const returnedProjects = runtimeProjectsForDevice(effective, projectDeviceFilter).length;
     const totalProjects = Math.max(returnedProjects, projectRowsTotal);
-    const scope = runtimeLanguage === "zh-CN"
-        ? (projectDeviceFilter ? " · 位于 " + projectDeviceFilter : " · 跨全部设备")
-        : (projectDeviceFilter ? " on " + projectDeviceFilter : " across fleet");
-    const queryActive = !!projectSearch.trim();
-    setText("runtime-device-status", devices.length
-        ? countLabel(devices.length, "authorized Runner") + (projectDeviceFilter ? (runtimeLanguage === "zh-CN" ? " · 已筛选" : " · filtered") : " · " + tr("All Runners"))
-        : (runtimeLanguage === "zh-CN" ? "没有已授权运行器" : "No authorized Runners"));
-    setText("runtime-project-status", truncated
-        ? runtimeLanguage === "zh-CN"
-            ? "已显示 " + String(returnedProjects) + " / " + String(totalProjects) + (queryActive ? " 个匹配项目" : " 个可见项目") + scope + " · 有界"
-            : String(returnedProjects) + " of " + String(totalProjects) + (queryActive ? " matching Projects shown" : " visible Projects shown") + scope + " · bounded"
-        : countLabel(totalProjects, queryActive ? "matching Project" : "visible Project") + scope);
+    show("runtime-projects-empty", returnedProjects === 0);
+    setText("runtime-device-status", formatDeviceStatusText(devices.length, projectDeviceFilter, runtimeLanguage));
+    setText("runtime-project-status", formatProjectStatusText(returnedProjects, totalProjects, truncated, projectDeviceFilter, projectSearch, runtimeLanguage));
     renderSelectedProjectIdentity();
 }
 function switchProject(device, project) {
@@ -3035,12 +4656,15 @@ function switchProject(device, project) {
     if (device)
         revealRunner(device);
     const request = selectRuntimeProject(state, device, project);
+    const windowRequest = refreshRuntimeProjectWindows(state);
     renderProjectSelectors(projectRows, projectRowsTruncated);
     renderRunnerFleet(runnerRows);
     renderRecentSessions(recentSessionRows, null);
     renderSelectedProjectIdentity();
     if (request)
         void fetchSessions(request);
+    if (windowRequest)
+        void fetchProjectWindows(windowRequest);
     if (token)
         void fetchProjects(refreshRuntimeProjects(state, projectSearch, projectDeviceFilter));
 }
@@ -3061,11 +4685,6 @@ function applyRunnerFilter(device) {
     if (token)
         void fetchProjects(refreshRuntimeProjects(state, projectSearch, projectDeviceFilter));
 }
-function runnerAttentionCount(runner) {
-    const attention = runner?.sessions?.attention;
-    return ["open_guidance", "open_questions", "open_risks", "open_todos"]
-        .reduce((total, key) => total + (typeof attention?.[key] === "number" ? Math.max(0, attention[key]) : 0), 0);
-}
 function renderRunnerFleet(runners) {
     const node = el("runtime-runner-list");
     if (!node)
@@ -3074,86 +4693,13 @@ function renderRunnerFleet(runners) {
     if (signature === renderedRunnerFleetSignature)
         return;
     renderedRunnerFleetSignature = signature;
-    clearNode(node);
     show("runtime-runners-empty", runners.length === 0 && !!el("runtime-runner-unavailable")?.hidden);
-    for (const runner of runners) {
-        const clientId = String(runner?.client_id || "");
-        if (!clientId)
-            continue;
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "fleet-row" + (clientId === state.selectedDevice ? " selected" : "");
-        if (clientId === state.selectedDevice)
-            row.setAttribute("aria-current", "true");
-        const main = document.createElement("div");
-        main.className = "fleet-row-main";
-        const title = document.createElement("div");
-        title.className = "fleet-row-title";
-        title.textContent = clientId;
-        const meta = document.createElement("div");
-        meta.className = "muted small fleet-row-meta";
-        const metaParts = [
-            tr(runner.connected ? String(runner.status || "online") : "offline"),
-            runner.version ? "v" + String(runner.version) : (runtimeLanguage === "zh-CN" ? "版本不可用" : "version unavailable"),
-            runner.transport ? String(runner.transport) : (runtimeLanguage === "zh-CN" ? "传输方式不可用" : "transport unavailable"),
-            runner.source_alignment
-                ? (runtimeLanguage === "zh-CN" ? "源码 " : "source ") + tr(String(runner.source_alignment))
-                : (runtimeLanguage === "zh-CN" ? "源码对齐状态不可用" : "source alignment unavailable"),
-            typeof runner.last_seen_age_secs === "number"
-                ? (runtimeLanguage === "zh-CN" ? String(runner.last_seen_age_secs) + " 秒前在线" : "seen " + String(runner.last_seen_age_secs) + "s ago")
-                : (runtimeLanguage === "zh-CN" ? "最后在线时间不可用" : "last seen unavailable"),
-        ];
-        if (runner.build_git_commit)
-            metaParts.push((runtimeLanguage === "zh-CN" ? "构建 " : "build ") + String(runner.build_git_commit));
-        meta.textContent = metaParts.join(" · ");
-        main.appendChild(title);
-        main.appendChild(meta);
-        const signals = document.createElement("div");
-        signals.className = "fleet-row-signals";
-        const working = Math.max(Number(runner.jobs_running || 0), Number(runner.sessions?.running_sessions || 0));
-        const attention = runnerAttentionCount(runner);
-        if (working > 0)
-            appendChip(signals, tr("RUNNING"), "tone-runtime");
-        if (attention > 0)
-            appendChip(signals, tr("ATTENTION") + " " + attention, "tone-warn");
-        if (!runner.connected)
-            appendChip(signals, tr("OFFLINE"), "tone-fail");
-        else if (String(runner.status || "") === "stale")
-            appendChip(signals, tr("STALE"), "tone-warn");
-        if (runner.source_alignment === "different")
-            appendChip(signals, tr("SOURCE DIFFERENT"), "tone-fail");
-        if (runner.version_matches_server === false)
-            appendChip(signals, tr("BUILD DIFFERENT"), "tone-warn");
-        if (runner.build_git_dirty === true)
-            appendChip(signals, tr("DIRTY"), "tone-warn");
-        const facts = document.createElement("div");
-        facts.className = "muted small fleet-row-facts";
-        const projectFact = runner.projects_scan_partial
-            ? runtimeLanguage === "zh-CN" ? String(runner.projects_scanned || 0) + " 个项目已扫描" : String(runner.projects_scanned || 0) + " Projects scanned"
-            : countLabel(runner.projects_scanned, "visible Project");
-        const factParts = [
-            countLabel(runner.active_jobs, "active Job"),
-            countLabel(runner.jobs_running, "running Job"),
-            countLabel(runner.jobs_queued, "queued Job"),
-            typeof runner.job_concurrency_limit === "number"
-                ? (runtimeLanguage === "zh-CN" ? "并发上限 " : "limit ") + runner.job_concurrency_limit
-                : (runtimeLanguage === "zh-CN" ? "并发上限不可用" : "limit unavailable"),
-            projectFact,
-            countLabel(runner.sessions?.active_sessions, "active Session"),
-        ];
-        if (runner.projects_scan_partial)
-            factParts.push(runtimeLanguage === "zh-CN" ? "设备群扫描不完整" : "fleet scan partial");
-        if (runner.sessions?.sessions_truncated)
-            factParts.push(runtimeLanguage === "zh-CN" ? "会话扫描不完整" : "Session scan partial");
-        facts.textContent = factParts.join(" · ");
-        row.appendChild(main);
-        row.appendChild(signals);
-        row.appendChild(facts);
-        const select = () => applyRunnerFilter(clientId);
-        row.addEventListener("click", select);
-        node.appendChild(row);
-    }
-    setText("runtime-runner-count", countLabel(runners.length, "Runner"));
+    renderRunnerFleetRows(node, runners, {
+        selectedDevice: state.selectedDevice,
+        language: runtimeLanguage,
+        onSelectRunner: (clientId) => applyRunnerFilter(clientId),
+    });
+    setText("runtime-runner-count", formatRunnerCountText(runners.length, runtimeLanguage));
 }
 function renderRecentSessions(sessions, meta) {
     const node = el("runtime-recent-session-list");
@@ -3169,55 +4715,15 @@ function renderRecentSessions(sessions, meta) {
     if (signature === renderedRecentSessionsSignature)
         return;
     renderedRecentSessionsSignature = signature;
-    clearNode(node);
     show("runtime-recent-empty", sessions.length === 0 && !!el("runtime-recent-unavailable")?.hidden);
-    for (const session of sessions) {
-        const sessionId = String(session?.session_id || "");
-        const projectId = String(session?.project_id || "");
-        const clientId = String(session?.client_id || "");
-        if (!sessionId || !projectId || !clientId)
-            continue;
-        const selected = projectId === state.selectedProject && sessionId === state.workflow.selectedSessionId;
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "recent-session-row" + (selected ? " selected" : "");
-        if (selected)
-            row.setAttribute("aria-current", "true");
-        const main = document.createElement("div");
-        main.className = "recent-session-main";
-        const title = document.createElement("div");
-        title.className = "session-title";
-        title.textContent = session.title ? String(session.title) : sessionId;
-        const location = document.createElement("div");
-        location.className = "muted small recent-session-location";
-        location.textContent = clientId + " · " + String(session.project_name || projectId) + (session.project_name && session.project_name !== projectId ? " · " + projectId : "");
-        main.appendChild(title);
-        main.appendChild(location);
-        const signals = document.createElement("div");
-        signals.className = "recent-session-signals";
-        const liveness = localizedLivenessPresentation(session);
-        if (liveness.state === "working")
-            appendChip(signals, tr("RUNNING"), "tone-runtime");
-        const attention = attentionLabel(session.overview?.attention);
-        if (pendingAttentionCount(session.overview?.attention) > 0)
-            appendChip(signals, attention, "tone-warn");
-        const lifecycle = document.createElement("span");
-        lifecycle.className = "muted small";
-        lifecycle.textContent = [tr(String(session.lifecycle || "")), liveness.label, (runtimeLanguage === "zh-CN" ? "更新于 " : "updated ") + updatedLabel(session.updated_at)].filter(Boolean).join(" · ");
-        lifecycle.title = liveness.tooltip;
-        signals.appendChild(lifecycle);
-        row.appendChild(main);
-        row.appendChild(signals);
-        appendPreview(row, tr("Now"), session.current_activity);
-        appendPreview(row, tr("Last"), session.last_activity);
-        const select = () => selectRecentSession(session);
-        row.addEventListener("click", select);
-        node.appendChild(row);
-    }
+    renderRecentSessionRows(node, sessions, {
+        selectedProject: state.selectedProject,
+        selectedSessionId: state.workflow.selectedSessionId,
+        language: runtimeLanguage,
+        onSelectSession: (session) => selectRecentSession(session),
+    });
     if (meta) {
-        setText("runtime-recent-status", countLabel(meta.returned, "Session")
-            + (meta.truncated ? (runtimeLanguage === "zh-CN" ? " · 前 " : " · top ") + String(meta.returned || 0) : "")
-            + (meta.scan_truncated ? (runtimeLanguage === "zh-CN" ? " · 扫描不完整" : " · partial scan") : ""));
+        setText("runtime-recent-status", formatRecentSessionStatusText(meta, runtimeLanguage));
     }
 }
 function selectRecentSession(session) {
@@ -3250,6 +4756,9 @@ function selectRecentSession(session) {
     revealWorkflowSessionDetail();
     if (location.sessionListRequest)
         void fetchSessions(location.sessionListRequest);
+    const windowRequest = refreshRuntimeProjectWindows(state);
+    if (windowRequest)
+        void fetchProjectWindows(windowRequest);
     if (location.detailRequest)
         void fetchSessionDetail(location.detailRequest);
     const collaborationRequest = runtimeCollaborationRequest(state);
@@ -3306,130 +4815,19 @@ async function fetchSessions(request) {
     }
 }
 function updatedLabel(timestamp) {
-    if (typeof timestamp !== "number")
-        return tr("time unavailable");
-    return new Date(timestamp * 1000).toLocaleTimeString(runtimeLanguage === "zh-CN" ? "zh-CN" : "en");
+    return formatUpdatedTime(timestamp, runtimeLanguage);
 }
 function dateTimeLabel(timestamp) {
-    if (typeof timestamp !== "number")
-        return tr("time unavailable");
-    return new Date(timestamp * 1000).toLocaleString(runtimeLanguage === "zh-CN" ? "zh-CN" : "en");
+    return formatSessionDateTime(timestamp, runtimeLanguage);
 }
 function localizedLivenessPresentation(session) {
-    const presentation = workflowSessionLivenessPresentation(session);
-    if (runtimeLanguage !== "zh-CN")
-        return presentation;
-    let label = tr(String(presentation.label || "idle"));
-    if (presentation.state === "idle" && String(presentation.label || "").startsWith("idle · ")) {
-        label = tr("idle") + " · " + String(presentation.label).slice("idle · ".length);
-    }
-    return { ...presentation, label, tooltip: tr(String(presentation.tooltip || "")) };
+    return formatLivenessPresentation(session, runtimeLanguage);
 }
-function localizedWorkflowText(value) {
-    const source = String(value || "");
-    if (runtimeLanguage !== "zh-CN" || !source)
-        return source;
-    const exact = {
-        "Latest retained validation passed": "最近保留的验证已通过",
-        "Latest validation passed": "最近验证已通过",
-        "Latest retained validation failed": "最近保留的验证失败",
-        "Latest validation failed": "最近验证失败",
-        "Validation not run": "尚未运行验证",
-        "Retained terminal validation evidence unavailable": "保留的最终验证证据不可用",
-        "Terminal validation evidence unavailable": "最终验证证据不可用",
-        "No work observations in retained events.": "保留事件中没有工作观察记录。",
-        "No tool activity observed.": "尚未观察到工具活动。",
-        "No retained open guidance, questions, risks, or todos.": "没有保留的开放指导、问题、风险或待办。",
-        "No retained model-reported progress.": "没有保留的模型报告进度。",
-    };
-    let text = exact[source] || source;
-    const prefixes = [
-        ["Recent observed work: ", "最近观察到的工作："],
-        ["Observed work: ", "已观察工作："],
-        ["Retained open messages: ", "保留的开放消息："],
-        ["Retained: ", "保留："],
-        ["Recent ", "最近 "],
-        ["latest ", "最近 "],
-    ];
-    for (const [english, chinese] of prefixes) {
-        if (text.startsWith(english)) {
-            text = chinese + text.slice(english.length);
-            break;
-        }
-    }
-    const nounMap = {
-        edit: "次编辑", edits: "次编辑", validation: "次验证", validations: "次验证",
-        exploration: "次探索", review: "次审查", reviews: "次审查", run: "次运行", runs: "次运行",
-        risk: "个风险", risks: "个风险", todo: "个待办", todos: "个待办",
-        question: "个问题", questions: "个问题", guidance: "条指导",
-        test: "次测试", tests: "次测试", "unresolved failure": "个未解决失败",
-        "unresolved failures": "个未解决失败", "unresolved validation failure": "个未解决的验证失败",
-        "unresolved validation failures": "个未解决的验证失败",
-    };
-    return text.replace(/(\d+) (unresolved validation failures?|unresolved failures?|edits?|validations?|exploration|reviews?|runs?|risks?|todos?|questions?|guidance|tests?)/g, (_match, count, noun) => {
-        return String(count) + " " + (nounMap[String(noun)] || noun);
-    });
-}
-function activityKindLabel(activity) {
-    const kind = String(activity && activity.kind || "Activity");
-    if (activity && activity.job_handoff) {
-        if (kind === "Tested")
-            return runtimeLanguage === "zh-CN" ? "测试" : "Test";
-        if (kind === "Ran")
-            return runtimeLanguage === "zh-CN" ? "命令" : "Command";
-    }
-    if (kind === "Explored" && activity && typeof activity.group_count === "number")
-        return (runtimeLanguage === "zh-CN" ? "探索 ×" : "Explored ×") + activity.group_count;
-    if (runtimeLanguage !== "zh-CN")
-        return kind;
-    return { Activity: "活动", Progress: "进度", Explored: "探索", Edited: "编辑", Tested: "测试", Ran: "运行", Reviewed: "审查" }[kind] || kind;
-}
-function activityFacts(activity, includeTiming) {
-    const facts = [];
-    if (activity && typeof activity.group_count === "number") {
-        if (Array.isArray(activity.group_kinds) && activity.group_kinds.length)
-            facts.push(activity.group_kinds.map(String).join(" / "));
-        if (Array.isArray(activity.group_tools) && activity.group_tools.length)
-            facts.push(activity.group_tools.map(String).join(", "));
-    }
-    else if (activity && activity.tool)
-        facts.push(String(activity.tool));
-    if (activity && activity.kind === "Progress")
-        facts.push(runtimeLanguage === "zh-CN" ? "仅供参考" : "informational");
-    else if (activity && activity.job_handoff) {
-        facts.push(runtimeLanguage === "zh-CN" ? "已移交" : "handed off");
-        if (activity.execution_state)
-            facts.push((runtimeLanguage === "zh-CN" ? "执行 " : "execution ") + tr(String(activity.execution_state)));
-    }
-    else if (activity && activity.state)
-        facts.push(String(activity.state));
-    if (activity && activity.job_id)
-        facts.push("job " + String(activity.job_id));
-    if (includeTiming && activity && typeof activity.started_at === "number")
-        facts.push(new Date(activity.started_at * 1000).toLocaleTimeString(runtimeLanguage === "zh-CN" ? "zh-CN" : "en"));
-    return facts;
-}
-function activityDescription(activity) {
-    if (!activity)
-        return "";
-    const parts = [activityKindLabel(activity), ...activityFacts(activity, false)];
-    if (activity.summary && !activity.job_handoff)
-        parts.push(String(activity.summary));
-    return parts.join(" · ");
+function localWorkflowText(value) {
+    return localizedWorkflowText(value, runtimeLanguage);
 }
 function appendPreview(parent, label, activity) {
-    if (!activity)
-        return;
-    const row = document.createElement("div");
-    row.className = "activity-preview muted small";
-    const prefix = document.createElement("span");
-    prefix.className = "activity-preview-label";
-    prefix.textContent = label;
-    const text = document.createElement("span");
-    text.textContent = activityDescription(activity);
-    row.appendChild(prefix);
-    row.appendChild(text);
-    parent.appendChild(row);
+    appendActivityPreview(parent, label, activity, runtimeLanguage);
 }
 function renderSessionList(sessions, payload) {
     const node = el("runtime-session-list");
@@ -3540,12 +4938,12 @@ function setTone(id, tone) {
 }
 function renderOverview(overview) {
     const view = workflowSessionOverviewPresentation(overview);
-    setText("runtime-overview-work", localizedWorkflowText(view.workText));
-    setText("runtime-overview-validation", localizedWorkflowText(view.validationText) + (typeof view.validationAt === "number" ? " · " + updatedLabel(view.validationAt) : ""));
+    setText("runtime-overview-work", localWorkflowText(view.workText));
+    setText("runtime-overview-validation", localWorkflowText(view.validationText) + (typeof view.validationAt === "number" ? " · " + updatedLabel(view.validationAt) : ""));
     setTone("runtime-overview-validation-card", view.validationTone);
-    setText("runtime-overview-attention", localizedWorkflowText(view.attentionText));
+    setText("runtime-overview-attention", localWorkflowText(view.attentionText));
     setTone("runtime-overview-attention-card", view.attentionTone);
-    setText("runtime-overview-progress", localizedWorkflowText(view.progressText) + (typeof view.progressAt === "number" ? (runtimeLanguage === "zh-CN" ? " · 报告于 " : " · reported ") + updatedLabel(view.progressAt) : ""));
+    setText("runtime-overview-progress", localWorkflowText(view.progressText) + (typeof view.progressAt === "number" ? (runtimeLanguage === "zh-CN" ? " · 报告于 " : " · reported ") + updatedLabel(view.progressAt) : ""));
 }
 function syncFollowUi() {
     show("runtime-jump-latest", !!state.workflow.selectedSessionId && !shouldFollowWorkflowSessionLatest(state.workflow));
@@ -3576,52 +4974,12 @@ function renderDetail(detail, consumeCollaborationNotice = true) {
     const activities = Array.isArray(detail.activity) ? detail.activity : [];
     const node = el("runtime-timeline");
     const previousScrollTop = node ? node.scrollTop : 0;
-    clearNode(node);
     show("runtime-timeline-empty", activities.length === 0);
+    renderTimelineEvents(node, activities, runtimeLanguage);
     if (!node)
         return syncFollowUi();
-    for (const activity of activities) {
-        const item = document.createElement("li");
-        item.className = "timeline-event";
-        if (activity && activity.kind === "Progress")
-            item.classList.add("reported-progress");
-        if (activity && ["failed", "timed_out"].includes(String(activity.state || "")))
-            item.classList.add("failed");
-        const head = document.createElement("div");
-        head.className = "timeline-head";
-        const kind = document.createElement("span");
-        kind.className = "timeline-kind";
-        kind.textContent = activityKindLabel(activity);
-        const meta = document.createElement("span");
-        meta.className = "muted small";
-        meta.textContent = activityFacts(activity, true).join(" · ");
-        head.appendChild(kind);
-        head.appendChild(meta);
-        item.appendChild(head);
-        if (activity && activity.summary) {
-            const body = document.createElement("div");
-            body.className = "timeline-body small";
-            body.textContent = String(activity.summary);
-            item.appendChild(body);
-        }
-        if (activity && Array.isArray(activity.paths) && activity.paths.length) {
-            const paths = document.createElement("div");
-            paths.className = "muted small";
-            paths.textContent = activity.paths.map(String).join(" · ");
-            item.appendChild(paths);
-        }
-        node.appendChild(item);
-    }
     node.scrollTop = workflowSessionScrollTopAfterRender(state.workflow, previousScrollTop, node.clientHeight, node.scrollHeight);
     syncFollowUi();
-}
-function collaborationPhaseLabel() {
-    switch (state.collaboration.phase) {
-        case "live": return tr("Live");
-        case "reconnecting": return tr("Reconnecting");
-        case "paused": return tr("Paused");
-        default: return tr("Idle");
-    }
 }
 function syncCollaborationComposer() {
     const edit = runtimeCollaborationEditTarget(state);
@@ -3661,23 +5019,9 @@ function syncCollaborationComposer() {
         send.classList.toggle("replace-mode", !!edit);
     }
     syncAckComposer();
-    syncCollaborationComposerLayout();
+    syncCollaborationComposerLayout(body, el("runtime-collaboration-form"), send);
     if (unavailable && checkbox)
         checkbox.disabled = true;
-}
-function syncCollaborationComposerLayout() {
-    const body = el("runtime-message-body");
-    const composer = el("runtime-collaboration-form");
-    const send = el("runtime-message-send");
-    const hasContent = !!body?.value.trim();
-    composer?.classList.toggle("has-content", hasContent);
-    send?.classList.toggle("is-ready", hasContent);
-    if (!body)
-        return;
-    body.style.height = "0px";
-    const nextHeight = Math.min(Math.max(body.scrollHeight, 44), 180);
-    body.style.height = nextHeight + "px";
-    body.style.overflowY = body.scrollHeight > 180 ? "auto" : "hidden";
 }
 function scrollCollaborationToLatest(smooth) {
     const scroll = el("runtime-chat-scroll");
@@ -3696,15 +5040,9 @@ function syncComposerOptionSummary() {
     const priority = el("runtime-message-priority");
     const checkbox = el("runtime-message-requires-ack");
     const options = el("runtime-message-options");
-    const signals = [];
-    if (kind?.value && kind.value !== "note")
-        signals.push(tr(kind.value));
-    if (priority?.value && priority.value !== "normal")
-        signals.push(tr(priority.value));
-    if (checkbox?.checked)
-        signals.push(runtimeLanguage === "zh-CN" ? "需确认" : "ACK");
-    setText("runtime-message-options-label", signals.length ? signals.join(" · ") : tr("Options"));
-    options?.classList.toggle("has-selection", signals.length > 0);
+    const summary = formatComposerOptionSummary(String(kind?.value || ""), String(priority?.value || ""), !!checkbox?.checked, runtimeLanguage);
+    setText("runtime-message-options-label", summary.label);
+    options?.classList.toggle("has-selection", summary.hasSelection);
 }
 function setCollaborationReplyTarget(messageId) {
     collaborationReplyTo = messageId;
@@ -3750,23 +5088,12 @@ function resetCollaborationComposerUi() {
     closeComposerOptions(false);
     syncCollaborationComposer();
 }
-function runtimeSearchMatches(query, values) {
-    const text = values.filter((value) => typeof value === "string").join(" ").toLocaleLowerCase();
-    return query.trim().toLocaleLowerCase().split(/\s+/).every((term) => text.includes(term));
-}
 function filterCollaborationMessages() {
     const query = el("runtime-message-search")?.value || "";
-    let matches = 0;
-    const cards = document.querySelectorAll("#runtime-collaboration-board .message-card");
-    for (const card of Array.from(cards)) {
-        const message = state.collaboration.messages.find((entry) => entry.message_id === card.dataset.messageId);
-        const visible = runtimeSearchMatches(query, [message?.message, message?.resolution, message?.message_id, message?.author_session_id]);
-        card.hidden = !visible;
-        if (visible)
-            matches++;
-    }
-    document.querySelectorAll("#runtime-collaboration-board .message-date-separator").forEach((node) => { node.hidden = !!query.trim(); });
-    setText("runtime-message-search-status", query.trim() ? matches + " / " + cards.length : "");
+    const cards = Array.from(document.querySelectorAll("#runtime-collaboration-board .message-card"));
+    const separators = Array.from(document.querySelectorAll("#runtime-collaboration-board .message-date-separator"));
+    const result = filterCollaborationCards(cards, separators, state.collaboration.messages, query);
+    setText("runtime-message-search-status", query.trim() ? result.matches + " / " + result.total : "");
 }
 function renderCollaboration(statusText, consumeMutationNotice = true) {
     const mutationNotice = consumeMutationNotice ? takeRuntimeCollaborationMutationNotice(state) : "";
@@ -3810,7 +5137,7 @@ function renderCollaboration(statusText, consumeMutationNotice = true) {
         : tr("This credential can inspect the Project and Session, but retained messages require runtime:read."));
     const localizedStatusText = statusText ? tr(statusText) : "";
     const status = available
-        ? (runtimeLanguage === "zh-CN" ? "协作：" : "Collaboration: ") + collaborationPhaseLabel() + " · " + countLabel(messages.length, "retained message") + (localizedStatusText ? " · " + localizedStatusText : "")
+        ? (runtimeLanguage === "zh-CN" ? "协作：" : "Collaboration: ") + collaborationPhaseLabel(state.collaboration.phase, runtimeLanguage) + " · " + runtimeCountLabel(messages.length, "retained message") + (localizedStatusText ? " · " + localizedStatusText : "")
         : (runtimeLanguage === "zh-CN" ? "runtime:read 不可用" : "runtime:read unavailable");
     setText("runtime-collaboration-status", status);
     const node = el("runtime-collaboration-board");
@@ -3836,20 +5163,7 @@ function renderCollaboration(statusText, consumeMutationNotice = true) {
     }
     const latestAgent = el("runtime-latest-agent-message");
     if (latestAgent) {
-        const sides = runtimeCollaborationMessageSides(messages, locallyAuthoredCollaborationMessageIds);
-        const latest = [...messages].reverse().find((message) => sides.get(String(message.message_id)) === "incoming" && !message.superseded_by_message_id && message.closure_kind !== "withdrawn");
-        clearNode(latestAgent);
-        if (latest) {
-            appendRichMessage(latestAgent, latest.message);
-            const time = document.createElement("p");
-            time.className = "muted small";
-            time.textContent = updatedLabel(latest.created_at);
-            latestAgent.appendChild(time);
-        }
-        else
-            latestAgent.textContent = runtimeLanguage === "zh-CN"
-                ? "当前保留范围内暂无 Agent 留言。ACK 不包含回复正文；下方可查看模型报告的进度。"
-                : "No Agent message in the retained window. ACK contains no reply text; model-reported progress appears below.";
+        renderLatestAgentMessage(latestAgent, messages, locallyAuthoredCollaborationMessageIds, runtimeLanguage);
     }
     renderedCollaborationSignature = signature;
     clearNode(node);
@@ -3857,201 +5171,15 @@ function renderCollaboration(statusText, consumeMutationNotice = true) {
         renderedCollaborationMessageIds = nextRenderedMessageIds;
         return;
     }
-    const byId = new Map();
-    const children = new Map();
-    for (const message of messages) {
-        const id = String(message?.message_id || "");
-        if (id)
-            byId.set(id, message);
-    }
-    for (const message of messages) {
-        const parent = typeof message?.reply_to === "string" ? message.reply_to : "";
-        if (parent && byId.has(parent)) {
-            const list = children.get(parent) || [];
-            list.push(message);
-            children.set(parent, list);
-        }
-    }
-    const messageSides = runtimeCollaborationMessageSides(messages, locallyAuthoredCollaborationMessageIds);
-    const visited = new Set();
-    let previousRenderedSide = "";
-    let previousRenderedDay = "";
-    const appendMessage = (message, depth, parentUnavailable) => {
-        const id = String(message?.message_id || "");
-        if (!id || visited.has(id))
-            return;
-        visited.add(id);
-        const card = document.createElement("article");
-        card.dataset.messageId = id;
-        card.className = "message-card " + String(message?.kind || "note") + (String(message?.status || "") === "resolved" ? " resolved" : "") + (parentUnavailable ? " retained-reply" : "");
-        const messageSide = messageSides.get(id) || "neutral";
-        card.classList.add(messageSide === "incoming" ? "agent-authored" : messageSide === "outgoing" ? "human-authored" : "provenance-unknown");
-        const createdAt = typeof message?.created_at === "number" ? message.created_at : 0;
-        const createdDate = createdAt ? new Date(createdAt * 1000) : null;
-        const dayKey = createdDate ? [createdDate.getFullYear(), createdDate.getMonth(), createdDate.getDate()].join("-") : "";
-        if (dayKey && dayKey !== previousRenderedDay) {
-            const separator = document.createElement("div");
-            separator.className = "message-date-separator";
-            const label = document.createElement("span");
-            label.textContent = createdDate?.toLocaleDateString(runtimeLanguage === "zh-CN" ? "zh-CN" : "en", { month: "short", day: "numeric", year: "numeric" }) || "";
-            separator.appendChild(label);
-            node.appendChild(separator);
-            previousRenderedDay = dayKey;
-            previousRenderedSide = "";
-        }
-        card.classList.add(messageSide === "incoming" ? "message-incoming" : messageSide === "outgoing" ? "message-outgoing" : "message-neutral");
-        if (!previouslyRenderedMessageIds.has(id))
-            card.classList.add("message-entering");
-        if (previousRenderedSide === messageSide)
-            card.classList.add("message-group-continuation");
-        previousRenderedSide = messageSide;
-        if (depth > 0)
-            card.classList.add("message-thread");
-        const content = document.createElement("div");
-        content.className = "message-content";
-        const author = document.createElement("div");
-        author.className = "message-author";
-        const authorName = document.createElement("span");
-        authorName.className = "message-author-name";
-        authorName.textContent = messageSide === "incoming" ? tr("Agent") : messageSide === "outgoing" ? tr("You") : tr("Retained message");
-        if (message?.author_session_id)
-            authorName.title = String(message.author_session_id);
-        else if (messageSide === "neutral")
-            authorName.title = tr("Author provenance unavailable");
-        author.appendChild(authorName);
-        content.appendChild(author);
-        if (message?.reply_to) {
-            const replyContext = document.createElement("div");
-            replyContext.className = "message-reply-context";
-            replyContext.appendChild(runtimeIcon("reply"));
-            const replyText = document.createElement("span");
-            const parent = byId.get(String(message.reply_to));
-            const preview = parent?.message ? String(parent.message).replace(/\s+/g, " ").trim().slice(0, 120) : tr("Original message unavailable");
-            replyText.textContent = tr("Replying to") + " · " + preview;
-            replyContext.appendChild(replyText);
-            content.appendChild(replyContext);
-        }
-        const footer = document.createElement("div");
-        footer.className = "message-footer";
-        const head = document.createElement("div");
-        head.className = "message-head";
-        const kindValue = String(message?.kind || "note");
-        const priorityValue = String(message?.priority || "normal");
-        const statusValue = String(message?.status || "open");
-        const messageSignals = [];
-        if (kindValue !== "note")
-            messageSignals.push(tr(kindValue));
-        if (priorityValue !== "normal")
-            messageSignals.push(tr(priorityValue));
-        if (statusValue && statusValue !== "open" && statusValue !== "resolved")
-            messageSignals.push(tr(statusValue));
-        if (messageSignals.length) {
-            const kind = document.createElement("span");
-            kind.className = "message-kind";
-            kind.textContent = messageSignals.join(" · ");
-            head.appendChild(kind);
-        }
-        const time = document.createElement("span");
-        time.className = "muted small";
-        time.textContent = updatedLabel(message?.created_at);
-        head.appendChild(time);
-        footer.appendChild(head);
-        const meta = document.createElement("div");
-        meta.className = "message-meta";
-        const metaParts = [id];
-        if (message?.author_session_id)
-            metaParts.push((runtimeLanguage === "zh-CN" ? "作者 " : "author ") + String(message.author_session_id));
-        if (parentUnavailable)
-            metaParts.push(runtimeLanguage === "zh-CN" ? "保留的回复 · 上级消息不可用" : "retained reply · parent unavailable");
-        else if (message?.reply_to)
-            metaParts.push((runtimeLanguage === "zh-CN" ? "回复 " : "reply to ") + String(message.reply_to));
-        if (message?.superseded_by_message_id) {
-            const replacementId = String(message.superseded_by_message_id);
-            metaParts.push(byId.has(replacementId)
-                ? "superseded by " + replacementId
-                : "superseded by " + replacementId + " · replacement unavailable / retained link only");
-        }
-        if (message?.supersedes_message_id) {
-            const originalId = String(message.supersedes_message_id);
-            metaParts.push(byId.has(originalId)
-                ? "replaces " + originalId
-                : "replaces " + originalId + " · retained link only");
-        }
-        meta.textContent = metaParts.join(" · ");
-        footer.appendChild(meta);
-        footer.title = meta.textContent;
-        const bubble = document.createElement("div");
-        bubble.className = "message-bubble";
-        appendRichMessage(bubble, message?.message);
-        content.appendChild(bubble);
-        if (message?.requires_ack) {
-            const ack = document.createElement("div");
-            ack.className = "message-ack";
-            const acknowledged = typeof message?.first_ack_observed_at === "number";
-            ack.classList.toggle("observed", acknowledged);
-            ack.textContent = acknowledged
-                ? (runtimeLanguage === "zh-CN" ? "已观察到 ACK（不代表回复或完成）" : "ACK observed (not a reply or completion)") + " · " + updatedLabel(message.first_ack_observed_at)
-                : tr("Acknowledgement required");
-            ack.title = acknowledged
-                ? "ACK required · First ACK observed " + updatedLabel(message.first_ack_observed_at)
-                : "ACK required";
-            footer.appendChild(ack);
-        }
-        if (message?.resolved_at || message?.resolution || message?.resolved_by_message_id || message?.closure_kind) {
-            const resolution = document.createElement("div");
-            resolution.className = "message-resolution";
-            const parts = [];
-            if (message?.closure_kind === "withdrawn")
-                parts.push("withdrawn" + (message.resolved_at ? " " + updatedLabel(message.resolved_at) : ""));
-            else if (message?.closure_kind === "superseded")
-                parts.push("superseded" + (message.resolved_at ? " " + updatedLabel(message.resolved_at) : ""));
-            else if (message.resolved_at)
-                parts.push("resolved " + updatedLabel(message.resolved_at));
-            if (message.resolution)
-                parts.push(String(message.resolution));
-            if (message.resolved_by_message_id)
-                parts.push("by " + String(message.resolved_by_message_id));
-            const resolutionLabel = message?.closure_kind === "withdrawn"
-                ? tr("Withdrawn")
-                : message?.closure_kind === "superseded"
-                    ? tr("Replaced")
-                    : tr("Resolved");
-            resolution.textContent = resolutionLabel + (message.resolved_at ? " · " + updatedLabel(message.resolved_at) : "");
-            resolution.title = parts.join(" · ");
-            footer.appendChild(resolution);
-            if (message.resolution) {
-                const explanation = document.createElement("section");
-                explanation.className = "message-resolution-body";
-                const label = document.createElement("strong");
-                label.textContent = runtimeLanguage === "zh-CN" ? "处理说明" : "Resolution";
-                explanation.appendChild(label);
-                appendRichMessage(explanation, message.resolution);
-                content.appendChild(explanation);
-            }
-        }
-        const actions = document.createElement("div");
-        actions.className = "message-actions";
-        actions.appendChild(createMessageAction(tr("Reply"), "reply", () => setCollaborationReplyTarget(id)));
-        if (runtimeCollaborationMessageCanMutate(message) && state.collaboration.phase === "live" && !state.collaboration.uncertainMutation) {
-            const editLabel = runtimeLanguage === "zh-CN" ? "替换这条保留消息，同时保留其历史记录。" : "Replace this retained message while preserving its history.";
-            const deleteLabel = runtimeLanguage === "zh-CN" ? "撤回这条保留消息；历史记录仍会保留。" : "Withdraw this retained message; history is preserved.";
-            actions.appendChild(createMessageAction(editLabel, "edit", () => beginCollaborationEdit(message)));
-            actions.appendChild(createMessageAction(deleteLabel, "trash", () => void withdrawHumanCollaborationMessage(id), true));
-        }
-        footer.appendChild(actions);
-        content.appendChild(footer);
-        card.appendChild(content);
-        node.appendChild(card);
-        for (const child of children.get(id) || [])
-            appendMessage(child, depth + 1, false);
-    };
-    for (const message of messages) {
-        const parent = typeof message?.reply_to === "string" ? message.reply_to : "";
-        if (!parent || !byId.has(parent))
-            appendMessage(message, 0, !!parent);
-    }
-    for (const message of messages)
-        appendMessage(message, 0, false);
+    renderCollaborationMessageCards(node, messages, {
+        locallyAuthoredIds: locallyAuthoredCollaborationMessageIds,
+        previouslyRenderedMessageIds,
+        canMutate: state.collaboration.phase === "live" && !state.collaboration.uncertainMutation,
+        language: runtimeLanguage,
+        onReply: (id) => setCollaborationReplyTarget(id),
+        onEdit: (message) => beginCollaborationEdit(message),
+        onWithdraw: (id) => void withdrawHumanCollaborationMessage(id),
+    });
     renderedCollaborationMessageIds = nextRenderedMessageIds;
     filterCollaborationMessages();
     if (hasNewMessages && !firstRetainedRender)
@@ -4478,24 +5606,6 @@ async function postHumanCollaborationMessage(event) {
     setText("runtime-message-send-status", tr("Sent."));
     renderCollaboration();
 }
-function operationKey(prefix) {
-    const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
-    return prefix + "-" + random;
-}
-function communicationTimeLabel(value) {
-    if (typeof value !== "number" || !Number.isFinite(value))
-        return tr("time unavailable");
-    return new Date(value).toLocaleString(runtimeLanguage === "zh-CN" ? "zh-CN" : "en");
-}
-function parseAgentIds(value) {
-    const ids = value
-        .split(/[\s,]+/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-    return Array.from(new Set(ids));
-}
 function communicationAgent(agentId) {
     return communicationAgents.find((agent) => String(agent?.agent_id || "") === agentId) || null;
 }
@@ -4510,11 +5620,6 @@ function communicationEndpoint(agentId = selectedCommunicationAgentId) {
 }
 function communicationEndpointId(agentId = selectedCommunicationAgentId) {
     return communicationEndpoint(agentId)?.endpoint_id || "";
-}
-function idempotencyKeyFor(pending, fingerprint, prefix) {
-    return pending && pending.fingerprint === fingerprint
-        ? pending
-        : { fingerprint, key: operationKey(prefix) };
 }
 function resetCommunicationSurface() {
     communicationGeneration += 1;
@@ -4563,51 +5668,15 @@ function renderCommunicationAvailability() {
     const available = communicationReadAvailable !== false;
     show("runtime-communication-unavailable", !available);
     show("runtime-communication-surface", available);
-    const access = communicationReadAvailable === null
-        ? (runtimeLanguage === "zh-CN" ? "正在检查 communication:read…" : "communication:read checking…")
-        : available
-            ? "communication:read" + (communicationManageAvailable === false
-                ? (runtimeLanguage === "zh-CN" ? " · 只读" : " · read only")
-                : (runtimeLanguage === "zh-CN" ? " · 当前视图每 30 秒刷新 · 端点租约每 30 秒续期" : " · 30s refresh while visible · 30s endpoint lease renewal"))
-            : (runtimeLanguage === "zh-CN" ? "communication:read 不可用" : "communication:read unavailable");
-    setText("runtime-communication-status", access);
+    setText("runtime-communication-status", formatCommunicationAvailability(communicationReadAvailable, communicationManageAvailable, runtimeLanguage));
 }
 function renderCommunicationAgents() {
-    setText("runtime-communication-count", countLabel(communicationAgents.length, "Agent"));
+    setText("runtime-communication-count", runtimeCountLabel(communicationAgents.length, "Agent"));
     const list = el("runtime-agent-list");
-    clearNode(list);
     show("runtime-agent-empty", communicationReadAvailable === true && communicationAgents.length === 0);
-    if (!list)
-        return;
-    for (const agent of communicationAgents) {
-        const agentId = String(agent?.agent_id || "");
-        if (!agentId)
-            continue;
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "communication-row" + (agentId === selectedCommunicationAgentId ? " selected" : "");
-        if (agentId === selectedCommunicationAgentId)
-            row.setAttribute("aria-current", "true");
-        const head = document.createElement("div");
-        head.className = "communication-row-head";
-        const title = document.createElement("span");
-        title.className = "communication-row-title";
-        title.textContent = String(agent?.display_name || agent?.handle || "Agent") + " · @" + String(agent?.handle || "agent");
-        const unread = document.createElement("span");
-        unread.className = "chip" + (Number(agent?.queued_delivery_count || 0) > 0 ? " tone-warn" : "");
-        unread.textContent = countLabel(agent?.queued_delivery_count, "queued delivery");
-        head.appendChild(title);
-        head.appendChild(unread);
-        row.appendChild(head);
-        const meta = document.createElement("span");
-        meta.className = "communication-row-meta";
-        meta.textContent = agentId
-            + (runtimeLanguage === "zh-CN" ? " · 配置版本 r" : " · profile r") + String(agent?.profile_revision || 0)
-            + (runtimeLanguage === "zh-CN" ? " · 控制器 g" : " · controller g") + String(agent?.current_controller_generation || 0)
-            + " · " + countLabel(agent?.active_endpoint_count, "active Endpoint")
-            + " · " + countLabel(agent?.unresolved_wake_count, "unresolved Wake");
-        row.appendChild(meta);
-        row.addEventListener("click", () => {
+    renderAgentRows(list, communicationAgents, selectedCommunicationAgentId, {
+        language: runtimeLanguage,
+        onSelect: (agentId) => {
             selectedCommunicationAgentId = agentId;
             communicationInbox = [];
             const participants = el("runtime-conversation-agent-ids");
@@ -4618,9 +5687,8 @@ function renderCommunicationAgents() {
             renderCommunicationInbox();
             if (communicationEndpointId(agentId))
                 void fetchCommunicationInbox(communicationGeneration);
-        });
-        list.appendChild(row);
-    }
+        },
+    });
 }
 function renderCommunicationAgentCard() {
     const agent = selectedCommunicationAgent();
@@ -4631,10 +5699,8 @@ function renderCommunicationAgentCard() {
     setText("runtime-agent-card-name", String(agent.display_name || agent.handle || tr("Agent Card")) + " · @" + String(agent.handle || "agent"));
     setText("runtime-agent-card-id", agentId);
     setText("runtime-agent-card-description", String(agent.description || tr("No description.")));
-    setText("runtime-agent-card-revision", (runtimeLanguage === "zh-CN" ? "配置版本 " : "Profile revision ") + String(agent.profile_revision || 0)
-        + (runtimeLanguage === "zh-CN" ? " · 控制器代数 " : " · controller generation ") + String(agent.current_controller_generation || 0)
-        + (runtimeLanguage === "zh-CN" ? " · 更新于 " : " · updated ") + communicationTimeLabel(agent.updated_at_unix_ms));
-    setText("runtime-agent-unread", countLabel(agent.queued_delivery_count, "queued"));
+    setText("runtime-agent-card-revision", formatAgentCardRevision(agent, runtimeLanguage));
+    setText("runtime-agent-unread", runtimeCountLabel(agent.queued_delivery_count, "queued"));
     const labels = el("runtime-agent-card-labels");
     clearNode(labels);
     if (labels) {
@@ -4642,11 +5708,7 @@ function renderCommunicationAgentCard() {
             appendChip(labels, String(label));
         }
     }
-    const unresolvedWakeCount = Number(agent.unresolved_wake_count || 0);
-    const latestWakeState = String(agent.latest_wake_state || "none");
-    setText("runtime-agent-wake-status", countLabel(unresolvedWakeCount, "unresolved Wake")
-        + (runtimeLanguage === "zh-CN" ? " · 最近状态 " : " · latest ") + tr(latestWakeState)
-        + (runtimeLanguage === "zh-CN" ? " · 收件箱投递与唤醒消费彼此独立" : " · Inbox Delivery and Wake consumption remain independent"));
+    setText("runtime-agent-wake-status", formatAgentWakeStatus(agent, runtimeLanguage));
     const updateForm = el("runtime-agent-update-form");
     const revision = String(agent.profile_revision || 0);
     if (updateForm && (updateForm.dataset.agentId !== agentId
@@ -4671,62 +5733,23 @@ function renderCommunicationAgentCard() {
         setText("runtime-agent-update-status", "");
     }
     const endpoint = communicationEndpoint(agentId);
-    setText("runtime-agent-endpoint-status", endpoint
-        ? (runtimeLanguage === "zh-CN" ? "浏览器端点 " : "Browser Endpoint ") + endpoint.endpoint_id
-            + " · " + tr(endpoint.lifecycle)
-            + (runtimeLanguage === "zh-CN" ? " · 代数 " : " · generation ") + String(endpoint.controller_generation)
-            + (runtimeLanguage === "zh-CN" ? " · 租约至 " : " · lease ") + communicationTimeLabel(endpoint.lease_expires_at_unix_ms)
-            + (runtimeLanguage === "zh-CN" ? " · 运行控制台适配器：仅轮询（运行时可唤醒：" : " · Runtime Console adapter: polling only (runtime wake capable: ")
-            + String(endpoint.wake_capable) + ")"
-        : (runtimeLanguage === "zh-CN"
-            ? "此窗口尚未作为该 Agent。Agent 卡片、对话、收件箱投递和唤醒意图仍会持久保留。"
-            : "This window is not acting as the Agent. Agent Card, Conversations, Inbox deliveries, and Wake Intents remain durable."));
+    setText("runtime-agent-endpoint-status", formatAgentEndpointStatus(endpoint, runtimeLanguage));
     show("runtime-agent-attach", !endpoint);
     show("runtime-agent-detach", !!endpoint);
 }
 function renderCommunicationConversations() {
     const list = el("runtime-conversation-list");
-    clearNode(list);
     show("runtime-conversation-empty", communicationReadAvailable === true && communicationConversations.length === 0);
-    if (!list)
-        return;
-    for (const conversation of communicationConversations) {
-        const conversationId = String(conversation?.conversation_id || "");
-        if (!conversationId)
-            continue;
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "communication-row" + (conversationId === selectedCommunicationConversationId ? " selected" : "");
-        if (conversationId === selectedCommunicationConversationId)
-            row.setAttribute("aria-current", "true");
-        const head = document.createElement("div");
-        head.className = "communication-row-head";
-        const title = document.createElement("span");
-        title.className = "communication-row-title";
-        title.textContent = String(conversation?.title || tr("Untitled Conversation"));
-        const count = document.createElement("span");
-        count.className = "chip";
-        count.textContent = countLabel(conversation?.message_count, "message");
-        head.appendChild(title);
-        head.appendChild(count);
-        row.appendChild(head);
-        const meta = document.createElement("span");
-        meta.className = "communication-row-meta";
-        meta.textContent = conversationId + " · " + countLabel(conversation?.participant_count, "participant") + (runtimeLanguage === "zh-CN" ? " · 序号 " : " · seq ") + String(conversation?.last_seq || 0);
-        row.appendChild(meta);
-        row.addEventListener("click", () => {
+    renderConversationRows(list, communicationConversations, selectedCommunicationConversationId, {
+        language: runtimeLanguage,
+        onSelect: (conversationId) => {
             selectedCommunicationConversationId = conversationId;
             communicationDetail = null;
             renderCommunicationConversations();
             renderCommunicationConversation();
             void fetchCommunicationConversation(communicationGeneration);
-        });
-        list.appendChild(row);
-    }
-}
-function deliveryAgentLabel(agentId) {
-    const agent = communicationAgent(agentId);
-    return agent ? String(agent.display_name || agent.handle || agentId) : agentId;
+        },
+    });
 }
 function renderCommunicationConversation() {
     const detail = communicationDetail;
@@ -4741,7 +5764,7 @@ function renderCommunicationConversation() {
         return;
     setText("runtime-conversation-name", String(summary.title || tr("Untitled Conversation")));
     setText("runtime-conversation-id", String(summary.conversation_id || ""));
-    setText("runtime-conversation-seq", (runtimeLanguage === "zh-CN" ? "序号 " : "seq ") + String(summary.last_seq || 0) + " · " + countLabel(summary.message_count, "message") + ((Number(detail?.after_seq || 0) > 0 || detail.truncated) ? (runtimeLanguage === "zh-CN" ? " · 最近有界页面" : " · recent bounded page") : ""));
+    setText("runtime-conversation-seq", formatConversationSeq(summary, detail, runtimeLanguage));
     const participants = el("runtime-conversation-participants");
     if (participants) {
         for (const participant of Array.isArray(detail.participants) ? detail.participants : []) {
@@ -4754,96 +5777,33 @@ function renderCommunicationConversation() {
     }
     const messages = Array.isArray(detail.messages) ? detail.messages : [];
     show("runtime-conversation-transcript-empty", messages.length === 0);
-    if (!transcript)
-        return;
-    for (const message of messages) {
-        const author = message?.author || {};
-        const agentAuthored = String(author.participant_kind || "") === "agent";
-        const card = document.createElement("article");
-        card.className = "conversation-message" + (agentAuthored ? " agent-authored" : "");
-        const head = document.createElement("div");
-        head.className = "conversation-message-head";
-        const name = document.createElement("span");
-        name.className = "conversation-message-author";
-        name.textContent = agentAuthored
-            ? "Agent · " + String(author.display_name || author.handle || author.agent_id || tr("unknown"))
-            : (runtimeLanguage === "zh-CN" ? "人工 · " : "Human · ") + String(author.principal_kind || (runtimeLanguage === "zh-CN" ? "凭证主体" : "credential principal"));
-        const seq = document.createElement("span");
-        seq.className = "muted small";
-        seq.textContent = "#" + String(message?.seq || 0) + " · " + communicationTimeLabel(message?.created_at_unix_ms);
-        head.appendChild(name);
-        head.appendChild(seq);
-        card.appendChild(head);
-        const meta = document.createElement("div");
-        meta.className = "conversation-message-meta";
-        const metaParts = [String(message?.message_id || "")];
-        if (author.agent_id)
-            metaParts.push(String(author.agent_id));
-        if (message?.reply_to)
-            metaParts.push((runtimeLanguage === "zh-CN" ? "回复 " : "reply to ") + String(message.reply_to));
-        meta.textContent = metaParts.join(" · ");
-        card.appendChild(meta);
-        const body = document.createElement("div");
-        body.className = "conversation-message-body";
-        body.textContent = String(message?.body || "");
-        card.appendChild(body);
-        const deliveries = Array.isArray(message?.deliveries) ? message.deliveries : [];
-        const delivery = document.createElement("div");
-        delivery.className = "conversation-message-deliveries";
-        delivery.textContent = deliveries.length
-            ? (runtimeLanguage === "zh-CN" ? "Agent 收件箱：" : "Agent Inbox: ") + deliveries.map((item) => deliveryAgentLabel(String(item?.recipient_agent_id || "")) + " " + tr(String(item?.state || "unknown"))).join(" · ")
-            : (runtimeLanguage === "zh-CN" ? "没有 Agent 收件箱投递 · 仅保留记录 / 人工房间" : "No Agent Inbox delivery · transcript / Human room only");
-        card.appendChild(delivery);
-        transcript.appendChild(card);
-    }
-    transcript.scrollTop = transcript.scrollHeight;
+    renderConversationMessages(transcript, messages, communicationAgents, {
+        language: runtimeLanguage,
+    });
 }
 function renderCommunicationInbox() {
     const list = el("runtime-inbox-list");
-    clearNode(list);
     const agent = selectedCommunicationAgent();
     const endpointId = communicationEndpointId();
     show("runtime-inbox-consume-all", !!endpointId && communicationInbox.length > 0);
     if (!agent) {
+        clearNode(list);
         setText("runtime-inbox-status", runtimeLanguage === "zh-CN" ? "选择一个 Agent 以查看收件人专属的排队投递。" : "Select an Agent to inspect recipient-specific queued deliveries.");
         return;
     }
     if (!endpointId) {
+        clearNode(list);
         setText("runtime-inbox-status", runtimeLanguage === "zh-CN" ? "将此浏览器附加为端点。离线期间排队投递仍会持久保留。" : "Attach this browser as an Endpoint. Queued deliveries remain durable while offline.");
         return;
     }
     const totalQueued = Number(agent.queued_delivery_count || 0);
-    setText("runtime-inbox-status", countLabel(totalQueued, "queued delivery")
+    setText("runtime-inbox-status", runtimeCountLabel(totalQueued, "queued delivery")
         + (communicationInbox.length < totalQueued ? (runtimeLanguage === "zh-CN" ? " · 当前显示 " : " · showing ") + String(communicationInbox.length) : "")
         + (runtimeLanguage === "zh-CN" ? " · 读取不会消费投递或唤醒模型" : " · reading does not consume or wake a model"));
-    if (!list)
-        return;
-    for (const item of communicationInbox) {
-        const row = document.createElement("article");
-        row.className = "communication-row inbox-delivery";
-        const head = document.createElement("div");
-        head.className = "communication-row-head";
-        const title = document.createElement("span");
-        title.className = "communication-row-title";
-        title.textContent = String(item?.conversation_title || tr("Untitled Conversation")) + " · #" + String(item?.message?.seq || 0);
-        const consume = document.createElement("button");
-        consume.type = "button";
-        consume.className = "text-button";
-        consume.textContent = tr("Consume");
-        consume.addEventListener("click", () => void consumeCommunicationDeliveries([String(item?.delivery_id || "")]));
-        head.appendChild(title);
-        head.appendChild(consume);
-        row.appendChild(head);
-        const meta = document.createElement("span");
-        meta.className = "communication-row-meta";
-        meta.textContent = String(item?.delivery_id || "") + (runtimeLanguage === "zh-CN" ? " · 来自 " : " · from ") + (item?.message?.author?.participant_kind === "agent" ? deliveryAgentLabel(String(item.message.author.agent_id || "")) : (runtimeLanguage === "zh-CN" ? "人工" : "Human"));
-        row.appendChild(meta);
-        const body = document.createElement("div");
-        body.className = "inbox-message-preview";
-        body.textContent = String(item?.message?.body || "");
-        row.appendChild(body);
-        list.appendChild(row);
-    }
+    renderInboxDeliveryCards(list, communicationInbox, communicationAgents, {
+        language: runtimeLanguage,
+        onConsume: (deliveryId) => void consumeCommunicationDeliveries([deliveryId]),
+    });
 }
 function renderCommunicationSurface() {
     renderCommunicationAvailability();
@@ -5081,22 +6041,23 @@ function refreshCommunication(includeData = true) {
 }
 async function createCommunicationAgent(event) {
     event.preventDefault();
-    const handle = el("runtime-agent-handle")?.value.trim() || "";
-    const displayName = el("runtime-agent-display-name")?.value.trim() || "";
-    const description = el("runtime-agent-description")?.value.trim() || "";
-    const labels = parseAgentIds(el("runtime-agent-labels")?.value || "");
-    if (!handle || !displayName) {
-        setText("runtime-agent-create-status", tr("Handle and display name are required."));
+    const handle = el("runtime-agent-handle")?.value || "";
+    const displayName = el("runtime-agent-display-name")?.value || "";
+    const description = el("runtime-agent-description")?.value || "";
+    const labelsRaw = el("runtime-agent-labels")?.value || "";
+    const validation = validateAgentCreateInputs(handle, displayName, description, labelsRaw);
+    if (!validation.valid) {
+        setText("runtime-agent-create-status", tr(validation.error));
         return;
     }
-    const fingerprint = JSON.stringify({ handle, displayName, description, labels });
-    pendingAgentCreate = idempotencyKeyFor(pendingAgentCreate, fingerprint, "runtime-agent");
+    const { data } = validation;
+    pendingAgentCreate = idempotencyKeyFor(pendingAgentCreate, data.fingerprint, "runtime-agent");
     setText("runtime-agent-create-status", tr("Creating durable Agent…"));
     const response = await api("communication/agent/create", {
-        handle,
-        display_name: displayName,
-        description,
-        specialty_labels: labels,
+        handle: data.handle,
+        display_name: data.displayName,
+        description: data.description,
+        specialty_labels: data.labels,
         idempotency_key: pendingAgentCreate.key,
     });
     if (response?.status === 401) {
@@ -5133,22 +6094,24 @@ async function updateCommunicationAgent(event) {
     const agent = selectedCommunicationAgent();
     if (!agent)
         return;
-    const handle = el("runtime-agent-update-handle")?.value.trim() || "";
-    const displayName = el("runtime-agent-update-display-name")?.value.trim() || "";
-    const description = el("runtime-agent-update-description")?.value.trim() || "";
-    const specialtyLabels = parseAgentIds(el("runtime-agent-update-labels")?.value || "");
-    if (!handle || !displayName) {
-        setText("runtime-agent-update-status", tr("Handle and display name are required."));
+    const handle = el("runtime-agent-update-handle")?.value || "";
+    const displayName = el("runtime-agent-update-display-name")?.value || "";
+    const description = el("runtime-agent-update-description")?.value || "";
+    const labelsRaw = el("runtime-agent-update-labels")?.value || "";
+    const validation = validateAgentUpdateInputs(handle, displayName, description, labelsRaw);
+    if (!validation.valid) {
+        setText("runtime-agent-update-status", tr(validation.error));
         return;
     }
+    const { data } = validation;
     setText("runtime-agent-update-status", tr("Updating Agent Card…"));
     const response = await api("communication/agent/update", {
         agent_id: String(agent.agent_id || ""),
         expected_profile_revision: Number(agent.profile_revision || 0),
-        handle,
-        display_name: displayName,
-        description,
-        specialty_labels: specialtyLabels,
+        handle: data.handle,
+        display_name: data.displayName,
+        description: data.description,
+        specialty_labels: data.specialtyLabels,
     });
     if (response?.status === 401) {
         lock("Credential rejected.");
@@ -5274,19 +6237,19 @@ async function detachCommunicationEndpoint() {
 }
 async function createCommunicationConversation(event) {
     event.preventDefault();
-    const title = el("runtime-conversation-title")?.value.trim() || "";
+    const title = el("runtime-conversation-title")?.value || "";
     const idsInput = el("runtime-conversation-agent-ids")?.value || "";
-    const agentIds = parseAgentIds(idsInput || selectedCommunicationAgentId);
-    if (agentIds.length === 0) {
-        setText("runtime-conversation-create-status", tr("At least one Agent id is required."));
+    const validation = validateConversationCreateInputs(title, idsInput, selectedCommunicationAgentId);
+    if (!validation.valid) {
+        setText("runtime-conversation-create-status", tr(validation.error));
         return;
     }
-    const fingerprint = JSON.stringify({ title, agentIds: [...agentIds].sort() });
-    pendingConversationCreate = idempotencyKeyFor(pendingConversationCreate, fingerprint, "runtime-conversation");
+    const { data } = validation;
+    pendingConversationCreate = idempotencyKeyFor(pendingConversationCreate, data.fingerprint, "runtime-conversation");
     setText("runtime-conversation-create-status", tr("Creating durable Conversation…"));
     const response = await api("communication/conversation/create", {
-        title: title || null,
-        agent_ids: agentIds,
+        title: data.title || null,
+        agent_ids: data.agentIds,
         idempotency_key: pendingConversationCreate.key,
     });
     if (response?.status === 401) {
@@ -5432,11 +6395,13 @@ async function refreshAll() {
     const recoverCollaboration = runtimeCollaborationNeedsRefreshRecovery(state);
     const overviewRequest = refreshRuntimeOverview(state);
     const projectsRequest = refreshRuntimeProjects(state, projectSearch, projectDeviceFilter);
+    const windowRequest = refreshRuntimeProjectWindows(state);
     try {
         const [overviewOk, projectsOk, communicationOk] = await Promise.all([
             fetchOverview(overviewRequest),
             fetchProjects(projectsRequest),
             refreshCommunication(),
+            windowRequest ? fetchProjectWindows(windowRequest) : Promise.resolve(true),
         ]);
         if (!token)
             return;
@@ -5467,6 +6432,9 @@ function refreshAutoSurfaces() {
     const request = refreshRuntimeSessionList(state);
     if (request)
         void fetchSessions(request);
+    const windowRequest = refreshRuntimeProjectWindows(state);
+    if (windowRequest)
+        void fetchProjectWindows(windowRequest);
     void refreshCommunication(workspaceView === "operations");
 }
 function startAuto() {
@@ -5601,7 +6569,7 @@ document.querySelector(".context-trigger")?.addEventListener("click", (event) =>
     syncContextUi(false);
 });
 document.querySelectorAll("[data-runtime-view]").forEach((button) => {
-    button.addEventListener("click", () => applyWorkspaceView(workspaceViewPreference(button.dataset.runtimeView)));
+    button.addEventListener("click", () => applyWorkspaceView(parseWorkspaceViewPreference(button.dataset.runtimeView)));
 });
 document.querySelectorAll("[data-context-target]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -5624,7 +6592,7 @@ document.querySelectorAll("[data-language-toggle]").forEach((button) => {
 });
 document.querySelectorAll("[data-theme-option]").forEach((button) => {
     button.addEventListener("click", () => {
-        applyAppearance(appearancePreference(button.dataset.themeOption));
+        applyAppearance(parseAppearancePreference(button.dataset.themeOption));
         const menu = button.closest("details.theme-menu");
         if (menu)
             menu.open = false;
@@ -5764,7 +6732,7 @@ document.addEventListener("visibilitychange", () => {
     }
 });
 const syncSystemAppearance = () => {
-    if (appearancePreference(document.documentElement.dataset.theme) === "system")
+    if (parseAppearancePreference(document.documentElement.dataset.theme) === "system")
         applyAppearance("system", false);
 };
 if (typeof appearanceMedia.addEventListener === "function")
@@ -5773,8 +6741,8 @@ else
     appearanceMedia.addListener(syncSystemAppearance);
 captureStaticUiSources();
 applyLanguage(loadLanguagePreference(), false, false);
-applyAppearance(loadAppearancePreference(), false);
-applyWorkspaceView(loadWorkspaceViewPreference(), false);
+applyAppearance(readStoredAppearance(), false);
+applyWorkspaceView(readStoredWorkspaceView(), false);
 syncAckComposer();
 window.addEventListener("pagehide", () => {
     saveCurrentDraft();
@@ -5786,7 +6754,7 @@ window.addEventListener("pagehide", () => {
     stopWindowAuto();
 });
 lock("", false);
-const rememberedRuntimeCredential = loadRememberedRuntimeCredential();
+const rememberedRuntimeCredential = readStoredCredential();
 if (rememberedRuntimeCredential) {
     setText("runtime-token-error", tr("Restoring this tab…"));
     connectRuntimeCredential(rememberedRuntimeCredential, true);

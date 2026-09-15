@@ -8,7 +8,7 @@ use super::session_context::{
 use super::{permissions, session_context, sessions, ToolCall, ToolResult, ToolRuntime};
 use crate::auth::AuthContext;
 use crate::tool_runtime::project_resolution::{ProjectResolverError, ResolvedProject};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// Add the Phase A lifecycle tuple to a definite pre-execution structured
 /// execution denial without changing generic denial helpers used by unrelated
@@ -52,11 +52,135 @@ pub(super) fn decorate_structured_execution_prestart_denial(
     result.output = Value::Object(output);
 }
 
+fn is_structured_validation_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "cargo_fmt" | "cargo_check" | "cargo_test" | "go_test"
+    )
+}
+
+fn sparsify_terminal_structured_validation_success(tool_name: &str, result: &mut ToolResult) {
+    if !is_structured_validation_tool(tool_name) || !result.success {
+        return;
+    }
+    let Some(output) = result.output.as_object_mut() else {
+        return;
+    };
+    let terminal_success = output.get("execution_state").and_then(Value::as_str)
+        == Some("completed")
+        && output.get("command_started").and_then(Value::as_bool) == Some(true)
+        && output.get("command_completed").and_then(Value::as_bool) == Some(true)
+        && output.get("passed").and_then(Value::as_bool) == Some(true)
+        && output.get("promoted_to_job").and_then(Value::as_bool) == Some(false)
+        && output.get("terminal").and_then(Value::as_bool) == Some(true)
+        && output.get("job_id").map(Value::is_null).unwrap_or(true)
+        && output.get("job_status").map(Value::is_null).unwrap_or(true)
+        && output
+            .get("observation_token")
+            .map(Value::is_null)
+            .unwrap_or(true);
+    if !terminal_success {
+        return;
+    }
+
+    for key in [
+        "project",
+        "command_summary",
+        "cwd",
+        "shell",
+        "executor",
+        "execution_source",
+        "purpose",
+        "execution_state",
+        "exit_code",
+        "duration_ms",
+        "passed",
+        "command_started",
+        "command_completed",
+        "promoted_to_job",
+        "terminal",
+        "job_id",
+        "job_status",
+        "observation_token",
+        "effective_timeout_secs",
+        "sync_wait_secs",
+    ] {
+        output.remove(key);
+    }
+    output.remove("async_handoff_available");
+    if output.get("failure_kind").is_some_and(Value::is_null) {
+        output.remove("failure_kind");
+    }
+    for key in ["stdout_tail", "stderr_tail"] {
+        if output.get(key).and_then(Value::as_str) == Some("") {
+            output.remove(key);
+        }
+    }
+    for key in ["stdout_lines", "stderr_lines"] {
+        if output.get(key).and_then(Value::as_u64) == Some(0) {
+            output.remove(key);
+        }
+    }
+    for key in ["stdout_truncated", "stderr_truncated"] {
+        if output.get(key).and_then(Value::as_bool) == Some(false) {
+            output.remove(key);
+        }
+    }
+}
+
+fn sparsify_structured_validation_runtime_metadata(tool_name: &str, result: &mut ToolResult) {
+    if !is_structured_validation_tool(tool_name) {
+        return;
+    }
+    let Some(output) = result.output.as_object_mut() else {
+        return;
+    };
+    for key in ["execution_source", "purpose", "executor", "shell"] {
+        output.remove(key);
+    }
+    if result.success
+        && matches!(
+            output.get("execution_state").and_then(Value::as_str),
+            Some("queued" | "running" | "started" | "pending")
+        )
+    {
+        for key in [
+            "project",
+            "cwd",
+            "terminal",
+            "command_started",
+            "command_completed",
+            "sync_wait_secs",
+        ] {
+            output.remove(key);
+        }
+        for key in ["stdout_tail", "stderr_tail"] {
+            if output.get(key).and_then(Value::as_str) == Some("") {
+                output.remove(key);
+            }
+        }
+        for key in ["stdout_lines", "stderr_lines"] {
+            if output.get(key).and_then(Value::as_u64) == Some(0) {
+                output.remove(key);
+            }
+        }
+        for key in ["stdout_truncated", "stderr_truncated"] {
+            if output.get(key).and_then(Value::as_bool) == Some(false) {
+                output.remove(key);
+            }
+        }
+    }
+}
+
 /// Remove facts that are fully implied by a successful synchronous terminal
 /// structured execution, but only after the complete ToolResult has already
 /// been recorded into the Session ledger. Failure/uncertain/Job projections
 /// remain explicit because they participate in retry and reconciliation safety.
 fn sparsify_terminal_structured_execution_success(tool_name: &str, result: &mut ToolResult) {
+    if is_structured_validation_tool(tool_name) {
+        sparsify_terminal_structured_validation_success(tool_name, result);
+        return;
+    }
     if !matches!(tool_name, "run_process" | "run_script") || !result.success {
         return;
     }
@@ -202,11 +326,37 @@ pub(super) fn sparsify_failure_model_result_metadata(tool_name: &str, result: &m
     }
 }
 
+fn add_run_process_expectation_projection(
+    tool_name: &str,
+    expectation: &sessions::ToolCallExpectation,
+    result: &mut ToolResult,
+) {
+    if tool_name != "run_process" {
+        return;
+    }
+    if result.output.get("expectation_satisfied").is_some() {
+        return;
+    }
+    let Some(expectation_satisfied) = sessions::public_result_expectation_satisfied(
+        result.success,
+        expectation,
+        &result.output,
+        result.error.as_deref(),
+        None,
+    ) else {
+        return;
+    };
+    let Some(output) = result.output.as_object_mut() else {
+        return;
+    };
+    output.insert(
+        "expectation_satisfied".to_string(),
+        Value::Bool(expectation_satisfied),
+    );
+}
+
 enum SearchModelProjection {
     None,
-    Single {
-        default_timeout: bool,
-    },
     Batch {
         default_timeouts: Vec<bool>,
         max_result_bytes: Option<usize>,
@@ -216,9 +366,6 @@ enum SearchModelProjection {
 impl SearchModelProjection {
     fn capture(call: &ToolCall) -> Self {
         match call {
-            ToolCall::SearchProjectText { timeout_secs, .. } => Self::Single {
-                default_timeout: caller_uses_default_search_timeout(timeout_secs),
-            },
             ToolCall::SearchProjectTexts {
                 queries,
                 max_result_bytes,
@@ -237,6 +384,8 @@ impl SearchModelProjection {
 
 enum ModelFacingProjection {
     None,
+    JobHandoff,
+    AgentWait,
     Read(super::read_files::ReadModelProjection),
     Search(SearchModelProjection),
 }
@@ -252,10 +401,22 @@ pub(super) struct ModelFacingProjectionPlan {
 impl ModelFacingProjectionPlan {
     pub(super) fn capture(call: &ToolCall) -> Self {
         let projection = match call {
-            ToolCall::ReadFile { .. } | ToolCall::ReadFiles { .. } => {
+            ToolCall::WaitForAgentEvents { .. }
+            | ToolCall::ReadAgentWait { .. }
+            | ToolCall::CancelAgentWait { .. } => ModelFacingProjection::AgentWait,
+            ToolCall::RunJob { .. }
+            | ToolCall::RunProcess { .. }
+            | ToolCall::RunScript { .. }
+            | ToolCall::RunShell { .. }
+            | ToolCall::RunDetachedProcess { .. }
+            | ToolCall::CargoFmt { .. }
+            | ToolCall::CargoCheck { .. }
+            | ToolCall::CargoTest { .. }
+            | ToolCall::GoTest { .. } => ModelFacingProjection::JobHandoff,
+            ToolCall::ReadFiles { .. } => {
                 ModelFacingProjection::Read(super::read_files::ReadModelProjection::capture(call))
             }
-            ToolCall::SearchProjectText { .. } | ToolCall::SearchProjectTexts { .. } => {
+            ToolCall::SearchProjectTexts { .. } => {
                 ModelFacingProjection::Search(SearchModelProjection::capture(call))
             }
             _ => ModelFacingProjection::None,
@@ -275,24 +436,27 @@ impl ModelFacingProjectionPlan {
     pub(super) fn project(self, result: &mut ToolResult) {
         match self.projection {
             ModelFacingProjection::None => {}
+            ModelFacingProjection::AgentWait => {
+                super::agent_wait::agent_wait_model_projection(result)
+            }
+            ModelFacingProjection::JobHandoff => {
+                super::jobs::sparsify_job_handoff_model_result(result)
+            }
             ModelFacingProjection::Read(projection) => {
-                let tool_name = match &projection {
-                    super::read_files::ReadModelProjection::Single { .. } => "read_file",
-                    super::read_files::ReadModelProjection::Batch {
-                        max_result_bytes, ..
-                    } => {
-                        super::read_files::apply_model_facing_output_budget(
-                            result,
-                            *max_result_bytes,
-                            &projection,
-                        );
-                        super::read_files::enforce_final_model_facing_hard_cap(result, &projection);
-                        "read_files"
-                    }
-                    super::read_files::ReadModelProjection::None => return,
+                let super::read_files::ReadModelProjection::Batch {
+                    max_result_bytes, ..
+                } = &projection
+                else {
+                    return;
                 };
+                super::read_files::apply_model_facing_output_budget(
+                    result,
+                    *max_result_bytes,
+                    &projection,
+                );
+                super::read_files::enforce_final_model_facing_hard_cap(result, &projection);
                 super::read_files::add_actionable_read_continuations(&projection, result);
-                sparsify_complete_read_success(tool_name, result);
+                sparsify_complete_read_success("read_files", result);
             }
             ModelFacingProjection::Search(projection) => {
                 if let SearchModelProjection::Batch {
@@ -354,24 +518,6 @@ fn sparsify_search_match_items(output: &mut serde_json::Map<String, Value>) {
     }
 }
 
-fn add_search_refinement_continuation(output: &mut serde_json::Map<String, Value>) {
-    if output.get("truncated").and_then(Value::as_bool) != Some(true)
-        || !matches!(
-            output.get("truncation_reason").and_then(Value::as_str),
-            Some("limit" | "output_bytes")
-        )
-    {
-        return;
-    }
-    output.entry("continuation".to_string()).or_insert_with(|| {
-        json!({
-            "kind": "refine_query",
-            "safe_cursor": false,
-            "refine_with": ["path", "include_globs", "pattern", "result_mode", "limit"]
-        })
-    });
-}
-
 /// Project successful text-search presentation after Session/event consumers
 /// have seen canonical evidence. Complete rg results keep only mode-relevant
 /// records and explicit non-default controls. Fallback/truncated successes retain
@@ -384,8 +530,6 @@ pub(crate) fn sparsify_search_output_for_model(
     allow_batch_deadline_reduction: bool,
 ) -> bool {
     sparsify_search_match_items(output);
-    add_search_refinement_continuation(output);
-
     let exit_code = output.get("exit_code").and_then(Value::as_i64);
     let result_mode = output
         .get("result_mode")
@@ -498,9 +642,6 @@ fn sparsify_search_success_for_model(projection: &SearchModelProjection, result:
         return;
     };
     match projection {
-        SearchModelProjection::Single { default_timeout } => {
-            sparsify_search_output_for_model(output, *default_timeout, false);
-        }
         SearchModelProjection::Batch {
             default_timeouts, ..
         } => {
@@ -586,8 +727,8 @@ pub(crate) fn sparsify_search_batch_success_for_model(
 }
 
 /// Remove range bookkeeping only when the returned text is provably the complete
-/// file. `sha256` and `total_lines` remain explicit freshness/content-shape
-/// evidence. Partial reads and every real continuation keep the canonical full
+/// file. `read_revision` remains the model-facing snapshot identity and
+/// `total_lines` remains content-shape evidence. Partial reads and every real continuation keep the canonical full
 /// range tuple. In a batch, the outer item path remains the navigation identity,
 /// so an identical inner path is redundant.
 pub(crate) fn sparsify_complete_file_read_output(
@@ -627,6 +768,10 @@ pub(crate) fn sparsify_complete_file_read_output(
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             })
+        && output
+            .get("read_revision")
+            .and_then(Value::as_u64)
+            .is_some()
         && output.get("start_line").and_then(Value::as_u64) == Some(1)
         && output.get("limit").and_then(Value::as_u64) == Some(default_limit)
         && returned_lines == total_lines
@@ -638,6 +783,9 @@ pub(crate) fn sparsify_complete_file_read_output(
         return false;
     }
 
+    // The digest has already served canonical snapshot registration. The model
+    // uses the bounded read_revision handle for this exact snapshot.
+    output.remove("sha256");
     for key in [
         "start_line",
         "limit",
@@ -658,16 +806,12 @@ pub(crate) fn sparsify_complete_file_read_output(
 }
 
 pub(crate) fn sparsify_complete_read_success(tool_name: &str, result: &mut ToolResult) {
-    if !result.success || !matches!(tool_name, "read_file" | "read_files") {
+    if !result.success || tool_name != "read_files" {
         return;
     }
     let Some(output) = result.output.as_object_mut() else {
         return;
     };
-    if tool_name == "read_file" {
-        sparsify_complete_file_read_output(output, None);
-        return;
-    }
 
     let complete_batch = output
         .get("items")
@@ -724,6 +868,21 @@ pub(crate) fn sparsify_complete_read_success(tool_name: &str, result: &mut ToolR
             "next_index",
         ] {
             output.remove(key);
+        }
+    }
+    // The output-level call is the sole machine representation of follow-up
+    // positions. `read_revision` is the sole model-facing snapshot identity;
+    // the underlying digest remains canonical/internal evidence only.
+    output.remove("next_index");
+    if let Some(items) = output.get_mut("items").and_then(Value::as_array_mut) {
+        for item in items {
+            if let Some(read) = item.get_mut("output").and_then(Value::as_object_mut) {
+                read.remove("next_start_line");
+                read.remove("budget_next_limit");
+                if read.get("read_revision").and_then(Value::as_u64).is_some() {
+                    read.remove("sha256");
+                }
+            }
         }
     }
 }
@@ -878,7 +1037,7 @@ impl ToolRuntime {
 
     /// Kernel-only companion that returns the terminal model-facing projection
     /// plan after the same authoritative Project resolution used for execution.
-    /// The returned ToolResult is still canonical with respect to read/search
+    /// The returned ToolResult is still canonical with respect to domain-local
     /// budgeting and sparse projection so an outer recorder can consume it first.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn dispatch_with_auth_transport_options_and_metadata_with_recording_mode_and_context_with_result_projection(
@@ -898,6 +1057,8 @@ impl ToolRuntime {
         super::window_activity::ToolCallCorrelation,
     ) {
         let mut result_projection = ModelFacingProjectionPlan::capture(&call);
+        let immediate_tool_name = call.tool_name();
+        let immediate_expectation = recorder_metadata.expectation.clone();
         let mut correlation = super::window_activity::ToolCallCorrelation::default();
         // Edit usage telemetry retains only fixed safe classifications. For
         // apply_patch it captures the requested matching enum before the call is
@@ -918,6 +1079,12 @@ impl ToolRuntime {
                 &mut result_projection,
             )
             .await;
+        // Early project/session/auth failures can return before the normal
+        add_run_process_expectation_projection(
+            immediate_tool_name,
+            &immediate_expectation,
+            &mut result,
+        );
         // Early project/session/auth failures can return before the normal
         // resolved-project sidecar hook. Preserve the main ToolResult while still
         // answering the explicit sidecar request conservatively: static material
@@ -992,7 +1159,6 @@ impl ToolRuntime {
         start: Option<sessions::ToolCallStart>,
         tool_name: &str,
         error_kind: Option<&str>,
-        auth: Option<&AuthContext>,
         model_facing: bool,
         ack_observation: Option<&sessions::SessionAckObservation>,
         ack_requested: bool,
@@ -1011,10 +1177,7 @@ impl ToolRuntime {
             );
             add_session_hint(result, &self.sessions, session_id);
             if let Some(recorded) = recorded.as_ref() {
-                if session_context::add_session_context_continuity(result, recorded) {
-                    self.add_session_history_recovery(result, recorded, auth)
-                        .await;
-                }
+                session_context::add_session_context_continuity(result, recorded);
             }
             if let Some(ack) = ack_observation {
                 session_context::add_session_attention_projection(
@@ -1043,7 +1206,7 @@ impl ToolRuntime {
         auth: Option<&AuthContext>,
         transport: sessions::SessionTransport,
         mut recorder_metadata: sessions::ToolCallRecorderMetadata,
-        _window: Option<&crate::client_window::ClientWindow>,
+        window: Option<&crate::client_window::ClientWindow>,
         inner_model_facing_recording: bool,
         context_request: Vec<String>,
         material_capabilities: super::context_projection::ContextMaterialCapabilities,
@@ -1226,7 +1389,6 @@ impl ToolRuntime {
                 session_start,
                 call.tool_name(),
                 Some(session_context::SESSION_PROJECT_MISMATCH_KIND),
-                auth,
                 inner_model_facing_recording,
                 inner_ack_observation.as_ref(),
                 inner_ack_requested,
@@ -1298,7 +1460,6 @@ impl ToolRuntime {
                     session_start,
                     call.tool_name(),
                     Some(error_kind.as_str()),
-                    auth,
                     inner_model_facing_recording,
                     inner_ack_observation.as_ref(),
                     inner_ack_requested,
@@ -1328,7 +1489,6 @@ impl ToolRuntime {
                     session_start,
                     call.tool_name(),
                     Some("session_guard_denied"),
-                    auth,
                     inner_model_facing_recording,
                     inner_ack_observation.as_ref(),
                     inner_ack_requested,
@@ -1371,7 +1531,6 @@ impl ToolRuntime {
                     session_start,
                     call.tool_name(),
                     None,
-                    auth,
                     inner_model_facing_recording,
                     inner_ack_observation.as_ref(),
                     inner_ack_requested,
@@ -1409,7 +1568,6 @@ impl ToolRuntime {
                         session_start,
                         call.tool_name(),
                         None,
-                        auth,
                         inner_model_facing_recording,
                         inner_ack_observation.as_ref(),
                         inner_ack_requested,
@@ -1436,6 +1594,7 @@ impl ToolRuntime {
                 call,
                 auth,
                 transport,
+                window,
                 ssh_resource.as_deref(),
                 validation_assertion_name,
                 project_resolution,
@@ -1462,13 +1621,17 @@ impl ToolRuntime {
                 session_start,
                 tool_name,
                 None,
-                auth,
                 inner_model_facing_recording,
                 inner_ack_observation.as_ref(),
                 inner_ack_requested,
             )
             .await;
         }
+        add_run_process_expectation_projection(
+            tool_name,
+            &recorder_metadata.expectation,
+            &mut result,
+        );
         if let Some(context) = activity_context {
             self.activity.record(super::activity::ActivityRecord {
                 tool: context.tool,
@@ -1485,7 +1648,9 @@ impl ToolRuntime {
                 scope: super::activity::activity_scope_from_auth(auth),
             });
         }
-        if result.success && super::observations::is_meaningful_activity_tool(tool_name) {
+        if result.success
+            && webcodex_tool_contracts::runtime_tool_activity_interaction(tool_name).is_meaningful()
+        {
             if let Ok((principal_kind, principal_id)) =
                 super::session_context::runtime_observation_principal(auth)
             {
@@ -1511,6 +1676,7 @@ impl ToolRuntime {
         )
         .await;
         sparsify_terminal_structured_execution_success(tool_name, &mut result);
+        sparsify_structured_validation_runtime_metadata(tool_name, &mut result);
         result
     }
 
@@ -1519,6 +1685,7 @@ impl ToolRuntime {
         call: ToolCall,
         auth: Option<&AuthContext>,
         transport: sessions::SessionTransport,
+        window: Option<&crate::client_window::ClientWindow>,
         ssh_resource: Option<&str>,
         validation_assertion_name: Option<&str>,
         project_resolution: Option<Result<ResolvedProject, ProjectResolverError>>,
@@ -1569,21 +1736,43 @@ impl ToolRuntime {
             }
 
             call @ (ToolCall::WorkOnProject { .. } | ToolCall::FinishCodingTask { .. }) => {
-                self.dispatch_coding_task_tool(
+                // Startup/closeout aggregation retains relatively large typed workflow state.
+                // Keep that future off the shared dispatch future so unrelated tool calls do
+                // not inherit its stack cost as the coding startup contract evolves.
+                Box::pin(self.dispatch_coding_task_tool(
                     call,
                     auth,
                     transport,
                     trusted_recording_session_id,
                     trusted_recording_session_project,
                     correlation,
+                ))
+                .await
+            }
+
+            ToolCall::PresentWorkResult {
+                project,
+                session_id,
+            } => self.present_work_result(project, session_id, auth).await,
+
+            ToolCall::WorkResultState {
+                project,
+                session_id,
+            } => self.work_result_state(project, session_id, auth).await,
+
+            call @ ToolCall::SessionHandoffSummary { .. } => {
+                let context_continuity_capable = protocol_capabilities.context_continuity
+                    && super::tool_definition::runtime_tool_accepts_context_ack(call.tool_name());
+                self.dispatch_handoff_tool(
+                    call,
+                    auth,
+                    context_continuity_capable,
+                    trusted_recording_session_id,
                 )
                 .await
             }
 
-            call @ ToolCall::SessionHandoffSummary { .. } => {
-                self.dispatch_handoff_tool(call, auth).await
-            }
-
+            #[cfg(feature = "workspace-checkpoints")]
             call @ (ToolCall::WorkspaceCheckpointCreate { .. }
             | ToolCall::WorkspaceCheckpointList { .. }
             | ToolCall::WorkspaceCheckpointShow { .. }
@@ -1811,6 +2000,82 @@ impl ToolRuntime {
                 .await
             }
 
+            ToolCall::CreateGoal {
+                title,
+                objective,
+                idempotency_key,
+            } => self.create_goal(auth, title, objective, idempotency_key),
+
+            ToolCall::GetGoal { goal_id } => self.get_goal(auth, goal_id),
+
+            ToolCall::PresentGoalPlan { goal_id } => self.present_goal_plan(auth, goal_id).await,
+
+            ToolCall::GoalPlanState { goal_id } => self.goal_plan_state(auth, goal_id).await,
+
+            ToolCall::ListGoals {
+                lifecycle,
+                offset,
+                limit,
+            } => self.list_goals(auth, lifecycle, offset, limit),
+
+            ToolCall::UpdateGoal {
+                goal_id,
+                expected_revision,
+                title,
+                objective,
+                lifecycle,
+                terminal_reason,
+                idempotency_key,
+            } => self.update_goal(
+                auth,
+                goal_id,
+                expected_revision,
+                title,
+                objective,
+                lifecycle,
+                terminal_reason,
+                idempotency_key,
+            ),
+
+            ToolCall::AssociateGoalAgentTask {
+                goal_id,
+                task_id,
+                idempotency_key,
+            } => self.associate_goal_agent_task(auth, goal_id, task_id, idempotency_key),
+
+            ToolCall::AssociateGoalWorkflowSession {
+                goal_id,
+                session_id,
+                idempotency_key,
+            } => {
+                self.associate_goal_workflow_session(auth, goal_id, session_id, idempotency_key)
+                    .await
+            }
+
+            ToolCall::WaitForAgentEvents {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                events,
+                idempotency_key,
+            } => self.wait_for_agent_events(
+                auth,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                events,
+                idempotency_key,
+            ),
+
+            ToolCall::ReadAgentWait { wait_id } => self.read_agent_wait(auth, wait_id),
+
+            ToolCall::CancelAgentWait {
+                wait_id,
+                idempotency_key,
+            } => self.cancel_agent_wait(auth, wait_id, idempotency_key),
+
+            ToolCall::AgentWaitState { wait_id } => self.agent_wait_state(auth, wait_id),
+
             ToolCall::CreateAgentTask {
                 title,
                 instruction,
@@ -1848,6 +2113,21 @@ impl ToolRuntime {
                 assignee_agent_id,
                 idempotency_key,
             } => self.start_agent_task_attempt(auth, task_id, assignee_agent_id, idempotency_key),
+
+            ToolCall::StartAgentTaskEndpointContinuation {
+                task_id,
+                attempt_id,
+                assignee_agent_id,
+                attempt_fence,
+                attempt_controller_generation,
+            } => self.start_agent_task_endpoint_continuation(
+                auth,
+                task_id,
+                attempt_id,
+                assignee_agent_id,
+                attempt_fence,
+                attempt_controller_generation,
+            ),
 
             ToolCall::StartAgentTaskCodingRun {
                 project,
@@ -1888,6 +2168,8 @@ impl ToolRuntime {
                 assignee_agent_id,
                 attempt_fence,
                 attempt_controller_generation,
+                active_turn_wake_id,
+                active_turn_consume_token,
             } => self.heartbeat_agent_task_attempt(
                 auth,
                 task_id,
@@ -1895,6 +2177,8 @@ impl ToolRuntime {
                 assignee_agent_id,
                 attempt_fence,
                 attempt_controller_generation,
+                active_turn_wake_id,
+                active_turn_consume_token,
             ),
 
             ToolCall::CompleteAgentTaskAttempt {
@@ -1958,7 +2242,13 @@ impl ToolRuntime {
                 specialty_labels,
             ),
 
-            ToolCall::AttachAgentEndpoint {
+            ToolCall::RotateAgentContinuationEndpoint {
+                agent_id,
+                host,
+                client_attachment_id,
+                idempotency_key,
+            }
+            | ToolCall::AttachAgentEndpoint {
                 agent_id,
                 host,
                 client_attachment_id,
@@ -1969,6 +2259,125 @@ impl ToolRuntime {
                 host,
                 client_attachment_id,
                 idempotency_key,
+            ),
+
+            ToolCall::PresentAgentContinuation {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+            } => self.present_agent_continuation(
+                auth,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+            ),
+
+            ToolCall::AgentContinuationBind {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            } => self.agent_continuation_bind_for_window(
+                auth,
+                window,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            ),
+
+            ToolCall::AgentContinuationRecoverEndpoint {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            } => self.agent_continuation_recover_endpoint_for_window(
+                auth,
+                window,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            ),
+
+            ToolCall::AgentContinuationState {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            } => self.agent_continuation_state_for_window(
+                auth,
+                window,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            ),
+
+            ToolCall::AgentContinuationWakeAcquire {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            } => self.agent_continuation_wake_acquire_for_window(
+                auth,
+                window,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            ),
+
+            ToolCall::AgentContinuationWakePrepare {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+                wake_id,
+                attempt_id,
+            } => self.agent_continuation_wake_prepare_for_window(
+                auth,
+                window,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+                wake_id,
+                attempt_id,
+            ),
+
+            ToolCall::AgentContinuationWakeFinish {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+                wake_id,
+                attempt_id,
+                outcome,
+            } => self.agent_continuation_wake_finish_for_window(
+                auth,
+                window,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+                wake_id,
+                attempt_id,
+                outcome,
+            ),
+
+            ToolCall::AgentContinuationUnbind {
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
+            } => self.agent_continuation_unbind_for_window(
+                auth,
+                window,
+                agent_id,
+                endpoint_id,
+                expected_controller_generation,
+                binding_id,
             ),
 
             ToolCall::DetachAgentEndpoint { endpoint_id } => {
@@ -2194,12 +2603,10 @@ impl ToolRuntime {
             }
 
             call @ (ToolCall::DeleteProjectFiles { .. }
-            | ToolCall::ReadFile { .. }
             | ToolCall::ReadFiles { .. }
             | ToolCall::ListProjectFiles { .. }
             | ToolCall::ListProjectTrackedFiles { .. }
             | ToolCall::ProjectOverview { .. }
-            | ToolCall::SearchProjectText { .. }
             | ToolCall::SearchProjectTexts { .. }
             | ToolCall::WriteProjectFile { .. }
             | ToolCall::SaveProjectArtifact { .. }
@@ -2219,11 +2626,9 @@ impl ToolRuntime {
             | ToolCall::DiscardUntracked { .. }
             | ToolCall::GitCommitPaths { .. }
             | ToolCall::GitStatus { .. }
-            | ToolCall::GitDiff { .. }
             | ToolCall::GitDiffHunks { .. }
             | ToolCall::GitReviewSummary { .. }
             | ToolCall::GitLog { .. }
-            | ToolCall::GitDiffSummary { .. }
             | ToolCall::ShowChanges { .. }) => self.dispatch_git_tool(call).await,
 
             call @ (ToolCall::CargoFmt { .. }
@@ -2233,8 +2638,6 @@ impl ToolRuntime {
 
             call @ (ToolCall::RunJob { .. }
             | ToolCall::StopJob { .. }
-            | ToolCall::JobStatus { .. }
-            | ToolCall::JobLog { .. }
             | ToolCall::ObserveJobs { .. }
             | ToolCall::ListJobs { .. }
             | ToolCall::JobTail { .. }) => self.dispatch_job_tool(call, auth, ssh_resource).await,
@@ -2323,6 +2726,50 @@ mod structured_execution_sparse_projection_tests {
     }
 
     #[test]
+    fn terminal_validation_success_keeps_only_independent_mutation_truth() {
+        let mut result = ToolResult::ok(json!({
+            "project": "agent:test:webcodex",
+            "command_summary": "cargo fmt",
+            "cwd": ".",
+            "shell": "configured",
+            "executor": "agent",
+            "execution_source": "cargo_fmt",
+            "purpose": "format",
+            "execution_state": "completed",
+            "exit_code": 0,
+            "duration_ms": 5,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "stdout_lines": 0,
+            "stderr_lines": 0,
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "command_started": true,
+            "command_completed": true,
+            "passed": true,
+            "failure_kind": null,
+            "promoted_to_job": false,
+            "terminal": true,
+            "job_id": null,
+            "job_status": null,
+            "observation_token": null,
+            "effective_timeout_secs": 60,
+            "sync_wait_secs": 60,
+            "async_handoff_available": false,
+            "changed": true,
+            "state_changed": true
+        }));
+
+        sparsify_terminal_structured_execution_success("cargo_fmt", &mut result);
+        sparsify_structured_validation_runtime_metadata("cargo_fmt", &mut result);
+
+        assert_eq!(
+            result.output,
+            json!({"changed": true, "state_changed": true})
+        );
+    }
+
+    #[test]
     fn failure_projection_removes_audit_noise_but_preserves_decision_relevant_facts() {
         let mut result = ToolResult::err_with_output(
             "process exited 17",
@@ -2349,6 +2796,7 @@ mod structured_execution_sparse_projection_tests {
                 "recovery": {"kind": "inspect_output"}
             }),
         );
+        result.output["expectation_satisfied"] = json!(true);
         sparsify_failure_model_result_metadata("run_process", &mut result);
 
         for omitted in [
@@ -2380,6 +2828,7 @@ mod structured_execution_sparse_projection_tests {
             "job_id",
             "observation_token",
             "recovery",
+            "expectation_satisfied",
         ] {
             assert!(
                 result.output.get(retained).is_some(),
@@ -2468,5 +2917,41 @@ mod sparse_read_projection_tests {
             assert_eq!(result.output["items"][0]["output"]["path"], "a.rs");
             assert_eq!(result.output["items"][0]["output"]["start_line"], 1);
         }
+    }
+
+    #[test]
+    fn sparse_read_batch_requires_read_revision_before_hiding_digest() {
+        let mut without_revision = complete_batch_item(Some("a.rs"), "a.rs");
+        let mut result = ToolResult::ok(json!({
+            "project": "demo",
+            "requested_count": 1,
+            "returned_count": 1,
+            "succeeded_count": 1,
+            "failed_count": 0,
+            "items": [without_revision.clone()],
+            "output_truncated": false,
+            "next_index": null
+        }));
+        sparsify_complete_read_success("read_files", &mut result);
+        assert_eq!(result.output["requested_count"], 1);
+        assert!(result.output["items"][0]["output"]["sha256"]
+            .as_str()
+            .is_some());
+
+        without_revision["output"]["read_revision"] = json!(42);
+        let mut result = ToolResult::ok(json!({
+            "project": "demo",
+            "requested_count": 1,
+            "returned_count": 1,
+            "succeeded_count": 1,
+            "failed_count": 0,
+            "items": [without_revision],
+            "output_truncated": false,
+            "next_index": null
+        }));
+        sparsify_complete_read_success("read_files", &mut result);
+        assert!(result.output.get("requested_count").is_none());
+        assert_eq!(result.output["items"][0]["output"]["read_revision"], 42);
+        assert!(result.output["items"][0]["output"].get("sha256").is_none());
     }
 }

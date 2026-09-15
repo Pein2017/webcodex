@@ -6,6 +6,7 @@ use crate::webcodex_runner::detached_job::{
 };
 use serde_json::json;
 use std::ffi::OsString;
+#[cfg(feature = "runner-real-process-tests")]
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -3234,6 +3235,109 @@ fn run_fail_fast_validation_job(attempt: usize) -> FailFastAttempt {
 
 #[cfg(unix)]
 #[test]
+fn cargo_test_terminal_count_evidence_survives_runner_stream_retention() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        "#!/bin/sh\ni=0\nwhile [ $i -lt 7000 ]; do printf 'noise-%04d\\n' \"$i\"; i=$((i + 1)); done\nprintf 'running 120 tests\\n'\nprintf 'test result: ok. 100 passed; 0 failed; 0 ignored\\n'\nprintf 'test result: ok. 20 passed; 0 failed; 0 ignored\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let step = ShellJobValidationStep {
+        name: "test".into(),
+        program: "cargo".into(),
+        args: vec!["test".into()],
+        env: Vec::new(),
+    };
+    let mut context = test_job_context(temp.path(), vec!["test".to_string()]);
+    context.purpose = Some("test".to_string());
+    context.validation = Some(runner_protocol::ShellJobValidationMetadata {
+        tool: "cargo_test".to_string(),
+        kind: "test".to_string(),
+        steps: vec![step.clone()],
+        effective_timeout_secs: 60,
+        sync_wait_secs: 10,
+        adapter: "cargo_test".to_string(),
+        validation_target_id: None,
+        minimum_tests: Some(100),
+        require_tests: Some(true),
+        no_run: None,
+    });
+
+    let (sink, mut rx) = structured_test_sink("validation-agent", "validation-instance");
+    let mut shell = ShellConfig::default();
+    shell.path_prepend.push(bin);
+    let manager = JobManager::new(1);
+    manager.enqueue(
+        sink,
+        PendingJobStart::from_wire(
+            1,
+            RunnerPolicy {
+                allow_cwd_anywhere: true,
+                ..RunnerPolicy::default()
+            },
+            shell,
+            SshConfig::default(),
+            temp.path().join("project-registry"),
+            serde_json::from_value(json!({
+                "request_id": "cargo-count-retention-request",
+                "client_id": "validation-agent",
+                "kind": "start_validation_job",
+                "job_id": "cargo-count-retention-job",
+                "cwd": temp.path(),
+                "command": serde_json::to_string(&[step]).unwrap(),
+                "timeout_secs": 60,
+                "requested_by": "test",
+                "created_at": 1,
+                "job_context": context,
+            }))
+            .unwrap(),
+        ),
+    );
+
+    let updates = collect_job_updates(&mut rx, Duration::from_secs(30));
+    let terminal = updates
+        .iter()
+        .rev()
+        .find(|update| update.finished)
+        .expect("cargo test terminal update");
+    assert_eq!(terminal.status, "completed", "{terminal:?}");
+    assert_eq!(terminal.exit_code, Some(0));
+    let logs = terminal
+        .log_snapshot
+        .as_ref()
+        .expect("terminal bounded logs");
+    assert!(logs.stdout.truncated);
+    assert!(logs.stdout.tail.len() <= JOB_SNAPSHOT_STREAM_MAX_BYTES);
+    let evidence = terminal
+        .test_count_evidence
+        .as_ref()
+        .expect("authoritative terminal test-count evidence");
+    assert!(evidence.tests_detected);
+    assert_eq!(evidence.tests_run_count, Some(120));
+    assert_eq!(
+        evidence.status,
+        webcodex_core::validation_evidence::CargoTestCountEvidenceStatus::CompleteSummary
+    );
+
+    let snapshot = manager
+        .inventory()
+        .jobs
+        .into_iter()
+        .find(|snapshot| snapshot.job_id == "cargo-count-retention-job")
+        .expect("terminal snapshot in Runner inventory");
+    assert!(snapshot.stdout.truncated);
+    assert_eq!(snapshot.test_count_evidence, terminal.test_count_evidence);
+}
+
+#[cfg(unix)]
+#[test]
 fn validation_job_exposes_activity_during_silent_step_and_clears_terminal() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -4130,6 +4234,7 @@ fn wait_for_pid_marker(path: &Path, deadline: Instant, tag: &str) -> u32 {
 }
 
 /// Poll `process_running(pid)` until the process is gone or `timeout` elapses.
+#[cfg(feature = "runner-real-process-tests")]
 fn wait_for_process_exit(pid: u32, timeout: Duration, tag: &str) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -4157,13 +4262,16 @@ fn wait_for_process_exit(pid: u32, timeout: Duration, tag: &str) -> bool {
 
 /// Compiled copy of the `process_tree_helper` fixture, kept alive for the whole
 /// test process so its binary path never disappears under a running grandchild.
+#[cfg(feature = "runner-real-process-tests")]
 struct JobTreeHelper {
     _temp: TempDir,
     path: PathBuf,
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 static JOB_TREE_HELPER: OnceLock<Arc<JobTreeHelper>> = OnceLock::new();
 
+#[cfg(feature = "runner-real-process-tests")]
 fn job_tree_helper() -> Arc<JobTreeHelper> {
     JOB_TREE_HELPER
         .get_or_init(|| {
@@ -4199,6 +4307,7 @@ fn job_tree_helper() -> Arc<JobTreeHelper> {
 /// A background line reader over a job's captured stdout. Each complete line is
 /// delivered as `Line`, and a final `Eof` marks the pipe closing (which a
 /// descendant holding the write end would otherwise delay indefinitely).
+#[cfg(feature = "runner-real-process-tests")]
 enum JobTreeOut {
     Line(Vec<u8>),
     Eof,
@@ -4207,6 +4316,7 @@ enum JobTreeOut {
 /// Spawn the helper in `mode`, capturing its stdout and piping it through a
 /// background line reader. The helper's descendants inherit the stdout write
 /// end, so `Eof` only arrives once the whole tree is gone.
+#[cfg(feature = "runner-real-process-tests")]
 fn spawn_helper_raw(mode: &str, args: &[&str]) -> (ManagedChild, mpsc::Receiver<JobTreeOut>) {
     let helper = job_tree_helper();
     let mut cmd = Command::new(&helper.path);
@@ -4249,6 +4359,7 @@ fn spawn_helper_raw(mode: &str, args: &[&str]) -> (ManagedChild, mpsc::Receiver<
     (managed, rx)
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 fn read_grandchild_pid(rx: &mpsc::Receiver<JobTreeOut>) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -4272,6 +4383,7 @@ fn read_grandchild_pid(rx: &mpsc::Receiver<JobTreeOut>) -> u32 {
     }
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 fn wait_for_stdout_eof(rx: &mpsc::Receiver<JobTreeOut>, timeout: Duration, tag: &str) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -4289,6 +4401,7 @@ fn wait_for_stdout_eof(rx: &mpsc::Receiver<JobTreeOut>, timeout: Duration, tag: 
     }
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 fn extract_grandchild_pid(text: &str) -> Option<u32> {
     text.lines().find_map(|line| {
         line.trim()
@@ -4299,6 +4412,7 @@ fn extract_grandchild_pid(text: &str) -> Option<u32> {
     })
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 fn insert_running_job(
     manager: &JobManager,
     job_id: &str,
@@ -4319,12 +4433,14 @@ fn insert_running_job(
     stop_requested
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 struct RunningJobTreeFixture {
     parent_pid: u32,
     grandchild_pid: u32,
     output: mpsc::Receiver<JobTreeOut>,
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 impl RunningJobTreeFixture {
     fn assert_terminated(&self, timeout: Duration, tag: &str) {
         assert!(
@@ -4342,6 +4458,7 @@ impl RunningJobTreeFixture {
     }
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 fn seed_running_job_tree(
     manager: &JobManager,
     job_id: &str,
@@ -4368,6 +4485,7 @@ fn seed_running_job_tree(
 /// An explicit stop terminates the whole job process tree, including a
 /// descendant that inherited the stdout pipe, and the stdout reader reaches
 /// EOF instead of blocking forever.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_job_stop_terminates_whole_tree_including_descendant() {
@@ -4396,6 +4514,7 @@ fn runner_real_process_job_stop_terminates_whole_tree_including_descendant() {
 /// The job worker's cleanup sequence (bounded tree wait, force terminate, then
 /// reader join) must kill an orphaned descendant that keeps the stdout pipe
 /// open, and the output reader must reach EOF instead of being detached.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_job_cleanup_after_parent_exit_terminates_descendant_and_reaches_eof() {
@@ -4478,6 +4597,7 @@ fn runner_real_process_job_cleanup_after_parent_exit_terminates_descendant_and_r
 
 /// A shutdown drain terminates every running job's whole tree, leaves a
 /// completed job untouched, and is bounded.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_job_stop_all_terminates_all_trees_and_preserves_completed_jobs() {
@@ -4522,6 +4642,7 @@ fn runner_real_process_job_stop_all_terminates_all_trees_and_preserves_completed
 
 /// Repeated stops are idempotent: the second stop must not panic and must not
 /// leave the tree running.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_job_stop_twice_is_idempotent() {
@@ -4540,6 +4661,7 @@ fn runner_real_process_job_stop_twice_is_idempotent() {
 
 /// Stopping a job whose tree already exited naturally must not panic and must
 /// report success.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_job_stop_after_natural_exit_does_not_panic() {
@@ -4565,6 +4687,7 @@ fn runner_real_process_job_stop_after_natural_exit_does_not_panic() {
 
 /// Dropping the last real JobManager owner must terminate an active tree even
 /// while a worker clone still holds the jobs map and ManagedChild Arc.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_last_job_manager_owner_drop_terminates_running_tree_with_worker_clone_alive()
@@ -4588,6 +4711,7 @@ fn runner_real_process_last_job_manager_owner_drop_terminates_running_tree_with_
 }
 
 /// Cleanup on an already-exited tree must be a no-op that never panics.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_cleanup_managed_tree_on_exited_tree_does_not_panic() {
@@ -4608,6 +4732,7 @@ fn runner_real_process_cleanup_managed_tree_on_exited_tree_does_not_panic() {
 
 /// A user stop racing Runner shutdown must not deadlock or panic, and both
 /// paths must converge on a fully-terminated tree.
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_job_stop_racing_shutdown_does_not_panic() {
@@ -4632,7 +4757,7 @@ fn runner_real_process_job_stop_racing_shutdown_does_not_panic() {
 /// A job timeout must terminate the whole tree (parent shell, helper, and the
 /// helper's descendant) and publish exactly one `timeout` completion. Requires
 /// a real `sh` for the full worker path, so it runs on Linux.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "runner-real-process-tests"))]
 #[test]
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_job_timeout_terminates_the_whole_tree() {

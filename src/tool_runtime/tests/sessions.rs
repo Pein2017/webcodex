@@ -41,13 +41,17 @@ async fn read_agent_file_for_session(
             let bootstrap = auth_context(None, true);
             runtime
                 .dispatch_with_auth(
-                    ToolCall::ReadFile {
-                        project,
-                        path: "README.md".to_string(),
-                        session_id,
-                        start_line: None,
-                        limit: None,
+                    ToolCall::ReadFiles {
+                        project: project,
+                        items: vec![crate::tool_runtime::ReadFilesItem {
+                            path: "README.md".to_string(),
+                            start_line: None,
+                            limit: None,
+                            expected_read_revision: None,
+                        }],
+                        session_id: session_id,
                         with_line_numbers: None,
+                        max_result_bytes: None,
                     },
                     Some(&bootstrap),
                 )
@@ -68,7 +72,7 @@ async fn read_agent_file_for_session(
 }
 
 #[tokio::test]
-async fn read_file_with_session_id_records_event_without_content() {
+async fn read_files_with_session_id_records_event_without_content() {
     let runtime = runtime_with_agent_project("telemetry-read");
     register_agent(
         &runtime,
@@ -92,13 +96,17 @@ async fn read_file_with_session_id_records_event_without_content() {
             let bootstrap = auth_context(None, true);
             runtime
                 .dispatch_with_auth(
-                    ToolCall::ReadFile {
-                        project,
-                        path: "README.md".to_string(),
+                    ToolCall::ReadFiles {
+                        project: project,
+                        items: vec![crate::tool_runtime::ReadFilesItem {
+                            path: "README.md".to_string(),
+                            start_line: None,
+                            limit: None,
+                            expected_read_revision: None,
+                        }],
                         session_id: Some(session_id),
-                        start_line: None,
-                        limit: None,
                         with_line_numbers: Some(true),
+                        max_result_bytes: None,
                     },
                     Some(&bootstrap),
                 )
@@ -130,19 +138,19 @@ async fn read_file_with_session_id_records_event_without_content() {
     assert_eq!(summary.counts.tool_calls, 1);
     assert_eq!(summary.counts.succeeded, 1);
     assert_eq!(summary.counts.read_like, 1);
-    let event = finished_event(&summary, "read_file");
+    let event = finished_event(&summary, "read_files");
     assert_eq!(event.status.as_deref(), Some("succeeded"));
     assert!(event.read_like);
     assert!(!event.write_like);
     let serialized = serde_json::to_string(&summary.events).unwrap();
     assert!(
         !serialized.contains("secret line"),
-        "session event leaked read_file content: {serialized}"
+        "session event leaked read_files content: {serialized}"
     );
 }
 
 #[tokio::test]
-async fn read_file_without_session_id_omits_session_telemetry() {
+async fn read_files_without_session_id_omits_session_telemetry() {
     let runtime = runtime_with_agent_project("telemetry-nosession");
     register_agent(
         &runtime,
@@ -161,13 +169,17 @@ async fn read_file_without_session_id_omits_session_telemetry() {
             let bootstrap = auth_context(None, true);
             runtime
                 .dispatch_with_auth(
-                    ToolCall::ReadFile {
-                        project,
-                        path: "README.md".to_string(),
+                    ToolCall::ReadFiles {
+                        project: project,
+                        items: vec![crate::tool_runtime::ReadFilesItem {
+                            path: "README.md".to_string(),
+                            start_line: None,
+                            limit: None,
+                            expected_read_revision: None,
+                        }],
                         session_id: None,
-                        start_line: None,
-                        limit: None,
                         with_line_numbers: None,
+                        max_result_bytes: None,
                     },
                     Some(&bootstrap),
                 )
@@ -187,8 +199,8 @@ async fn read_file_without_session_id_omits_session_telemetry() {
     let result = task.await.unwrap();
 
     assert!(result.success, "{:?}", result.error);
-    assert_eq!(result.output["text"], "hello");
-    assert!(result.output.get("format").is_none());
+    assert_eq!(result.output["items"][0]["output"]["text"], "hello");
+    assert!(result.output["items"][0]["output"].get("format").is_none());
     assert!(result.output.get("session_recorded").is_none());
     assert!(result.output.get("session_hint").is_none());
 }
@@ -724,7 +736,7 @@ async fn closed_session_blocks_write_tools_and_message_post() {
             content: "blocked".to_string(),
             session_id: Some(session.session_id.clone()),
             overwrite: None,
-            expected_sha256: None,
+            expected_read_revision: None,
         })
         .await;
     assert!(!write.success);

@@ -50,12 +50,12 @@ class Risk:
     needs_windows_runner: bool = False
     needs_windows_package: bool = False
     needs_windows_desktop: bool = False
-    needs_windows_arm64: bool = False
     needs_macos: bool = False
     needs_macos_desktop: bool = False
-    needs_linux_arm64: bool = False
+    needs_docker: bool = False
     needs_frontend: bool = False
     needs_desktop_frontend: bool = False
+    needs_plugin_sdk: bool = False
     needs_full_native: bool = False
     categories: set[str] = field(default_factory=set)
     changed_count: int = 0
@@ -72,12 +72,12 @@ class Risk:
             self.needs_windows_runner = True
             self.needs_windows_package = True
             self.needs_windows_desktop = True
-            self.needs_windows_arm64 = True
             self.needs_macos = True
             self.needs_macos_desktop = True
-            self.needs_linux_arm64 = True
+            self.needs_docker = True
             self.needs_frontend = True
             self.needs_desktop_frontend = True
+            self.needs_plugin_sdk = True
         return self
 
     def outputs(self) -> dict[str, str]:
@@ -88,7 +88,6 @@ class Risk:
                 self.needs_windows_runner,
                 self.needs_windows_package,
                 self.needs_windows_desktop,
-                self.needs_windows_arm64,
             )
         )
         needs_desktop_package = self.needs_windows_desktop or self.needs_macos_desktop
@@ -100,12 +99,12 @@ class Risk:
             "needs_windows_runner": _bool(self.needs_windows_runner),
             "needs_windows_package": _bool(self.needs_windows_package),
             "needs_windows_desktop": _bool(self.needs_windows_desktop),
-            "needs_windows_arm64": _bool(self.needs_windows_arm64),
             "needs_macos": _bool(self.needs_macos),
             "needs_macos_desktop": _bool(self.needs_macos_desktop),
-            "needs_linux_arm64": _bool(self.needs_linux_arm64),
+            "needs_docker": _bool(self.needs_docker),
             "needs_frontend": _bool(self.needs_frontend),
             "needs_desktop_frontend": _bool(self.needs_desktop_frontend),
+            "needs_plugin_sdk": _bool(self.needs_plugin_sdk),
             "needs_desktop_package": _bool(needs_desktop_package),
             "needs_full_native": _bool(self.needs_full_native),
             "categories": categories,
@@ -146,12 +145,10 @@ def _mark_macos(risk: Risk, category: str, *, desktop: bool = False) -> None:
 
 
 def _mark_platform_context_bounded(risk: Risk) -> None:
-    """Fail closed on platform semantics without pulling in unrelated packaging."""
+    """Fail closed on daily native semantics without pulling in release-only architectures."""
     category = "platform-context-bounded"
     _mark_windows_core(risk, category)
     _mark_macos(risk, category)
-    risk.needs_linux_arm64 = True
-    risk.needs_windows_arm64 = True
 
 
 def _is_docs_or_text(path: str) -> bool:
@@ -172,6 +169,14 @@ def _is_desktop_frontend(path: str) -> bool:
 
 def _is_frontend_only(path: str) -> bool:
     return _is_main_frontend(path) or _is_desktop_frontend(path)
+
+
+def _is_docker_surface(path: str) -> bool:
+    return (
+        path in {"Dockerfile", ".dockerignore", "compose.yaml", "compose.build.yaml"}
+        or path.startswith("deploy/docker/")
+        or path == "scripts/prepare_server_deployment_assets.py"
+    )
 
 
 def _release_tooling(path: str) -> bool:
@@ -200,6 +205,17 @@ def _classify_path(risk: Risk, path: str) -> None:
     name = PurePosixPath(lower).name
     tokens = {token for token in re.split(r"[/_.-]+", lower) if token}
 
+    if (
+        path.startswith("npm/plugin-sdk/")
+        or path.startswith("plugins/safe-delete/")
+        or path.startswith("plugins/repo-info/")
+        or path.startswith("plugins/repo-context/")
+    ):
+        risk.needs_plugin_sdk = True
+        risk.categories.add(
+            "plugin-sdk" if path.startswith("npm/plugin-sdk/") else "plugin-sdk-dogfood"
+        )
+        return
     if _is_docs_or_text(path):
         risk.categories.add("docs")
         return
@@ -210,6 +226,11 @@ def _classify_path(risk: Risk, path: str) -> None:
     if _is_desktop_frontend(path):
         risk.needs_desktop_frontend = True
         risk.categories.add("desktop-frontend")
+        return
+
+    if _is_docker_surface(path):
+        risk.needs_docker = True
+        risk.categories.add("server-container")
         return
 
     if path.startswith(".github/workflows/") or path == "scripts/ci_path_risk.py":
@@ -340,8 +361,7 @@ def _classify_path(risk: Risk, path: str) -> None:
         _mark_macos(risk, "macos-script")
         return
     if {"arm64", "aarch64"} & tokens:
-        risk.needs_linux_arm64 = True
-        risk.categories.add("arm64-target")
+        _mark_macos(risk, "arm64-target")
         return
 
     risk.categories.add("normal-linux")
@@ -361,8 +381,6 @@ def classify_changes(changes: list[Change], platform_diff: str = "") -> Risk:
         _mark_windows_core(risk, "platform-cfg")
         _mark_macos(risk, "platform-cfg")
     if AARCH64_CFG_RE.search(platform_diff):
-        risk.needs_linux_arm64 = True
-        risk.needs_windows_arm64 = True
         _mark_macos(risk, "aarch64-cfg")
         risk.categories.add("aarch64-cfg")
 
@@ -372,8 +390,6 @@ def classify_changes(changes: list[Change], platform_diff: str = "") -> Risk:
 def invocation_override_reason(
     event_name: str, *, external_contributor: bool, run_ci: bool
 ) -> str | None:
-    if event_name == "push":
-        return "override-push-main"
     if external_contributor:
         return "override-external-contributor"
     if run_ci:
@@ -579,8 +595,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             risk = classify_git_range(args.base, args.head)
         except GitDiffError as exc:
-            print(f"ci path risk classification failed: {exc}", file=sys.stderr)
-            return 2
+            if args.event_name == "push":
+                risk = Risk.full("push-diff-unavailable")
+                risk.categories.add("push-diff-fallback")
+            else:
+                print(f"ci path risk classification failed: {exc}", file=sys.stderr)
+                return 2
 
     outputs = risk.outputs()
     if args.github_output:

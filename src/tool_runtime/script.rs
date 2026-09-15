@@ -63,7 +63,7 @@ impl ToolRuntime {
                 return process_tool_failure_result(
                     command_rejected_message(
                         format!("run_script {error}"),
-                        "pass timeout_secs between 1 and 3600 and sync_wait_secs between 1 and 60 without exceeding timeout_secs; both may be omitted for their defaults.",
+                        "pass positive timeout_secs/sync_wait_secs values or omit them for defaults; oversized values are clamped to the supported runtime and synchronous-wait ceilings.",
                     ),
                     "invalid_arguments",
                     ShellCommandExecutionState::NotStarted,
@@ -254,6 +254,10 @@ impl ToolRuntime {
                             &observation.stderr_tail,
                             observation.job.activity.as_ref(),
                         );
+                    let continuation = crate::tool_runtime::jobs::observe_job_continuation(
+                        &observation.job.job_id,
+                        observation.job.observation_token.as_deref(),
+                    );
                     ToolResult::ok(json!({
                         "execution_state": execution_state,
                         "command_started": command_started,
@@ -267,6 +271,7 @@ impl ToolRuntime {
                         "job_id": observation.job.job_id,
                         "job_status": observation.job.status,
                         "observation_token": observation.job.observation_token,
+                        "continuation_semantics": crate::tool_runtime::jobs::job_observation_continuation_semantics(),
                         "activity": observation.job.activity,
                         "effective_timeout_secs": timeout,
                         "sync_wait_secs": budget.sync_wait_secs,
@@ -278,6 +283,7 @@ impl ToolRuntime {
                         "stdout_truncated": observation.stdout_truncated,
                         "stderr_truncated": observation.stderr_truncated,
                         "detected_summary": detected_summary,
+                        "continuation": continuation,
                     }))
                 }
                 Err(error) => outcome_unknown_result(format!(
@@ -304,30 +310,34 @@ impl ToolRuntime {
         }
         let wait_timeout = timeout;
         let (request_id, receiver) = match self
-                .runner_registry
-                .enqueue_script(
-                    client_id,
-                    Some(effective_cwd),
-                    payload,
-                    stdin,
-                    timeout,
-                    wait_timeout,
-                    "tool_runtime".to_string(),
+            .runner_registry
+            .enqueue_script(
+                client_id,
+                Some(effective_cwd),
+                payload,
+                stdin,
+                timeout,
+                wait_timeout,
+                "tool_runtime".to_string(),
+            )
+            .await
+        {
+            Ok(enqueued) => enqueued,
+            Err(error) => {
+                return process_tool_failure_result(
+                    command_rejected_message(
+                        &error,
+                        match language {
+                            ShellScriptLanguage::Javascript => "confirm the Runner is connected and advertises structured_script_payload plus structured_script_javascript, then retry only if target state proves no script started.",
+                            ShellScriptLanguage::Typescript => "confirm the Runner is connected and advertises structured_script_payload plus structured_script_typescript, then retry only if target state proves no script started.",
+                            _ => "confirm the Runner is connected and advertises structured_script_payload, then retry only if target state proves no script started.",
+                        },
+                    ),
+                    classify_process_failure(&error),
+                    ShellCommandExecutionState::NotStarted,
                 )
-                .await
-            {
-                Ok(enqueued) => enqueued,
-                Err(error) => {
-                    return process_tool_failure_result(
-                        command_rejected_message(
-                            &error,
-                            "confirm the Runner is connected and advertises structured_script_payload, then retry only if target state proves no script started.",
-                        ),
-                        classify_process_failure(&error),
-                        ShellCommandExecutionState::NotStarted,
-                    )
-                }
-            };
+            }
+        };
         let mut result = match tokio::time::timeout(Duration::from_secs(wait_timeout + 2), receiver)
             .await
         {

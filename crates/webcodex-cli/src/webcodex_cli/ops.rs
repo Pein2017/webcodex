@@ -3,11 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use webcodex_admin::ServerHttpOptions;
 
-use super::{
-    http_post_json_status, read_env_file_value, read_optional_token, validate_user_api_token,
-};
+use super::{call_runtime_tool_status, http_post_json_status, resolve_user_api_token};
 
-const DEFAULT_EXPECTED_TOOL_COUNT: u64 = 66;
 pub(crate) const DEFAULT_RUNNER_REQUEST_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,35 +356,7 @@ fn render_ops_command_output(
 }
 
 fn resolve_ops_token(opts: &OpsCommonOptions) -> Result<Option<String>, String> {
-    if let Some(token) = &opts.token {
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err("--token cannot be empty".to_string());
-        }
-        validate_user_api_token(&token)?;
-        return Ok(Some(token));
-    }
-    if let Some(token) = read_optional_token(&opts.token_file, "--token-file")? {
-        validate_user_api_token(&token)?;
-        return Ok(Some(token));
-    }
-    if let Some(path) = &opts.env_file {
-        if let Some(token) = read_env_file_value(path, "WEBCODEX_TOKEN")? {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                validate_user_api_token(&token)?;
-                return Ok(Some(token));
-            }
-        }
-    }
-    if let Ok(token) = std::env::var("WEBCODEX_TOKEN") {
-        let token = token.trim().to_string();
-        if !token.is_empty() {
-            validate_user_api_token(&token)?;
-            return Ok(Some(token));
-        }
-    }
-    Ok(None)
+    resolve_user_api_token(&opts.token, &opts.token_file, &opts.env_file)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,15 +530,17 @@ async fn call_runtime_tool(
     tool: &str,
     params: Value,
 ) -> Result<Option<Value>, OpsHttpFailure> {
-    fetch_ops_json_output(
-        server_url,
-        server_http,
-        "/api/tools/call",
-        token,
-        json!({"tool": tool, "params": params}),
-    )
-    .await
-    .map(Some)
+    match call_runtime_tool_status(server_url, server_http, token, tool, params).await {
+        Ok((status, _content_type, Some(value))) if (200..300).contains(&status) => {
+            Ok(Some(output_payload(value)))
+        }
+        Ok((status, content_type, value)) => Err(OpsHttpFailure::from_response(
+            status,
+            content_type,
+            value.is_some(),
+        )),
+        Err(error) => Err(OpsHttpFailure::from_transport_error(error)),
+    }
 }
 
 fn output_payload(value: Value) -> Value {
@@ -661,15 +632,26 @@ pub(crate) fn ops_status_report(server_url: &str, runtime: &Option<Value>) -> Op
     }
 
     let tools_count = runtime.pointer("/tools/count").and_then(Value::as_u64);
-    if tools_count != Some(DEFAULT_EXPECTED_TOOL_COUNT) {
-        verdict.warn_reason(
-            format!(
-                "tools_count_unexpected:{}",
-                tools_count
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            ),
-            "confirm runtime tool registry count before deployment",
+    // This is the Server's internal registry, not the caller's MCP surface.
+    // Its size changes across releases; validate self-consistency instead of
+    // comparing it to a historical constant. Older compact reports omit names.
+    let inventory_valid = tools_count.is_some_and(|count| count > 0)
+        && match runtime.pointer("/tools/names") {
+            None => true,
+            Some(Value::Array(names)) => {
+                let mut seen = std::collections::HashSet::new();
+                Some(names.len() as u64) == tools_count
+                    && names.iter().all(|name| {
+                        name.as_str()
+                            .is_some_and(|name| !name.trim().is_empty() && seen.insert(name))
+                    })
+            }
+            Some(_) => false,
+        };
+    if !inventory_valid {
+        verdict.fail_reason(
+            "malformed_tool_inventory",
+            "inspect the runtime tool count and optional names; verify required MCP capabilities separately",
         );
     }
 

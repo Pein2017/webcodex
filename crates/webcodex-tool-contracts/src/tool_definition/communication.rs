@@ -1,7 +1,7 @@
-use super::ToolVisibility::ModelVisible;
+use super::ToolVisibility::{ModelHidden, ModelVisible};
 use super::{
-    def, model_spec, permission_risk, require_all_scopes, ToolDefinition, PERMISSION_RISK_WRITE,
-    TOOL_CATEGORY_COMMUNICATION,
+    adaptive_runtime_direct, def, model_spec, permission_risk, require_all_scopes, ToolDefinition,
+    PERMISSION_RISK_WRITE, TOOL_CATEGORY_COMMUNICATION,
 };
 use crate::metadata::{
     ToolPathHint::None as NoPath,
@@ -14,8 +14,8 @@ use crate::registry::input_schemas::{
     create_agent_identity_input_schema, create_conversation_input_schema,
     detach_agent_endpoint_input_schema, list_agent_identities_input_schema,
     list_agent_inbox_input_schema, list_conversations_input_schema,
-    post_conversation_message_input_schema, read_conversation_input_schema,
-    update_agent_identity_input_schema,
+    post_conversation_message_input_schema, present_agent_continuation_input_schema,
+    read_conversation_input_schema, update_agent_identity_input_schema,
 };
 use webcodex_core::authority::{COMMUNICATION_MANAGE_SCOPES, COMMUNICATION_READ_SCOPES};
 
@@ -129,6 +129,56 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         COMMUNICATION_MANAGE_SCOPES,
     ),
     require_all_scopes(
+        adaptive_runtime_direct(
+            permission_risk(
+                model_spec(
+                    def(
+                        "rotate_agent_continuation_endpoint",
+                        super::ToolAuditPolicy::typed_fields(&[
+                            super::ToolAuditResultField::pointer("endpoint_id", "/endpoint/endpoint_id"),
+                            super::ToolAuditResultField::pointer("agent_id", "/endpoint/agent_id"),
+                            super::ToolAuditResultField::pointer_non_null("detached", "/endpoint/detached_at_unix_ms"),
+                            super::ToolAuditResultField::value("created"),
+                            super::ToolAuditResultField::value("replayed"),
+                            super::ToolAuditResultField::value("state_changed"),
+                            super::ToolAuditResultField::value("error_kind"),
+                        ])
+                        .context(super::ToolAuditContextPolicy::Fields(&[
+                            super::ToolAuditResultField::pointer("endpoint_id", "/endpoint/endpoint_id"),
+                            super::ToolAuditResultField::pointer("agent_id", "/endpoint/agent_id"),
+                            super::ToolAuditResultField::value("created"),
+                            super::ToolAuditResultField::value("replayed"),
+                            super::ToolAuditResultField::value("state_changed"),
+                            super::ToolAuditResultField::value("error_kind"),
+                        ])),
+                        ModelVisible,
+                        TOOL_CATEGORY_COMMUNICATION,
+                        None,
+                        TOOL_PROVIDER_CONTROL,
+                        super::ToolSemanticContract {
+                            effect: super::ToolEffect::Mutate,
+                            risk: CommunicationManage,
+                            approval: super::ToolApprovalPolicy::Standard,
+                            idempotency: super::ToolIdempotency::Keyed,
+                        },
+                        Some(COMMUNICATION_MANAGE),
+                        false,
+                        NoPath,
+                        true,
+                        false,
+                        super::ToolSessionEvidencePolicy::NONE,
+                    ),
+                    "Rotate the server-local continuation Endpoint for an owned durable Agent. This creates a new Endpoint record and monotonic controller generation and makes older generations stale. It does not connect to, configure, or control ChatGPT or any external Host. The new Endpoint is not wake-capable until a separately authorized process-local Host binding is established. Exact idempotency replay returns the same Endpoint.",
+                    attach_agent_endpoint_input_schema,
+                ),
+                PERMISSION_RISK_WRITE,
+            )
+            .with_gpt_action_unsupported(),
+            19,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
         permission_risk(
             model_spec(
             def(
@@ -167,8 +217,317 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Attach a replacement Host/Client Endpoint to an owned durable Agent. The Server assigns a new monotonic controller generation and fences every older attachment. Public attachment is not wake-capable; only callable process-local Host adapter registration may enable continuation. Exact idempotency replay returns the original Endpoint.",
+            "Compatibility name for rotate_agent_continuation_endpoint. Rotates only the server-local continuation Endpoint record for an owned durable Agent, assigns a new monotonic controller generation, and makes older generations stale. It does not connect to, configure, or control ChatGPT or any external Host. Public rotation is not wake-capable until a separately authorized process-local Host binding is established. Exact idempotency replay returns the same Endpoint.",
             attach_agent_endpoint_input_schema,
+            ),
+            PERMISSION_RISK_WRITE,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
+        adaptive_runtime_direct(
+            model_spec(
+                def(
+                    "present_agent_continuation",
+                    super::ToolAuditPolicy::typed_fields(&[
+                        super::ToolAuditResultField::pointer("agent_id", "/agent_continuation/agent_id"),
+                        super::ToolAuditResultField::pointer("endpoint_id", "/agent_continuation/endpoint_id"),
+                        super::ToolAuditResultField::pointer("controller_generation", "/agent_continuation/controller_generation"),
+                        super::ToolAuditResultField::pointer("wake_id", "/agent_continuation/wake/wake_id"),
+                        super::ToolAuditResultField::pointer("wake_state", "/agent_continuation/wake/state"),
+                        super::ToolAuditResultField::pointer("queued_delivery_count", "/agent_continuation/queued_delivery_count"),
+                        super::ToolAuditResultField::pointer("dispatch_observation", "/agent_continuation/dispatch_observation"),
+                        super::ToolAuditResultField::value("error_kind"),
+                    ]),
+                    ModelVisible,
+                    TOOL_CATEGORY_COMMUNICATION,
+                    None,
+                    TOOL_PROVIDER_CONTROL,
+                    super::ToolSemanticContract {
+                        effect: super::ToolEffect::Observe,
+                        risk: Read,
+                        approval: super::ToolApprovalPolicy::None,
+                        idempotency: super::ToolIdempotency::PureRead,
+                    },
+                    Some(COMMUNICATION_READ),
+                    false,
+                    NoPath,
+                    false,
+                    false,
+                    super::ToolSessionEvidencePolicy::NONE,
+                ),
+                "Present one explicit durable Agent/Endpoint generation as a sparse MCP App continuation controller card. All three identity fields are required; the tool never infers an Agent or Endpoint from Goal, Project, Workflow Session, ClientWindow, credential, recent activity, or any ambient state. Presentation is read-only and creates no Host binding when Apps are unavailable.",
+                present_agent_continuation_input_schema,
+            )
+            .with_gpt_action_unsupported(),
+            18,
+        ),
+        COMMUNICATION_READ_SCOPES,
+    ),
+    require_all_scopes(
+        permission_risk(
+            def(
+                "agent_continuation_bind",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::pointer("agent_id", "/agent_continuation/agent_id"),
+                    super::ToolAuditResultField::pointer("endpoint_id", "/agent_continuation/endpoint_id"),
+                    super::ToolAuditResultField::pointer("controller_generation", "/agent_continuation/controller_generation"),
+                    super::ToolAuditResultField::value("state_changed"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelHidden,
+                TOOL_CATEGORY_COMMUNICATION,
+                None,
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: CommunicationManage,
+                    approval: super::ToolApprovalPolicy::Standard,
+                    idempotency: super::ToolIdempotency::DesiredState,
+                },
+                Some(COMMUNICATION_MANAGE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Transport,
+                super::ToolActivityInteraction::NonMeaningful,
+            ),
+            PERMISSION_RISK_WRITE,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
+        permission_risk(
+            def(
+                "agent_continuation_recover_endpoint",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::pointer("agent_id", "/agent_continuation/agent_id"),
+                    super::ToolAuditResultField::pointer("endpoint_id", "/agent_continuation/endpoint_id"),
+                    super::ToolAuditResultField::pointer("controller_generation", "/agent_continuation/controller_generation"),
+                    super::ToolAuditResultField::pointer("recovery_kind", "/endpoint_recovery/kind"),
+                    super::ToolAuditResultField::pointer("from_endpoint_id", "/endpoint_recovery/replacement/from_endpoint_id"),
+                    super::ToolAuditResultField::pointer("from_controller_generation", "/endpoint_recovery/replacement/from_controller_generation"),
+                    super::ToolAuditResultField::value("replayed"),
+                    super::ToolAuditResultField::value("state_changed"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelHidden,
+                TOOL_CATEGORY_COMMUNICATION,
+                None,
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: CommunicationManage,
+                    approval: super::ToolApprovalPolicy::Standard,
+                    idempotency: super::ToolIdempotency::FencedReplay,
+                },
+                Some(COMMUNICATION_MANAGE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Transport,
+                super::ToolActivityInteraction::NonMeaningful,
+            ),
+            PERMISSION_RISK_WRITE,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
+        permission_risk(
+            def(
+                "agent_continuation_state",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::pointer("agent_id", "/agent_continuation/agent_id"),
+                    super::ToolAuditResultField::pointer("endpoint_id", "/agent_continuation/endpoint_id"),
+                    super::ToolAuditResultField::pointer("controller_generation", "/agent_continuation/controller_generation"),
+                    super::ToolAuditResultField::pointer("wake_id", "/agent_continuation/wake/wake_id"),
+                    super::ToolAuditResultField::pointer("wake_state", "/agent_continuation/wake/state"),
+                    super::ToolAuditResultField::pointer("dispatch_observation", "/agent_continuation/dispatch_observation"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelHidden,
+                TOOL_CATEGORY_COMMUNICATION,
+                None,
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: CommunicationManage,
+                    approval: super::ToolApprovalPolicy::Standard,
+                    idempotency: super::ToolIdempotency::DesiredState,
+                },
+                Some(COMMUNICATION_MANAGE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Transport,
+                super::ToolActivityInteraction::NonMeaningful,
+            ),
+            PERMISSION_RISK_WRITE,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
+        permission_risk(
+            def(
+                "agent_continuation_wake_acquire",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::value("agent_id"),
+                    super::ToolAuditResultField::value("endpoint_id"),
+                    super::ToolAuditResultField::pointer("wake_id", "/wake/wake_id"),
+                    super::ToolAuditResultField::pointer("attempt_id", "/wake/attempt_id"),
+                    super::ToolAuditResultField::pointer("wake_state", "/wake/state"),
+                    super::ToolAuditResultField::value("state_changed"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelHidden,
+                TOOL_CATEGORY_COMMUNICATION,
+                None,
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: CommunicationManage,
+                    approval: super::ToolApprovalPolicy::Standard,
+                    idempotency: super::ToolIdempotency::FencedReplay,
+                },
+                Some(COMMUNICATION_MANAGE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Transport,
+                super::ToolActivityInteraction::NonMeaningful,
+            ),
+            PERMISSION_RISK_WRITE,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
+        permission_risk(
+            def(
+                "agent_continuation_wake_prepare",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::value("agent_id"),
+                    super::ToolAuditResultField::value("endpoint_id"),
+                    super::ToolAuditResultField::value("wake_id"),
+                    super::ToolAuditResultField::value("attempt_id"),
+                    super::ToolAuditResultField::value("wake_revision"),
+                    super::ToolAuditResultField::value("dispatch_observation"),
+                    super::ToolAuditResultField::value("state_changed"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelHidden,
+                TOOL_CATEGORY_COMMUNICATION,
+                None,
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: CommunicationManage,
+                    approval: super::ToolApprovalPolicy::Standard,
+                    idempotency: super::ToolIdempotency::FencedReplay,
+                },
+                Some(COMMUNICATION_MANAGE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Transport,
+                super::ToolActivityInteraction::NonMeaningful,
+            ),
+            PERMISSION_RISK_WRITE,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
+        permission_risk(
+            def(
+                "agent_continuation_wake_finish",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::value("agent_id"),
+                    super::ToolAuditResultField::value("endpoint_id"),
+                    super::ToolAuditResultField::value("wake_id"),
+                    super::ToolAuditResultField::value("attempt_id"),
+                    super::ToolAuditResultField::value("wake_state"),
+                    super::ToolAuditResultField::value("wake_revision"),
+                    super::ToolAuditResultField::value("dispatch_observation"),
+                    super::ToolAuditResultField::value("continuation_consumed"),
+                    super::ToolAuditResultField::value("state_changed"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelHidden,
+                TOOL_CATEGORY_COMMUNICATION,
+                None,
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: CommunicationManage,
+                    approval: super::ToolApprovalPolicy::Standard,
+                    idempotency: super::ToolIdempotency::FencedReplay,
+                },
+                Some(COMMUNICATION_MANAGE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Transport,
+                super::ToolActivityInteraction::NonMeaningful,
+            ),
+            PERMISSION_RISK_WRITE,
+        ),
+        COMMUNICATION_MANAGE_SCOPES,
+    ),
+    require_all_scopes(
+        permission_risk(
+            def(
+                "agent_continuation_unbind",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::value("agent_id"),
+                    super::ToolAuditResultField::value("endpoint_id"),
+                    super::ToolAuditResultField::value("controller_generation"),
+                    super::ToolAuditResultField::value("wake_capable"),
+                    super::ToolAuditResultField::value("state_changed"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelHidden,
+                TOOL_CATEGORY_COMMUNICATION,
+                None,
+                TOOL_PROVIDER_CONTROL,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: CommunicationManage,
+                    approval: super::ToolApprovalPolicy::Standard,
+                    idempotency: super::ToolIdempotency::FencedReplay,
+                },
+                Some(COMMUNICATION_MANAGE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            )
+            .with_activity(
+                super::ToolActivityPresentation::Transport,
+                super::ToolActivityInteraction::NonMeaningful,
             ),
             PERMISSION_RISK_WRITE,
         ),
@@ -208,7 +567,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Verify an exact Agent/Endpoint generation and return bounded turn context without Message bodies. With an activation idempotency key, accept one pending Wake into this already-active explicit turn and return a replayable consume token; this does not request a new model turn.",
+            "Verify an exact Agent/Endpoint generation and return bounded turn context without Message bodies. activation_idempotency_key is only for explicit activation of an eligible pending Inbox-style Wake into this already-active turn; omit it for agent_task_attempt and attention_event Wakes already dispatched by an Endpoint carrier. Explicit activation never requests a new model turn.",
             bootstrap_agent_conversation_input_schema,
         ),
         COMMUNICATION_MANAGE_SCOPES,

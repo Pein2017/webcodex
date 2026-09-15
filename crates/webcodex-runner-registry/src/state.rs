@@ -15,8 +15,8 @@ use webcodex_core::runner_operation::RunnerOperation;
 use webcodex_core::runner_protocol::{
     PersistentShellResult, RunnerBuildInfo, RunnerHostContext, RunnerPolicySummary,
     RunnerProjectSummary, RunnerRequest, RunnerView, ShellCommandExecutionState, ShellJobActivity,
-    ShellJobCodexMetadata, ShellJobStructuredExecutionMetadata, ShellJobValidationProgress,
-    ShellProcessArgv, ShellProjectInventoryStatus, ShellRunResponse,
+    ShellJobCodexMetadata, ShellJobStructuredExecutionMetadata, ShellJobTestCountEvidence,
+    ShellJobValidationProgress, ShellProcessArgv, ShellProjectInventoryStatus, ShellRunResponse,
     JOB_INVENTORY_MAX_TERMINAL_JOBS, JOB_TERMINAL_RETENTION_SECS,
 };
 
@@ -202,7 +202,7 @@ impl RunnerRecord {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct SkillStoreDispatchFence {
+pub(super) struct SkillDispatchFence {
     pub(super) runner_instance_id: String,
     pub(super) management: bool,
 }
@@ -222,6 +222,10 @@ pub(super) struct PendingShellRequest {
     pub(super) expected_runner_owner: Option<String>,
     pub(super) expected_project_id: Option<String>,
     pub(super) expected_project_cwd: Option<String>,
+    /// Exact Runner process lease for a project-placement-fenced file access.
+    /// Revalidated immediately before dequeue so a replacement process using
+    /// the same client_id/project path cannot inherit stale project work.
+    pub(super) expected_project_runner_instance_id: Option<String>,
     /// Exact Runner process lease captured for an MCP gateway request. This is
     /// revalidated under the registry lock immediately before dequeue so a
     /// replacement Runner cannot consume stale bridge work.
@@ -239,10 +243,10 @@ pub(super) struct PendingShellRequest {
     /// Revalidated at dequeue so neither check nor reload can silently retarget
     /// a replacement process using the same client_id.
     pub(super) expected_runner_config_runner_instance_id: Option<String>,
-    /// Exact Runner process lease plus read/manage mode captured for a
-    /// Runner-global Skill store request. Revalidated at dequeue so a
-    /// replacement process using the same client_id cannot inherit authority.
-    pub(super) skill_store_fence: Option<SkillStoreDispatchFence>,
+    /// Exact Runner process lease plus source/read/manage mode captured for a
+    /// Runner-global Skill request. Revalidated at dequeue so a replacement
+    /// process using the same client_id cannot inherit authority.
+    pub(super) skill_fence: Option<SkillDispatchFence>,
     pub(super) dispatched: bool,
 }
 
@@ -362,6 +366,9 @@ pub(super) struct JobObservationState {
     /// lifecycle. Runner-reported `ended_at` remains the public execution time
     /// and never controls Server registry retention.
     pub(super) terminal_observed_at: Option<i64>,
+    pub(super) receipt_candidates: Option<crate::receipts::ReceiptCandidates>,
+    /// Fixed historical deadline, also identifies a receipt with no live lease.
+    pub(super) receipt_expires_at: Option<i64>,
 }
 
 impl JobObservationState {
@@ -371,6 +378,8 @@ impl JobObservationState {
             revision: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(Notify::new()),
             terminal_observed_at: None,
+            receipt_candidates: None,
+            receipt_expires_at: None,
         }
     }
 }
@@ -401,6 +410,8 @@ pub(super) struct ShellJobRecord {
     /// plaintext key. Keeping this on the Job preserves authorization after
     /// the originating runner registration is removed.
     pub(super) auth_group: Option<RunnerAccessGroup>,
+    /// Immutable historical attribution; registration replacement cannot retarget it.
+    pub(super) owner_at_admission: Option<String>,
     /// Internal lease owner. Never exposed through public job tools.
     pub(super) runner_instance_id: String,
     pub(super) kind: String,
@@ -431,6 +442,7 @@ pub(super) struct ShellJobRecord {
     pub(super) validation_steps: Vec<String>,
     pub(super) validation: Option<webcodex_core::runner_protocol::ShellJobValidationMetadata>,
     pub(super) validation_progress: Option<ShellJobValidationProgress>,
+    pub(super) test_count_evidence: Option<ShellJobTestCountEvidence>,
     /// Last Runner-authoritative bounded activity for an active Job. Cleared on
     /// terminal/recovery transitions; never used as execution authority.
     pub(super) activity: Option<ShellJobActivity>,

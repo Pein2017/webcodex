@@ -1,4 +1,5 @@
 use super::activity::{ActivityRecorder, NoopActivityRecorder};
+#[cfg(feature = "workspace-checkpoints")]
 use super::checkpoint;
 use super::observations::RuntimeObservations;
 use super::permissions::PermissionEvaluator;
@@ -110,11 +111,15 @@ pub struct ToolRuntime {
     pub(crate) coding_agent_runs: Arc<super::coding_agent::CodingAgentServerState>,
     pub runtime_info: Arc<RuntimeInfo>,
     runtime_exposure: crate::model_surface::RuntimeExposure,
+    #[cfg(feature = "workspace-checkpoints")]
     pub(crate) checkpoint_store: checkpoint::CheckpointStore,
     pub(crate) sessions: sessions::SessionStore,
     pub(crate) session_shells: SessionShellRegistry,
     pub(crate) semantic_navigation_probe_timeout: Duration,
     pub(crate) repository_overview_probe_timeout: Duration,
+    /// Process-local model-facing handles for exact full-file read snapshots.
+    /// Clones share the registry; a Server runtime restart creates a new epoch.
+    pub(crate) read_revisions: Arc<super::read_revisions::ReadRevisionRegistry>,
     /// One deadline shared by every item in a `read_files` batch.
     pub(crate) read_files_deadline: Duration,
     /// One deadline shared by every query in a `search_project_texts` batch.
@@ -165,8 +170,9 @@ pub struct ToolRuntime {
     /// the server from the existing webcodex.db handle; Runner-native project
     /// filesystems never own Memory v1 persistence.
     pub(crate) memory_db: Option<Arc<crate::Database>>,
-    /// Optional Control-owned durable Agent and Conversation store. It shares
-    /// the Server SQLite handle with other durable domains but owns independent tables.
+    /// Optional Control-owned durable user-domain store. Durable Agent, Conversation,
+    /// AgentTask, and Goal state share this Server SQLite handle while remaining
+    /// independent tables, lifecycles, and authority domains.
     pub(crate) communication_db: Option<Arc<crate::Database>>,
     /// Optional process-local Host continuation registry/controller. It is
     /// created only when the durable communication database is injected and is
@@ -188,6 +194,7 @@ impl ToolRuntime {
             runtime_exposure: crate::model_surface::RuntimeExposure::Runtime(
                 crate::model_surface::ModelSurface::LocalCoding,
             ),
+            #[cfg(feature = "workspace-checkpoints")]
             checkpoint_store: checkpoint::CheckpointStore::default(),
             sessions: sessions::SessionStore::default(),
             session_shells: SessionShellRegistry::default(),
@@ -195,6 +202,7 @@ impl ToolRuntime {
                 super::semantic_navigation::DEFAULT_SEMANTIC_NAVIGATION_PROBE_TIMEOUT,
             repository_overview_probe_timeout:
                 super::coding_task::DEFAULT_REPOSITORY_OVERVIEW_PROBE_TIMEOUT,
+            read_revisions: Arc::new(super::read_revisions::ReadRevisionRegistry::new()),
             read_files_deadline: super::read_files::DEFAULT_READ_FILES_DEADLINE,
             search_project_texts_deadline:
                 super::search_project_texts::DEFAULT_SEARCH_PROJECT_TEXTS_DEADLINE,

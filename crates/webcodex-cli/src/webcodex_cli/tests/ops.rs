@@ -667,15 +667,17 @@ fn spawn_ops_route_server(
 }
 
 // Route fixtures may intentionally exercise the unauthenticated 401 contract.
-// Serialize them with the process-env credential test and remove any ambient
-// token for the duration, while still preserving explicit per-command tokens.
+// Serialize them with process-env credential tests and remove both ambient
+// user/API credential aliases while preserving explicit per-command tokens.
 #[allow(clippy::await_holding_lock)]
 async fn run_ops_with_routes(
     command: OpsCommand,
     routes: Vec<(&'static str, OpsHttpResponse)>,
 ) -> String {
     let _env_guard = env_test_guard();
-    let _env = EnvGuard::new().remove("WEBCODEX_TOKEN");
+    let _env = EnvGuard::new()
+        .remove("WEBCODEX_TOKEN")
+        .remove("WEBCODEX_PAT");
     let (server_url, stop_tx, handle) = spawn_ops_route_server(routes);
     let command = match command {
         OpsCommand::Status(mut opts) => {
@@ -876,6 +878,51 @@ fn ops_status_runtime_ok_passes() {
         report.source["runtime_commit"],
         "15138884e3a8ddcf294cae98183ecaac37af7230"
     );
+}
+
+#[test]
+fn ops_status_tool_inventory_accepts_different_release_sizes() {
+    for count in [1_u64, 47, 66, 135, 200] {
+        let mut runtime = runtime_status_fixture();
+        runtime["tools"] = json!({"count": count});
+        let report = ops_status_report("https://ops.example.test", &Some(runtime.clone()));
+        assert_eq!(report.verdict.status, "pass", "compact count {count}");
+        runtime["tools"]["names"] =
+            json!((0..count).map(|i| format!("tool_{i}")).collect::<Vec<_>>());
+        let report = ops_status_report("https://ops.example.test", &Some(runtime));
+        assert_eq!(report.verdict.status, "pass", "full count {count}");
+        assert!(report.verdict.warning_reasons.is_empty());
+    }
+}
+
+#[test]
+fn ops_status_tool_inventory_rejects_missing_empty_or_inconsistent_data() {
+    for tools in [
+        Value::Null,
+        json!({}),
+        json!({"count": 0}),
+        json!({"count": -1}),
+        json!({"count": "135"}),
+        json!({"count": 1.5}),
+        json!({"count": 2, "names": ["one"]}),
+        json!({"count": 2, "names": ["one", "one"]}),
+        json!({"count": 1, "names": [""]}),
+        json!({"count": 1, "names": [" "]}),
+        json!({"count": 1, "names": [42]}),
+        json!({"count": 1, "names": null}),
+        json!({"count": 1, "names": "one"}),
+    ] {
+        let mut runtime = runtime_status_fixture();
+        runtime["tools"] = tools;
+        let report = ops_status_report("https://ops.example.test", &Some(runtime));
+        assert_eq!(report.verdict.status, "fail");
+        assert!(report.verdict.blocking);
+        assert!(report
+            .verdict
+            .blocking_reasons
+            .contains(&"malformed_tool_inventory".to_string()));
+        assert_eq!(ops_exit_code(true, report.verdict.status), 2);
+    }
 }
 
 #[test]

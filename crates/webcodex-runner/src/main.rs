@@ -25,7 +25,9 @@ use webcodex_core::{
     runner_operation, runner_protocol, validation_bridge,
 };
 use webcodex_runner_config as runner_config;
-use webcodex_workspace::{project_overview, workspace_checkpoint};
+use webcodex_workspace::project_overview;
+#[cfg(feature = "workspace-checkpoints")]
+use webcodex_workspace::workspace_checkpoint;
 
 use runner_protocol::{
     validation_infrastructure_failure_code, RunnerCapabilities, RunnerJobUpdateRequest,
@@ -33,9 +35,10 @@ use runner_protocol::{
     RunnerProjectSummary, RunnerRegisterRequest, RunnerRegisterResponse, RunnerRequest,
     ShellCommandExecutionState, ShellJobActivity, ShellJobActivityPhase, ShellJobActivitySource,
     ShellJobActivityState, ShellJobContext, ShellJobInventory, ShellJobLogSnapshot,
-    ShellJobSnapshot, ShellJobStreamSnapshot, ShellJobValidationProgress, ShellJobValidationStep,
-    ShellProfileSummaryEntry, ShellProfilesSummary, ShellProjectInventoryPage,
-    ShellProjectInventoryStatus, JOB_INVENTORY_MAX_ACTIVE_JOBS, JOB_INVENTORY_MAX_SERIALIZED_BYTES,
+    ShellJobSnapshot, ShellJobStreamSnapshot, ShellJobTestCountEvidence,
+    ShellJobValidationProgress, ShellJobValidationStep, ShellProfileSummaryEntry,
+    ShellProfilesSummary, ShellProjectInventoryPage, ShellProjectInventoryStatus,
+    JOB_INVENTORY_MAX_ACTIVE_JOBS, JOB_INVENTORY_MAX_SERIALIZED_BYTES,
     JOB_INVENTORY_MAX_TERMINAL_JOBS, JOB_SNAPSHOT_STREAM_MAX_BYTES, JOB_TERMINAL_RETENTION_SECS,
     RUNNER_PROTOCOL_GENERATION_V2, VALIDATION_STEP_SPAWN_FAILED_CODE,
     VALIDATION_STEP_WAIT_FAILED_CODE, VALIDATION_TOOL_UNAVAILABLE_CODE,
@@ -54,6 +57,8 @@ use webcodex_runner::detached_job::{
     handoff_detached_job, snapshot_from_detached_record, DetachedHandoffOutcome, DetachedJobStore,
     DetachedLaunchSpec, DetachedStartRequest,
 };
+#[cfg(all(test, feature = "workspace-checkpoints"))]
+use webcodex_runner::is_checkpoint_request_kind;
 use webcodex_runner::output_text::{OutputTextDecoder, OutputTextSource};
 #[cfg(test)]
 use webcodex_runner::QuicClientConfig;
@@ -72,19 +77,22 @@ use webcodex_runner::{
     configured_shell_job_command, configured_validation_job_command, cwd_allowed,
     default_config_path, dispatch_request_with_outcome, err_cmd, handle_apply_patch_file_request,
     handle_apply_text_edits_file_request, handle_artifact_file_operation,
-    handle_basic_file_request, handle_checkpoint_file_request, handle_write_project_file_request,
-    hostname, load_config, max_concurrent_jobs, ok_cmd, prepare_detached_process_launch,
-    project_registry_dir, resolve_prepared_shell_profile, resolve_requested_path, run_runner,
-    validate_client_profile, validate_structured_edit_runner_path, CommandResult, HotRunnerConfig,
-    HttpSendConfig, PreparedShellProfile, PreparedShellProfileCache, ReloadableRunnerConfig,
-    RunnerConfig, RunnerDispatchOutcome, RunnerPolicy, RunnerProjectCache, RunnerSink, ShellConfig,
+    handle_basic_file_request, handle_write_project_file_request, hostname, load_config,
+    max_concurrent_jobs, ok_cmd, prepare_detached_process_launch, project_registry_dir,
+    resolve_prepared_shell_profile, resolve_requested_path, run_runner, validate_client_profile,
+    validate_structured_edit_runner_path, CommandResult, HotRunnerConfig, HttpSendConfig,
+    PreparedShellProfile, PreparedShellProfileCache, ReloadableRunnerConfig, RunnerConfig,
+    RunnerDispatchOutcome, RunnerPolicy, RunnerProjectCache, RunnerSink, ShellConfig,
     SubmitResultError,
 };
 #[cfg(test)]
 use webcodex_runner::{
     dispatch_request, is_artifact_request_kind, is_basic_file_request_kind,
-    is_checkpoint_request_kind, is_structured_edit_request_kind,
+    is_structured_edit_request_kind,
 };
+
+#[cfg(feature = "workspace-checkpoints")]
+use webcodex_runner::handle_checkpoint_file_request;
 use webcodex_runner::{is_transport_failure, SshConfig, SshConnectionPool};
 use webcodex_runner::{
     run_process_with_profiles_and_execution_state_with_start_hook,
@@ -358,6 +366,7 @@ struct PendingJobUpdateDelivery {
     error: Option<String>,
     command_execution_state: Option<ShellCommandExecutionState>,
     validation_progress: Option<ShellJobValidationProgress>,
+    test_count_evidence: Option<ShellJobTestCountEvidence>,
     activity: Option<ShellJobActivity>,
     finished: bool,
 }
@@ -372,6 +381,7 @@ impl PendingJobUpdateDelivery {
             error: update.error.clone(),
             command_execution_state: update.command_execution_state.clone(),
             validation_progress: update.validation_progress.clone(),
+            test_count_evidence: update.test_count_evidence.clone(),
             activity: update.activity,
             finished: update.finished,
         }
@@ -469,6 +479,7 @@ fn job_update_from_delivery(
     update.error = pending.error.clone();
     update.command_execution_state = pending.command_execution_state.clone();
     update.validation_progress = pending.validation_progress.clone();
+    update.test_count_evidence = pending.test_count_evidence.clone();
     update.activity = pending.activity;
     update.finished = pending.finished;
     update
@@ -613,6 +624,7 @@ fn test_job_snapshot(job_id: &str) -> ShellJobSnapshot {
         stdout: ShellJobStreamSnapshot::default(),
         stderr: ShellJobStreamSnapshot::default(),
         validation_progress: None,
+        test_count_evidence: None,
         activity: None,
     }
 }
@@ -1950,6 +1962,10 @@ fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabilities {
     // This binary enforces ApplyTextEditInput.occurrence exactly. Older binaries
     // omit this additive effect-semantics capability and must not receive selectors.
     capabilities.apply_text_edit_occurrence = true;
+    // Unique exact local edits may be preflighted against current content
+    // without a historical whole-file SHA. The transactional source-SHA fence
+    // before mutation remains mandatory.
+    capabilities.apply_text_edit_local_guard_without_sha = true;
     // Line scopes are an additive rolling-upgrade fence: advertise only because
     // this binary resolves full-match containment before any mutation.
     capabilities.apply_text_edit_line_scope = true;
@@ -1985,6 +2001,9 @@ fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabilities {
     // so advertise durable preservation independently from the older count
     // assertion capability for rolling upgrades.
     capabilities.structured_cargo_test_execution_policy = true;
+    // `--lib` expands the older structured Cargo test argv vocabulary, so
+    // advertise it separately for mixed Server/Runner rolling upgrades.
+    capabilities.structured_cargo_test_lib = true;
     // This binary accepts both legacy Go validation argv from old Servers and
     // the current machine-readable JSON argv. Do not trust static config or
     // infer this from generic structured validation support.
@@ -1999,6 +2018,14 @@ fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabilities {
     capabilities.structured_go_test_packages = true;
     capabilities.structured_process_argv = true;
     capabilities.structured_script_payload = true;
+    // JavaScript extends the older typed-script wire enum. Advertise it
+    // separately so a newer Server never sends that variant to an older Runner
+    // which already advertised structured_script_payload.
+    capabilities.structured_script_javascript = true;
+    // TypeScript extends the same typed-script wire enum independently from
+    // JavaScript. This bit means the binary understands the semantic protocol;
+    // local Node availability/version is resolved only when execution starts.
+    capabilities.structured_script_typescript = true;
     capabilities.internal_posix_script = true;
     capabilities.structured_execution_jobs = true;
     // Detached process ownership is an independent additive authority. Until
@@ -2011,10 +2038,10 @@ fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabilities {
     // advertise a capability that the binary does not implement.
     capabilities.project_path_registration = true;
     capabilities.managed_worktree = true;
-    // Runner-global operator-installed Skill store read and management are
-    // explicit rolling-upgrade capabilities implemented by this binary.
-    capabilities.skill_store_read = true;
-    capabilities.skill_store_manage = true;
+    // Configured live roots and managed active Skills share one Runner-local runtime
+    // boundary; managed lifecycle authority remains independently advertised.
+    capabilities.skill_runtime = true;
+    capabilities.skill_management = true;
     // Native Tool Plugins are a separate Runner-local gateway capability. Keep
     // this explicit even when zero Plugins are configured so cross-platform
     // `plugin_tool reload` can target the exact Runner.
@@ -2338,10 +2365,13 @@ fn register(
 
 #[cfg(test)]
 fn is_file_request_kind(kind: &str) -> bool {
+    #[cfg(feature = "workspace-checkpoints")]
+    if is_checkpoint_request_kind(kind) {
+        return true;
+    }
     is_basic_file_request_kind(kind)
         || is_structured_edit_request_kind(kind)
         || is_artifact_request_kind(kind)
-        || is_checkpoint_request_kind(kind)
 }
 
 fn handle_file_operation(policy: &RunnerPolicy, operation: &RunnerFileOperation) -> CommandResult {
@@ -2396,8 +2426,21 @@ fn handle_file_operation(policy: &RunnerPolicy, operation: &RunnerFileOperation)
         | RunnerFileOperation::ArtifactUploadAbort(_) => {
             handle_artifact_file_operation(operation, &resolved, start)
         }
+        #[cfg(feature = "workspace-checkpoints")]
         RunnerFileOperation::CheckpointCreate(_) | RunnerFileOperation::CheckpointRestore(_) => {
             handle_checkpoint_file_request(operation, &resolved, start)
+        }
+        #[cfg(not(feature = "workspace-checkpoints"))]
+        RunnerFileOperation::CheckpointCreate(_) | RunnerFileOperation::CheckpointRestore(_) => {
+            CommandResult {
+                exit_code: None,
+                stdout: None,
+                stderr: None,
+                duration_ms: Some(start.elapsed().as_millis() as u64),
+                error: Some(
+                    "workspace checkpoints are unsupported in this Runner build".to_string(),
+                ),
+            }
         }
         RunnerFileOperation::Read(_)
         | RunnerFileOperation::Write(_)
@@ -2777,8 +2820,33 @@ struct RunnerJobDelta {
     command_execution_state: Option<ShellCommandExecutionState>,
     stream_limit_bytes: Option<usize>,
     validation_progress: Option<ShellJobValidationProgress>,
+    test_count_evidence: Option<ShellJobTestCountEvidence>,
     activity: Option<ShellJobActivity>,
     finished: bool,
+}
+
+fn observe_cargo_test_count_chunks(
+    accumulator: &mut Option<webcodex_core::cargo_test_count::CargoTestRunMetadataAccumulator>,
+    stdout: &str,
+    stderr: &str,
+) {
+    if let Some(accumulator) = accumulator.as_mut() {
+        accumulator.push_stdout_chunk(stdout);
+        accumulator.push_stderr_chunk(stderr);
+    }
+}
+
+fn finish_cargo_test_count_evidence(
+    accumulator: Option<webcodex_core::cargo_test_count::CargoTestRunMetadataAccumulator>,
+) -> Option<ShellJobTestCountEvidence> {
+    accumulator.map(|accumulator| {
+        let metadata = accumulator.finish();
+        ShellJobTestCountEvidence {
+            tests_detected: metadata.tests_detected,
+            tests_run_count: metadata.tests_run_count,
+            status: metadata.count_evidence_status,
+        }
+    })
 }
 
 fn process_running_activity() -> ShellJobActivity {
@@ -2966,6 +3034,7 @@ fn job_update_from_snapshot(
         error: snapshot.error.clone(),
         command_execution_state: snapshot.command_execution_state,
         validation_progress: snapshot.validation_progress.clone(),
+        test_count_evidence: snapshot.test_count_evidence.clone(),
         activity: snapshot.activity,
         finished: runner_job_is_terminal(&snapshot.status),
     }
@@ -3238,7 +3307,14 @@ fn validate_runner_job_context_operation(
     if context.shell.as_deref().is_some_and(|shell| {
         !matches!(
             shell,
-            "sh" | "bash" | "powershell" | "configured" | "custom" | "remote" | "direct_argv"
+            "sh" | "bash"
+                | "powershell"
+                | "javascript"
+                | "typescript"
+                | "configured"
+                | "custom"
+                | "remote"
+                | "direct_argv"
         )
     }) {
         return Err("job recovery context shell is invalid".to_string());
@@ -3520,6 +3596,9 @@ impl JobManager {
             if delta.validation_progress.is_some() {
                 job.snapshot.validation_progress = delta.validation_progress.clone();
             }
+            if delta.test_count_evidence.is_some() {
+                job.snapshot.test_count_evidence = delta.test_count_evidence.clone();
+            }
             if let Some(activity) = delta.activity {
                 debug_assert!(activity.is_canonical());
                 job.snapshot.activity = Some(activity);
@@ -3608,6 +3687,7 @@ impl JobManager {
                         error: snapshot.error.clone(),
                         command_execution_state: snapshot.command_execution_state.clone(),
                         validation_progress: snapshot.validation_progress.clone(),
+                        test_count_evidence: snapshot.test_count_evidence.clone(),
                         activity: snapshot.activity,
                         finished: runner_job_is_terminal(&snapshot.status),
                     };
@@ -4135,6 +4215,7 @@ impl JobManager {
                 error: Some(error),
                 command_execution_state,
                 validation_progress: None,
+                test_count_evidence: None,
                 activity: None,
                 finished: true,
             });
@@ -4204,6 +4285,7 @@ impl JobManager {
                         stdout: ShellJobStreamSnapshot::default(),
                         stderr: ShellJobStreamSnapshot::default(),
                         validation_progress: None,
+                        test_count_evidence: None,
                         activity: None,
                     },
                     child: None,
@@ -4607,6 +4689,11 @@ impl JobManager {
             ),
             _ => unreachable!("shell Job starter received non shell/validation operation"),
         };
+        let capture_cargo_test_count = context.validation.as_ref().is_some_and(|metadata| {
+            metadata.tool == "cargo_test"
+                && metadata.kind == "test"
+                && metadata.no_run != Some(true)
+        });
         if !policy.allow_raw_shell {
             self.fail_job(
                 &operation,
@@ -4829,6 +4916,8 @@ impl JobManager {
             let _worker_guard = worker_guard;
             let timeout_secs = timeout_secs.min(policy.max_timeout_secs).max(1);
             let mut step_index = 0;
+            let mut test_count_accumulator = capture_cargo_test_count
+                .then(webcodex_core::cargo_test_count::CargoTestRunMetadataAccumulator::default);
             let (final_status, out, err, final_progress) = loop {
                 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
                 let (tx, rx) = mpsc::sync_channel::<OutputChunk>(OUTPUT_CHANNEL_CAPACITY);
@@ -4860,6 +4949,7 @@ impl JobManager {
                         }
                     }
                     if !out.is_empty() || !err.is_empty() {
+                        observe_cargo_test_count_chunks(&mut test_count_accumulator, &out, &err);
                         let activity = validation
                             .then(|| cargo_activity_from_stderr(&steps[step_index], &err))
                             .flatten();
@@ -4955,6 +5045,7 @@ impl JobManager {
                         OutputChunk::Stderr(text) => err.push_str(&text),
                     }
                 }
+                observe_cargo_test_count_chunks(&mut test_count_accumulator, &out, &err);
                 if step_status.0 == "completed" && step_index + 1 < step_count {
                     step_index += 1;
                     if stop_requested.load(Ordering::SeqCst) {
@@ -5091,6 +5182,7 @@ impl JobManager {
             };
             let command_execution_state = (!validation)
                 .then(|| raw_shell_job_terminal_lifecycle(&final_status.0, final_status.1));
+            let test_count_evidence = finish_cargo_test_count_evidence(test_count_accumulator);
             manager.update_and_send(
                 &job_id,
                 RunnerJobDelta {
@@ -5103,6 +5195,7 @@ impl JobManager {
                     command_execution_state,
                     stream_limit_bytes: None,
                     validation_progress: final_progress,
+                    test_count_evidence,
                     activity: None,
                     finished: true,
                 },
@@ -5616,6 +5709,9 @@ fn handle_one_poll(
         tool_providers: provider_update
             .as_ref()
             .map(|(status, _, _)| status.clone()),
+        mcp_gateway_providers: provider_update
+            .as_ref()
+            .map(|_| runtime.mcp_gateway().provider_inventory()),
         project_inventory_page,
     };
     let response: RunnerPollResponse = match post_json(client, cfg, RUNNER_POLL_PATH, &poll) {

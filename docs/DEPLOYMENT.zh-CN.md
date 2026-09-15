@@ -316,6 +316,7 @@ package 时默认将其设为 private；维护者
 | `transport` | 配置 `[quic]` 时优先用 `auto`。 |
 | `project_registry_dir` | 项目注册文件目录。 |
 | `[policy]` | 本地执行边界（`allowed_roots` 等）。 |
+| `[skills].roots` | 可选的 Runner 本机绝对只读 Skill roots；直接 live discovery，不复制进 managed Skill Store。 |
 | `[shell]` | 可选 shell profile 定义与有界 persistent-shell 限制。 |
 | `[ssh.resources.<name>]` | 可选命名 SSH 目标，用于 Session 绑定的 `run_shell` / `run_job`。 |
 
@@ -399,16 +400,24 @@ refresh-token scope，不授予额外 WebCodex 权限。
 
 ## GPT Actions 与 MCP
 
-- **MCP：** 用 user API token（`wc_pat_*`）把客户端连接到
-  `https://your-domain.example/mcp`；启用 OAuth 时用 OAuth 流程。
+- **MCP：** 用 user API token（`wc_pat_*`）连接
+  `https://your-domain.example/mcp`；启用 OAuth 时使用 OAuth 流程。MCP 仍是
+  ChatGPT 的主要接入方式。
 - **GPT Actions：** 把 `https://your-domain.example/openapi.json` 以 HTTP Bearer
-  认证导入 Custom GPT。
+  认证导入 Custom GPT。普通 runtime Server 会投影同一个 canonical Adaptive
+  Runtime model surface：当前 Adaptive Direct 工具直接成为 snake_case Action
+  operation，受支持的 long-tail 工具统一通过 `call_runtime_tool`；MCP-only 协议
+  presentation 不会伪装成 Action 能力。
 
-两者使用同一个 user API token 与同一个 ToolRuntime。OpenAPI schema 有意排除
-users、token、pairing/enrollment、setup、doctor、npm、server 管理与 audit
-endpoint。这些请用 `webcodex` 完成。
+如果是从旧 generic Action facade 升级，请重新导入 `/openapi.json` 获取新的
+canonical operation names。旧 REST route 可以为了兼容继续存在，但不会进入新的
+model-facing schema。
 
-MCP 与 GPT Actions 见 [MCP.md](MCP.zh-CN.md) 与客户端特定设置
+MCP 与 GPT Actions 最终进入同一个 ToolRuntime authority path；GPT Actions 不会建立
+第二套 scope、Project authority、permission、Runner capability 或 retry policy。
+Project-bound Connector 部署继续保持独立的 canonical 十四 capability MCP/OpenAPI surface。
+
+详见 [GPT Actions](GPT_ACTIONS.zh-CN.md)、[MCP](MCP.zh-CN.md) 与
 [AI 接入指南](AI_ONBOARDING.zh-CN.md)。
 
 ## 运维
@@ -462,7 +471,7 @@ Reject；这些动作与 CLI 使用相同的权限边界，在线模型仍然不
 
 ### Runtime job API 信任模型
 
-`job_status`、`job_log`、`list_jobs` 与 `job_tail` 面向受信的单运维者部署。它们
+`observe_jobs`、`list_jobs` 与 `job_tail` 面向受信的单运维者部署。它们
 不是互不信任用户之间的租户边界。不要把单个 runtime 暴露给多个不受信用户，除非
 为无项目 job API 增加 job-owner 隔离；否则请使用独立的 server/runtime 实例。
 

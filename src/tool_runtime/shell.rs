@@ -27,6 +27,8 @@ pub(crate) struct ProjectCommandOutput {
     pub(crate) exit_code: Option<i32>,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
     pub(crate) duration_ms: u64,
     pub(crate) error: Option<String>,
     pub(crate) execution_state: ShellCommandExecutionState,
@@ -279,6 +281,8 @@ impl ToolRuntime {
                     exit_code,
                     stdout: response.stdout.unwrap_or_default(),
                     stderr,
+                    stdout_truncated: response.stdout_truncated,
+                    stderr_truncated: response.stderr_truncated,
                     duration_ms: response.duration_ms.unwrap_or_default(),
                     execution_state,
                     error: response.error,
@@ -294,6 +298,8 @@ impl ToolRuntime {
                     exit_code: None,
                     stdout: String::new(),
                     stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                     duration_ms: 0,
                     error: Some(
                         if execution_state == ShellCommandExecutionState::NotStarted {
@@ -317,6 +323,8 @@ impl ToolRuntime {
                     exit_code: None,
                     stdout: String::new(),
                     stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                     duration_ms: wait_timeout.saturating_mul(1_000),
                     error: Some(format!(
                         "timed out waiting {wait_timeout} seconds for agent shell result"
@@ -656,6 +664,10 @@ impl ToolRuntime {
                             &observation.stderr_tail,
                             observation.job.activity.as_ref(),
                         );
+                        let continuation = crate::tool_runtime::jobs::observe_job_continuation(
+                            &observation.job.job_id,
+                            observation.job.observation_token.as_deref(),
+                        );
                         ToolResult::ok(json!({
                         "execution_state": execution_state,
                         "command_started": command_started,
@@ -669,6 +681,7 @@ impl ToolRuntime {
                         "job_id": observation.job.job_id,
                         "job_status": observation.job.status,
                         "observation_token": observation.job.observation_token,
+                        "continuation_semantics": crate::tool_runtime::jobs::job_observation_continuation_semantics(),
                         "activity": observation.job.activity,
                         "effective_timeout_secs": timeout,
                         "sync_wait_secs": STRUCTURED_EXECUTION_SYNC_WAIT_SECS,
@@ -680,6 +693,7 @@ impl ToolRuntime {
                         "stdout_truncated": observation.stdout_truncated,
                         "stderr_truncated": observation.stderr_truncated,
                         "detected_summary": detected_summary,
+                        "continuation": continuation,
                     }))
                     },
                     Err(error) => Self::run_shell_outcome_unknown_result(format!(
@@ -732,7 +746,7 @@ impl ToolRuntime {
                 return Self::run_shell_tool_failure_result(
                         command_rejected_message(
                             e,
-                            "confirm the agent is connected and the command request is allowed, then retry or use run_job for long-running work.",
+                            "confirm the agent is connected and the command request is allowed, then retry with the same shell path. Use run_job only when immediate asynchronous shell start is intentional; if a native child must survive Runner restart/replacement, use run_detached_process from the start.",
                         ),
                         failure_kind,
                         ShellCommandExecutionState::NotStarted,
@@ -819,7 +833,7 @@ impl ToolRuntime {
                     Self::run_shell_tool_failure_result(
                             command_rejected_message(
                                 "shell request waiter was dropped before the queued request was dispatched",
-                                "check Runner connectivity, then retry or use run_job for recoverable long-running work.",
+                                "check Runner connectivity, then retry with the same shell path. Use run_job only for intentional asynchronous shell start; use run_detached_process only when a native child must survive Runner restart/replacement.",
                             ),
                             "runtime_error",
                             ShellCommandExecutionState::NotStarted,
@@ -841,7 +855,7 @@ impl ToolRuntime {
                                 format!(
                                     "timed out waiting {wait_timeout} seconds before the queued Runner request was dispatched"
                                 ),
-                                "check Runner connectivity and availability, then retry or use run_job for long-running work.",
+                                "check Runner connectivity and availability, then retry with the same shell path. Use run_job only for intentional asynchronous shell start; use run_detached_process only when a native child must survive Runner restart/replacement.",
                             ),
                             "timeout",
                             ShellCommandExecutionState::NotStarted,
@@ -904,6 +918,8 @@ mod lifecycle_tests {
             exit_code: None,
             stdout: None,
             stderr: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: None,
             error: Some("Rejected before starting command".to_string()),
             request_dispatched: Some(true),

@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
-use webcodex_core::runtime_contract::{RECOVERY_KIND_VALUES, RECOVERY_TOOL_VALUES};
+use webcodex_core::runtime_contract::{
+    ContinuationCarrier, ContinuationKind, CONTINUATION_CARRIER_VALUES, CONTINUATION_KIND_VALUES,
+    RECOVERY_KIND_VALUES,
+};
 use webcodex_core::workflow_session_contract::{
     SESSION_INBOX_HIGH_GUIDANCE_ATTENTION_INSTRUCTION, SESSION_INBOX_HIGH_GUIDANCE_ATTENTION_REASON,
 };
@@ -21,6 +24,45 @@ pub fn nullable_schema(kind: &str, description: &str) -> Value {
             { "type": "null" }
         ],
         "description": description,
+    })
+}
+
+pub fn continuation_semantics_schema(
+    kind: ContinuationKind,
+    carrier: ContinuationCarrier,
+    description: &str,
+) -> Value {
+    debug_assert!(CONTINUATION_KIND_VALUES.contains(&kind.as_str()));
+    debug_assert!(CONTINUATION_CARRIER_VALUES.contains(&carrier.as_str()));
+    json!({
+        "type": "object",
+        "description": description,
+        "additionalProperties": false,
+        "properties": {
+            "kind": {"type": "string", "const": kind.as_str()},
+            "carrier": {"type": "string", "const": carrier.as_str()}
+        },
+        "required": ["kind", "carrier"]
+    })
+}
+
+/// Schema for an advisory parser-ready next tool call. The shape never grants
+/// authority or executes the tool; domain schemas remain responsible for the
+/// bounded argument contract.
+pub fn suggested_tool_call_schema(
+    tool: &'static str,
+    arguments: Value,
+    description: &str,
+) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "additionalProperties": false,
+        "properties": {
+            "tool": {"type": "string", "const": tool},
+            "arguments": arguments
+        },
+        "required": ["tool", "arguments"]
     })
 }
 
@@ -55,6 +97,45 @@ pub fn job_activity_schema() -> Value {
         ],
         "description": "Runner-owned bounded current activity for an active Job. Observation only: it never replaces canonical status, proves completion, or grants retry/continuation authority. null means unavailable, terminal, or temporarily untrusted during recovery."
     })
+}
+
+pub fn observe_job_continuation_schema() -> Value {
+    suggested_tool_call_schema(
+        "observe_jobs",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "job_id": {"type": "string", "minLength": 1},
+                            "after_observation_token": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": webcodex_core::job_observation::MAX_JOB_OBSERVATION_TOKEN_LEN
+                            }
+                        },
+                        "required": ["job_id"]
+                    }
+                },
+                "wait_secs": {
+                    "type": "integer",
+                    "const": webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS,
+                    "minimum": 1,
+                    "maximum": webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS
+                },
+                "wake_on": {"type": "string", "const": "terminal"}
+            },
+            "required": ["items", "wait_secs", "wake_on"]
+        }),
+        "Bounded next-call hint for observing the exact already-started Job. Advisory only: it grants no authority, is not a retry token, and never starts background polling.",
+    )
 }
 
 pub fn exploration_tool_name_schema() -> Value {
@@ -282,7 +363,7 @@ pub fn search_match_schema() -> Value {
             "limit": {
                 "type": "integer",
                 "const": 80,
-                "description": "Deterministic bounded line count for read_file/read_files expansion."
+                "description": "Deterministic bounded line count for read_files expansion."
             }
         },
         "required": ["start_line", "limit"],
@@ -378,14 +459,6 @@ pub fn recovery_kind_schema() -> Value {
     })
 }
 
-pub fn recovery_tool_schema() -> Value {
-    json!({
-        "type": "string",
-        "enum": RECOVERY_TOOL_VALUES,
-        "description": "Optional bounded public WebCodex tool to use for the declared reobserve or reconcile action. This field never grants authority or triggers execution."
-    })
-}
-
 pub fn wrapped_output_schema(output_properties: Vec<(&str, Value)>) -> Value {
     let mut output_properties = output_properties;
     output_properties.extend([
@@ -399,7 +472,6 @@ pub fn wrapped_output_schema(output_properties: Vec<(&str, Value)>) -> Value {
         ("session_hint", session_hint_schema()),
         ("permission", permission_decision_schema()),
         ("recovery_kind", recovery_kind_schema()),
-        ("recovery_tool", recovery_tool_schema()),
     ]);
     let properties = output_properties
         .into_iter()
@@ -436,29 +508,7 @@ pub fn wrapped_output_schema(output_properties: Vec<(&str, Value)>) -> Value {
                                 "recovery_kind": {
                                     "type": "null",
                                     "const": "__forbidden_on_success__"
-                                },
-                                "recovery_tool": {
-                                    "type": "null",
-                                    "const": "__forbidden_on_success__"
                                 }
-                            }
-                        }
-                    }
-                }
-            },
-            {
-                "if": {
-                    "properties": {
-                        "output": {"required": ["recovery_tool"]}
-                    },
-                    "required": ["output"]
-                },
-                "then": {
-                    "properties": {
-                        "output": {
-                            "required": ["recovery_kind"],
-                            "properties": {
-                                "recovery_kind": {"enum": ["reobserve", "reconcile"]}
                             }
                         }
                     }
@@ -500,7 +550,7 @@ pub fn cargo_test_count_assertion_schema() -> Value {
             },
             "evidence_reason_code": {
                 "type": "string",
-                "enum": ["complete_summary", "output_truncated", "partial_harness_summary", "no_complete_summary"],
+                "enum": ["complete_summary", "output_truncated", "partial_harness_summary", "no_complete_summary", "incomplete_stream"],
                 "description": "Why executed-test count evidence was proven or remained unavailable; this refines evidence diagnostics without changing the assertion verdict."
             }
         },
@@ -945,8 +995,8 @@ fn attempt_exploration_schema() -> Value {
             },
             "total_observed_paths": schema_type("integer", "Real unique path count before the 100-path projection cap."),
             "truncated": schema_type("boolean", "True when observed_paths was capped."),
-            "read_count": schema_type("integer", "Successful direct read_file calls in the attempt."),
-            "search_count": schema_type("integer", "Successful search_project_text/search_project_texts calls in the attempt."),
+            "read_count": schema_type("integer", "Successful read_files calls in the attempt."),
+            "search_count": schema_type("integer", "Successful search_project_texts calls in the attempt."),
             "navigation_count": schema_type("integer", "Successful LSP navigation calls in the attempt."),
             "latest_tool": exploration_tool_name_schema(),
             "complete": schema_type("boolean", "False when the attempt boundary was evicted and only a retained tail is available.")

@@ -1,20 +1,29 @@
 //! Durable WebCodex state persistence and SQLite storage semantics.
 
+use self::connection_observation::{
+    lock_connection as observed_lock_connection, StoreConnectionGuard, StoreConnectionObserver,
+    TracingStoreConnectionObserver,
+};
 use crate::models::PairingCodeRecord;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 mod accounts;
 mod activity;
 mod admin_project_lifecycle;
+mod agent_attention;
 mod agent_task;
+mod agent_wait;
 mod agent_wake;
 mod audit;
 mod communication;
+mod connection_observation;
 mod execution_model;
 mod executions;
+mod goal;
+mod job_receipts;
 mod memory;
 pub mod models;
 mod oauth;
@@ -30,9 +39,15 @@ pub use self::agent_task::{
     AgentTaskCodingRunBindingRecord, AgentTaskCodingRunDispatchClaim,
     AgentTaskCodingRunDispatchState, AgentTaskCodingRunObservation, AgentTaskCodingRunPrepared,
     AgentTaskCodingRunReconcileMutation, AgentTaskCodingRunStartContext, AgentTaskDetail,
-    AgentTaskExecutionRecoveryKind, AgentTaskExecutionStatus, AgentTaskMutation, AgentTaskPage,
-    AgentTaskState, AgentTaskSummary, NewAgentTask, MAX_AGENT_TASK_LIST_LIMIT,
-    MAX_AGENT_TASK_TERMINAL_TEXT_BYTES,
+    AgentTaskExecutionKind, AgentTaskExecutionRecoveryKind, AgentTaskExecutionStatus,
+    AgentTaskMutation, AgentTaskPage, AgentTaskState, AgentTaskSummary, NewAgentTask,
+    MAX_AGENT_TASK_LIST_LIMIT, MAX_AGENT_TASK_TERMINAL_TEXT_BYTES,
+};
+pub use self::agent_wait::{
+    AgentWaitDetail, AgentWaitEventSelector, AgentWaitMatchRecord, AgentWaitMutation,
+    AgentWaitSourceRecord, AgentWaitState, NewAgentWait, AGENT_WAIT_EVENT_KIND_AGENT_TASK_TERMINAL,
+    AGENT_WAIT_ID_PREFIX, MAX_ACTIVE_AGENT_WAITS_PER_AGENT, MAX_AGENT_WAITS_PER_SOURCE,
+    MAX_AGENT_WAIT_SOURCES,
 };
 #[allow(unused_imports)]
 pub use self::agent_wake::{
@@ -47,10 +62,12 @@ pub use self::communication::{
     CommunicationStoreError, ConversationAccess, ConversationDetailRecord, ConversationLifecycle,
     ConversationMessageMutation, ConversationMessageRecord, ConversationMutation, ConversationPage,
     ConversationParticipantRecord, ConversationSummaryRecord, DeliveryConsumeResult,
-    DurableAgentIdentity, MessageAuthorRecord, MessageDeliveryRecord, MessageDeliveryState,
-    NewAgentEndpoint, NewAgentIdentity, NewConversation, NewConversationMessage,
-    COMMUNICATION_PRINCIPAL_DIGEST_PREFIX, MAX_DURABLE_AGENTS,
+    DurableAgentIdentity, McpAppEndpointRecovery, MessageAuthorRecord, MessageDeliveryRecord,
+    MessageDeliveryState, NewAgentEndpoint, NewAgentIdentity, NewConversation,
+    NewConversationMessage, COMMUNICATION_PRINCIPAL_DIGEST_PREFIX, MAX_COMMUNICATION_LIST_LIMIT,
+    MAX_DURABLE_AGENTS,
 };
+pub(crate) use self::connection_observation::StoreDomain;
 pub use self::execution_model::{
     ConnectorExecution, ConnectorExecutionFailure, ConnectorExecutionKind,
     ConnectorExecutionObservation, ConnectorExecutionReservation, ConnectorExecutionState,
@@ -59,6 +76,12 @@ pub use self::execution_model::{
 #[cfg(any(test, feature = "root-test-support"))]
 pub use self::execution_model::{
     ConnectorExecutionContinuationIntent, ConnectorTerminalContinuationClaim,
+};
+pub use self::goal::{
+    GoalCorrelation, GoalCorrelationKind, GoalDetail, GoalLifecycle, GoalMutation, GoalPage,
+    GoalPatch, GoalStoreError, GoalSummary, NewGoal, GOAL_ID_PREFIX, MAX_GOAL_CORRELATIONS,
+    MAX_GOAL_LIST_LIMIT, MAX_GOAL_OBJECTIVE_BYTES, MAX_GOAL_TERMINAL_REASON_BYTES,
+    MAX_GOAL_TITLE_CHARS, WORKFLOW_SESSION_ID_PREFIX,
 };
 #[allow(unused_imports)]
 pub use self::memory::{
@@ -91,8 +114,10 @@ pub use self::task_kernel::{
     WindowProjectActivation,
 };
 pub use self::window_activity::{MAX_WINDOW_ACTIVITY_LIMIT, MAX_WINDOW_LINK_LIMIT};
+
 pub struct Database {
     conn: Mutex<Connection>,
+    connection_observer: Arc<dyn StoreConnectionObserver>,
     state_path: PathBuf,
     /// Ephemeral navigation only. Connector work stays in wc_tasks and
     /// wc_window_project_contexts; AgentTask owns separate durable tables, and
@@ -101,6 +126,19 @@ pub struct Database {
 }
 
 impl Database {
+    fn from_connection(conn: Connection, state_path: PathBuf) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+            connection_observer: Arc::new(TracingStoreConnectionObserver),
+            state_path,
+            window_projects: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn lock_connection(&self, domain: StoreDomain) -> StoreConnectionGuard<'_> {
+        observed_lock_connection(&self.conn, self.connection_observer.as_ref(), domain)
+    }
+
     pub(crate) fn state_path(&self) -> &Path {
         &self.state_path
     }
@@ -125,7 +163,11 @@ impl Database {
 }
 
 #[cfg(test)]
+mod agent_attention_tests;
+#[cfg(test)]
 mod agent_task_tests;
+#[cfg(test)]
+mod agent_wait_tests;
 #[cfg(test)]
 mod agent_wake_recovery_tests;
 #[cfg(test)]
@@ -139,4 +181,9 @@ mod db_tests;
 #[cfg(test)]
 mod execution_intent_tests;
 #[cfg(test)]
+mod goal_tests;
+#[cfg(test)]
 mod memory_tests;
+
+#[cfg(test)]
+mod job_receipts_tests;

@@ -298,6 +298,10 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 open_object_schema("Canonical ToolSpec annotations in exact lookup."),
             ),
             (
+                "execution",
+                execution_selection_schema(),
+            ),
+            (
                 "schema_version",
                 schema_type("integer", "Manifest schema version."),
             ),
@@ -334,7 +338,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                     "anyOf": [
                         {
                             "type": "object",
-                            "description": "Exact one-tool contract containing name, description, canonical effect/risk/approval/idempotency semantics, input_schema, annotations, and current MCP model-surface invocation routing. output_schema is intentionally omitted.",
+                            "description": "Exact one-tool contract containing name, description, canonical effect/risk/approval/idempotency semantics, optional execution selection semantics, input_schema, annotations, and current MCP model-surface invocation routing. output_schema is intentionally omitted.",
                             "additionalProperties": false,
                             "properties": {
                                 "name": {"type": "string"},
@@ -359,6 +363,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                                     "enum": ["pure_read", "desired_state", "keyed", "fenced_replay", "non_idempotent"],
                                     "description": "Canonical retry/idempotency contract."
                                 },
+                                "execution": execution_selection_schema(),
                                 "input_schema": {"type": "object", "additionalProperties": true},
                                 "annotations": {"type": "object", "additionalProperties": true},
                                 "availability": {
@@ -444,7 +449,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 "tools",
                 array_schema(
                     open_object_schema(
-                        "Default filtered model projection: name, bounded canonical-derived description, route, requires_project, effect, and risk only when non-observe. Compatibility/full canonical results may retain richer metadata."
+                        "Default filtered model projection: name, bounded canonical-derived description, route, requires_project, effect, optional execution selection metadata, and risk only when non-observe. Compatibility/full canonical results may retain richer metadata."
                     ),
                     "Filtered selection entries without input/output schemas; unfiltered sparse discovery uses the categories inventory instead of duplicating all tool names here.",
                 ),
@@ -458,13 +463,28 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             (
                 "recommended_flows",
                 array_schema(
-                    open_object_schema("Recommended tool flow with name, purpose, and tools."),
+                    open_object_schema("Recommended tool flow with name, purpose, and tools; filtered partial projections also identify partial=true and omitted_tools for canonical members not selected into that projection."),
                     "Short list of recommended tool flows for common tasks.",
                 ),
             ),
         ])),
         _ => None,
     }
+}
+
+fn execution_selection_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Optional canonical ordinary-execution selection semantics. This is model guidance only and does not grant authority or change runtime lifecycle behavior.",
+        "additionalProperties": false,
+        "properties": {
+            "form": {"type": "string", "enum": ["native_argv", "typed_script", "shell_command", "structured_validation", "persistent_shell_command"]},
+            "lifetime": {"type": "string", "enum": ["runner", "supervisor", "session_shell"]},
+            "start": {"type": "string", "enum": ["sync_first", "async_immediate", "existing_session"]},
+            "continuation": {"type": "string", "enum": ["observe_jobs", "session_shell", "none"]}
+        },
+        "required": ["form", "lifetime", "start", "continuation"]
+    })
 }
 
 fn nullable_string_array_schema(description: &str) -> Value {

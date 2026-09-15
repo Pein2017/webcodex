@@ -25,6 +25,9 @@ pub const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
 /// 30 seconds leaves one full interval of scheduling/network slack.
 pub const MAX_POLL_INTERVAL_MS: u64 = 30_000;
 pub const DEFAULT_MAX_TIMEOUT_SECS: u64 = 3600;
+/// Default Runner policy for captured/presented bytes in each stdout or stderr
+/// stream. It is a per-stream execution-retention policy, not a protocol
+/// request/body/frame ceiling and not the model-facing ToolResult ceiling.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 /// Config value selecting the polling transport (HTTP `/api/shell/agent/poll`).
 pub const TRANSPORT_POLLING: &str = "polling";
@@ -219,6 +222,9 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // Exact occurrence selectors are a running-binary capability; the
             // running Runner advertises the canonical registration baseline.
             apply_text_edit_occurrence: false,
+            // SHA-less local exact edit proof is implemented by the running
+            // binary and must never be inferred from generated static config.
+            apply_text_edit_local_guard_without_sha: false,
             // Scoped exact matching is likewise runtime-only and must not be
             // inferred from generated config or occurrence support.
             apply_text_edit_line_scope: false,
@@ -253,6 +259,9 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // rolling-upgrade capability and is never inferred from the older
             // count-assertion bit or protocol generation.
             structured_cargo_test_execution_policy: false,
+            // Cargo test --lib argv is accepted only by the running binary that
+            // advertises the additive structured Cargo selector capability.
+            structured_cargo_test_lib: false,
             // The running binary advertises this process-lifetime protocol
             // capability after installing its exact Go argv boundary.
             structured_go_test_json: false,
@@ -264,6 +273,13 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             structured_go_test_packages: false,
             structured_process_argv: true,
             structured_script_payload: true,
+            // JavaScript is an additive typed-script semantic implemented by
+            // the running binary. Static config must not make an older binary
+            // appear to understand the newer language variant.
+            structured_script_javascript: false,
+            // TypeScript is another additive running-binary semantic. Generated
+            // static config must not claim that older Runners understand it.
+            structured_script_typescript: false,
             // Internal generated-program execution is a running-binary
             // capability and must fail closed across mixed-version rollout.
             internal_posix_script: false,
@@ -276,10 +292,10 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             project_lifecycle: false,
             project_path_registration: false,
             managed_worktree: false,
-            // Runner-global Skill store support is runtime-only and never
-            // inferred from project/file capabilities in generated config.
-            skill_store_read: false,
-            skill_store_manage: false,
+            // Runner-local Skill runtime and management are implemented by the
+            // running binary and are never inferred from project/file capabilities.
+            skill_runtime: false,
+            skill_management: false,
             // Desktop observation is a runtime/platform capability and is never
             // claimed by generated static config.
             computer_observe: false,

@@ -376,6 +376,7 @@ mod tests {
                         structured_file_delete: true,
                         apply_text_edit_occurrence: false,
                         apply_text_edit_line_scope: false,
+                        apply_text_edit_local_guard_without_sha: false,
                         apply_patch: false,
                         apply_patch_match_metadata: false,
                         apply_patch_matching_mode: false,
@@ -390,11 +391,14 @@ mod tests {
                         structured_validation_argv: true,
                         structured_cargo_test_count_assertion: true,
                         structured_cargo_test_execution_policy: true,
+                        structured_cargo_test_lib: true,
                         structured_go_test_json: true,
                         structured_go_test_tool: true,
                         structured_go_test_packages: true,
                         structured_process_argv: true,
                         structured_script_payload: false,
+                        structured_script_javascript: false,
+                        structured_script_typescript: false,
                         internal_posix_script: false,
                         structured_execution_jobs: false,
                         detached_process_jobs: false,
@@ -403,8 +407,8 @@ mod tests {
                         project_lifecycle: false,
                         project_path_registration: false,
                         managed_worktree: false,
-                        skill_store_read: false,
-                        skill_store_manage: false,
+                        skill_runtime: false,
+                        skill_management: false,
                         computer_observe: false,
                         computer_application_discovery: false,
                         computer_application_launch: false,
@@ -658,6 +662,8 @@ mod tests {
                     exit_code: Some(0),
                     stdout: Some("spoofed".to_string()),
                     stderr: None,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                     duration_ms: Some(1),
                     error: None,
                 }
@@ -685,6 +691,8 @@ mod tests {
                     exit_code: Some(0),
                     stdout: Some("authentic".to_string()),
                     stderr: None,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                     duration_ms: Some(1),
                     error: None,
                 }
@@ -825,6 +833,8 @@ mod tests {
                 exit_code: Some(0),
                 stdout: Some("hi".to_string()),
                 stderr: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
                 duration_ms: Some(1),
                 error: None,
             }
@@ -848,6 +858,11 @@ mod tests {
         ws.send(TungsteniteMessage::Text(
             RunnerEnvelope::RuntimeMetadata {
                 tool_providers: provider_status(),
+                mcp_gateway_providers: Some(vec![crate::mcp_gateway::McpGatewayProvider {
+                    provider_id: "blender".to_string(),
+                    provider_instance_id: "blender-instance".to_string(),
+                    name: "Blender".to_string(),
+                }]),
             }
             .to_json()
             .unwrap()
@@ -884,6 +899,11 @@ mod tests {
             .unwrap();
         assert_eq!(call.selected_provider, "claude_code");
         assert_eq!(call.write_state.as_deref(), Some("confirmed"));
+        let view = registry.get_runner_view("ws-roundtrip").await.unwrap();
+        assert_eq!(
+            view.policy.unwrap().mcp_gateway_providers.unwrap()[0].provider_instance_id,
+            "blender-instance"
+        );
     }
 
     #[tokio::test]
@@ -1179,6 +1199,8 @@ mod tests {
                     exit_code: Some(0),
                     stdout: Some("hi".to_string()),
                     stderr: None,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                     duration_ms: Some(1),
                     error: None,
                 }

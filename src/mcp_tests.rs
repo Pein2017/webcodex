@@ -41,6 +41,21 @@ fn test_runtime_with_surface(model_surface: ModelSurface) -> ToolRuntime {
     test_runtime_with_exposure(RuntimeExposure::Runtime(model_surface))
 }
 
+fn test_runtime_with_surface_and_public_url(
+    model_surface: ModelSurface,
+    public_url: &str,
+) -> ToolRuntime {
+    let runtime_info = crate::tool_runtime::RuntimeInfo {
+        configured_public_url: Some(public_url.to_string()),
+        ..Default::default()
+    };
+    ToolRuntime::new(
+        std::sync::Arc::new(crate::runner_http::RunnerRegistry::default()),
+        std::sync::Arc::new(runtime_info),
+    )
+    .with_runtime_exposure(RuntimeExposure::Runtime(model_surface))
+}
+
 fn start_authorized_test_session(
     runtime: &ToolRuntime,
     auth: &crate::auth::AuthContext,
@@ -193,12 +208,16 @@ fn mcp_export_api_auth(api_key_id: &str, username: &str) -> crate::auth::AuthCon
     auth
 }
 
+#[path = "mcp_tests/agent_continuation_app.rs"]
+mod agent_continuation_app;
 #[path = "mcp_tests/artifact_export.rs"]
 mod artifact_export;
 #[path = "mcp_tests/computer_app.rs"]
 mod computer_app;
 #[path = "mcp_tests/file_import.rs"]
 mod file_import;
+#[path = "mcp_tests/goal_plan_app.rs"]
+mod goal_plan_app;
 #[path = "mcp_tests/http_transport.rs"]
 mod http_transport;
 #[path = "mcp_tests/model_ergonomics.rs"]
@@ -215,12 +234,16 @@ mod plugin_tools;
 mod project_connector;
 #[path = "mcp_tests/protocol.rs"]
 mod protocol;
+#[path = "mcp_tests/result_app.rs"]
+mod result_app;
 #[path = "mcp_tests/runtime_tools.rs"]
 mod runtime_tools;
 #[path = "mcp_tests/ssh_resource.rs"]
 mod ssh_resource;
 #[path = "mcp_tests/tools.rs"]
 mod tools;
+#[path = "mcp_tests/work_result_app.rs"]
+mod work_result_app;
 
 // =========================================================================
 // HTTP integration tests — exercise the real Salvo router + AuthMiddleware.

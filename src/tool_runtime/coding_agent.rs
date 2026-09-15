@@ -1,5 +1,6 @@
 use super::{RecoveryKind, ToolResult, ToolRuntime};
 use crate::auth::{AuthContext, AuthKind};
+use crate::json_digest::update_sha256_with_json;
 use crate::runner_http::RunnerFeature;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
@@ -639,16 +640,9 @@ impl ToolRuntime {
         wait_secs: Option<u64>,
         auth: Option<&AuthContext>,
     ) -> ToolResult {
-        let wait_secs = wait_secs.unwrap_or(0);
-        if wait_secs > CODING_AGENT_OBSERVE_WAIT_MAX_SECS {
-            return coding_agent_error(
-                "invalid_wait_secs",
-                "wait_secs exceeds CodingAgentRun bounded wait",
-                "not_started",
-                RecoveryKind::FixInput,
-                Some(&run_id),
-            );
-        }
+        let wait_secs = wait_secs
+            .unwrap_or(0)
+            .min(CODING_AGENT_OBSERVE_WAIT_MAX_SECS);
         let authority = match stable_principal(auth) {
             Ok(principal) => authority_fingerprint(&principal),
             Err(error) => {
@@ -1331,17 +1325,22 @@ fn intent_fingerprint(
     config: &BTreeMap<String, CodingAgentConfigValue>,
     timeout_secs: u64,
 ) -> String {
-    let canonical = serde_json::to_vec(&json!({
+    const DOMAIN: &[u8] = b"webcodex-coding-agent-intent-v1\0";
+    let canonical = json!({
         "project": project,
         "provider": provider,
         "instruction": instruction,
         "config": config,
         "timeout_secs": timeout_secs,
-    }))
-    .unwrap_or_default();
+    });
     let mut hasher = Sha256::new();
-    hasher.update(b"webcodex-coding-agent-intent-v1\0");
-    hasher.update(&canonical);
+    hasher.update(DOMAIN);
+    if update_sha256_with_json(&mut hasher, &canonical).is_err() {
+        // Match the historical `to_vec(...).unwrap_or_default()` fallback:
+        // keep the domain prefix and hash no JSON bytes.
+        hasher = Sha256::new();
+        hasher.update(DOMAIN);
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -1566,6 +1565,10 @@ fn start_projection(run: &CodingAgentRunSnapshot, token: String) -> Value {
         "state": state_name(&run.state),
         "execution_state": execution_name(run.execution_state),
         "observation_token": token,
+        "continuation_semantics": super::ContinuationSemantics::new(
+            super::ContinuationKind::Observe,
+            super::ContinuationCarrier::ObservationToken,
+        ).to_value(),
         "terminal": terminal_projection(run),
     })
 }
@@ -1602,6 +1605,10 @@ fn observe_projection(
         "execution_state": execution_name(run.execution_state),
         "events": events,
         "observation_token": token,
+        "continuation_semantics": super::ContinuationSemantics::new(
+            super::ContinuationKind::Observe,
+            super::ContinuationCarrier::ObservationToken,
+        ).to_value(),
         "has_more": observation.has_more,
         "history_lost": observation.history_lost || reset,
         "first_retained_sequence": observation.first_retained_sequence,
@@ -1678,7 +1685,7 @@ fn coding_agent_project_not_writable_result(run_id: &str) -> ToolResult {
             "execution_state": "not_started",
         }),
     )
-    .with_recovery(RecoveryKind::UserAction, None)
+    .with_recovery(RecoveryKind::UserAction)
 }
 
 fn coding_agent_error(
@@ -1696,7 +1703,7 @@ fn coding_agent_error(
             "execution_state": execution_state,
         }),
     )
-    .with_recovery(recovery, None)
+    .with_recovery(recovery)
 }
 
 fn coding_agent_start_failure_from_response(
@@ -2161,5 +2168,17 @@ mod tests {
         let c = intent_fingerprint("agent:x:p", "codex", "different", &config, 30);
         assert_eq!(a, b);
         assert_ne!(a, c);
+
+        let canonical = json!({
+            "project": "agent:x:p",
+            "provider": "codex",
+            "instruction": "inspect",
+            "config": &config,
+            "timeout_secs": 30,
+        });
+        let mut buffered = Sha256::new();
+        buffered.update(b"webcodex-coding-agent-intent-v1\0");
+        buffered.update(serde_json::to_vec(&canonical).unwrap());
+        assert_eq!(a, format!("{:x}", buffered.finalize()));
     }
 }

@@ -160,6 +160,7 @@ async fn trusted_agent_smoke_full_chain_has_zero_approval_interruptions() {
             session_id: None,
             include_project_instructions: true,
             include_workflow_guidance: true,
+            include_extension_catalog: false,
         },
         &poll_calls,
     )
@@ -182,7 +183,7 @@ async fn trusted_agent_smoke_full_chain_has_zero_approval_interruptions() {
             content: "#!/bin/sh\ntest -f marker.txt\n".to_string(),
             session_id: Some(session_id.clone()),
             overwrite: None,
-            expected_sha256: None,
+            expected_read_revision: None,
         },
         &poll_calls,
     )
@@ -223,7 +224,7 @@ async fn trusted_agent_smoke_full_chain_has_zero_approval_interruptions() {
             content: "present\n".to_string(),
             session_id: Some(session_id.clone()),
             overwrite: None,
-            expected_sha256: None,
+            expected_read_revision: None,
         },
         &poll_calls,
     )

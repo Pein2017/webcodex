@@ -2,6 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import {
+  formatWorkspaceBreadcrumb,
+  formatSelectedProjectIdentity,
+  formatSessionWorkspaceIdentity,
+  formatDeviceStatusText,
+  formatProjectStatusText,
+  formatRunnerCountText,
+  formatRecentSessionStatusText,
+  renderProjectSelectorTree,
+} from "../dist/runtime_navigation.js";
 
 test("operation navigation shows one destination and moves focus without replacing its form", async () => {
   const source = await readFile(new URL("../dist/runtime.js", import.meta.url), "utf8");
@@ -166,40 +176,6 @@ test("mobile project search only receives focus while navigation remains open", 
   assert.deepEqual(focused, ["runtime-project-search"]);
 });
 
-test("retained message search matches body and resolution without mutating messages", async () => {
-  const source = await readFile(new URL("../dist/runtime.js", import.meta.url), "utf8");
-  const start = source.indexOf("function runtimeSearchMatches(");
-  const end = source.indexOf("function renderCollaboration(", start);
-  const messages = [
-    { message_id: "a", message: "Build failed", resolution: "Fixed Unicode 路径" },
-    { message_id: "b", message: "Pending", author_session_id: "worker-2" },
-  ];
-  const original = JSON.stringify(messages);
-  const cards = messages.map((message) => ({ dataset: { messageId: message.message_id }, hidden: false }));
-  const separator = { hidden: false };
-  const input = { value: "FIXED 路径" };
-  let status;
-  const context = vm.createContext({
-    state: { collaboration: { messages } },
-    el: () => input,
-    setText: (_id, text) => { status = text; },
-    document: { querySelectorAll: (selector) => selector.includes(".message-card") ? cards : [separator] },
-  });
-  vm.runInContext(source.slice(start, end), context);
-  context.filterCollaborationMessages();
-  assert.deepEqual(cards.map((card) => card.hidden), [false, true]);
-  assert.equal(status, "1 / 2");
-  assert.equal(separator.hidden, true);
-  input.value = "missing";
-  context.filterCollaborationMessages();
-  assert.equal(status, "0 / 2");
-  input.value = "";
-  context.filterCollaborationMessages();
-  assert.deepEqual(cards.map((card) => card.hidden), [false, false]);
-  assert.equal(separator.hidden, false);
-  assert.equal(JSON.stringify(messages), original);
-});
-
 test("workspace disclosure survives rerender and ignores detached toggle events", async () => {
   const source = await readFile(new URL("../dist/runtime.js", import.meta.url), "utf8");
   const start = source.indexOf('const workspace = document.createElement("details")');
@@ -208,6 +184,7 @@ test("workspace disclosure survives rerender and ignores detached toggle events"
   let disclosure;
   const context = vm.createContext({
     clientId: "runner-a", project: { id: "project-a" }, state: { selectedProject: "project-a" },
+    options: { selectedProject: "project-a" },
     window: { localStorage: { getItem: (key) => stored.get(key), setItem: (key, value) => stored.set(key, value) } },
     document: { createElement: () => (disclosure = {
       isConnected: true,
@@ -231,3 +208,292 @@ test("workspace disclosure survives rerender and ignores detached toggle events"
   render();
   assert.equal(disclosure.open, true);
 });
+
+test("formatWorkspaceBreadcrumb formats runner and project breadcrumb labels", () => {
+  assert.deepEqual(formatWorkspaceBreadcrumb(null, "en"), {
+    runnerText: "Fleet",
+    projectText: "Projects",
+  });
+  assert.deepEqual(formatWorkspaceBreadcrumb(null, "zh-CN"), {
+    runnerText: "设备群",
+    projectText: "项目",
+  });
+  assert.deepEqual(
+    formatWorkspaceBreadcrumb({ client_id: "macbook", name: "engine", id: "p1" }, "en"),
+    { runnerText: "macbook", projectText: "engine" },
+  );
+  assert.deepEqual(
+    formatWorkspaceBreadcrumb({ client_id: "macbook", id: "p1" }, "en"),
+    { runnerText: "macbook", projectText: "p1" },
+  );
+});
+
+test("formatSelectedProjectIdentity and formatSessionWorkspaceIdentity produce correct labels", () => {
+  const project = { id: "p1", name: "Engine", path: "/opt/repo", client_id: "macbook" };
+  assert.equal(
+    formatSelectedProjectIdentity(project, "en"),
+    "Runner: macbook · Project: p1 · Workspace: /opt/repo",
+  );
+  assert.equal(
+    formatSelectedProjectIdentity(project, "zh-CN"),
+    "运行器：macbook · 项目：p1 · 工作空间：/opt/repo",
+  );
+  assert.equal(
+    formatSessionWorkspaceIdentity(project, "en"),
+    "Runner: macbook · Project: p1 · Workspace: /opt/repo",
+  );
+  assert.equal(
+    formatSessionWorkspaceIdentity(project, "zh-CN"),
+    "运行器：macbook · 项目：p1 · 工作空间：/opt/repo",
+  );
+});
+
+test("formatDeviceStatusText and formatRunnerCountText format runner counts", () => {
+  assert.equal(formatDeviceStatusText(0, "", "en"), "No authorized Runners");
+  assert.equal(formatDeviceStatusText(0, "", "zh-CN"), "没有已授权运行器");
+  assert.equal(formatDeviceStatusText(2, "", "en"), "2 authorized Runners · All Runners");
+  assert.equal(formatDeviceStatusText(2, "node-1", "en"), "2 authorized Runners · filtered");
+  assert.equal(formatDeviceStatusText(2, "node-1", "zh-CN"), "2 台已授权运行器 · 已筛选");
+
+  assert.equal(formatRunnerCountText(1, "en"), "1 Runner");
+  assert.equal(formatRunnerCountText(3, "en"), "3 Runners");
+  assert.equal(formatRunnerCountText(3, "zh-CN"), "3 台运行器");
+});
+
+test("formatProjectStatusText formats matching, visible, bounded, and scoped project facts", () => {
+  assert.equal(
+    formatProjectStatusText(5, 5, false, "", "", "en"),
+    "5 visible Projects across fleet",
+  );
+  assert.equal(
+    formatProjectStatusText(3, 3, false, "runner-1", "", "en"),
+    "3 visible Projects on runner-1",
+  );
+  assert.equal(
+    formatProjectStatusText(2, 5, true, "runner-1", "test", "en"),
+    "2 of 5 matching Projects shown on runner-1 · bounded",
+  );
+  assert.equal(
+    formatProjectStatusText(2, 5, true, "", "test", "zh-CN"),
+    "已显示 2 / 5 个匹配项目 · 跨全部设备 · 有界",
+  );
+});
+
+test("formatRecentSessionStatusText formats session count with optional truncation markers", () => {
+  assert.equal(formatRecentSessionStatusText(null, "en"), "");
+  assert.equal(
+    formatRecentSessionStatusText({ returned: 4, truncated: false, scan_truncated: false }, "en"),
+    "4 Sessions",
+  );
+  assert.equal(
+    formatRecentSessionStatusText({ returned: 4, truncated: true, scan_truncated: true }, "en"),
+    "4 Sessions · top 4 · partial scan",
+  );
+  assert.equal(
+    formatRecentSessionStatusText({ returned: 4, truncated: true, scan_truncated: true }, "zh-CN"),
+    "4 个会话 · 前 4 · 扫描不完整",
+  );
+});
+
+function createMockElement(tag = "div") {
+  const listeners = new Map();
+  let directText = "";
+  let classNameStr = "";
+  const classList = {
+    classes: new Set(),
+    add(cls) {
+      cls.split(/\s+/).filter(Boolean).forEach((c) => this.classes.add(c));
+    },
+    remove(cls) {
+      cls.split(/\s+/).filter(Boolean).forEach((c) => this.classes.delete(c));
+    },
+    contains(cls) {
+      return this.classes.has(cls);
+    },
+  };
+  const el = {
+    tagName: tag.toUpperCase(),
+    get className() {
+      return classNameStr;
+    },
+    set className(val) {
+      classNameStr = String(val);
+      classList.classes.clear();
+      classNameStr.split(/\s+/).filter(Boolean).forEach((c) => classList.classes.add(c));
+    },
+    title: "",
+    hidden: false,
+    value: "",
+    dataset: {},
+    children: [],
+    childNodes: [],
+    attributes: {},
+    get textContent() {
+      if (this.childNodes.length === 0) return directText;
+      return this.childNodes.map((c) => (typeof c === "string" ? c : c.textContent || "")).join("");
+    },
+    set textContent(val) {
+      directText = String(val);
+      this.childNodes = [];
+      this.children = [];
+    },
+    classList,
+    appendChild(child) {
+      if (child && child.className) {
+        child.classList.add(child.className);
+      }
+      this.children.push(child);
+      this.childNodes.push(child);
+      return child;
+    },
+    removeChild(child) {
+      const idx = this.childNodes.indexOf(child);
+      if (idx >= 0) this.childNodes.splice(idx, 1);
+      const cidx = this.children.indexOf(child);
+      if (cidx >= 0) this.children.splice(cidx, 1);
+      return child;
+    },
+    setAttribute(key, value) {
+      this.attributes[key] = String(value);
+      if (key === "class") this.classList.add(String(value));
+    },
+    getAttribute(key) {
+      return this.attributes[key] ?? null;
+    },
+    addEventListener(event, handler) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(handler);
+    },
+    querySelector(selector) {
+      const results = this.querySelectorAll(selector);
+      return results[0] || null;
+    },
+    querySelectorAll(selector) {
+      const found = [];
+      const match = (elem) => {
+        if (!elem) return;
+        if (selector.startsWith(".")) {
+          const classes = selector.split(".").filter(Boolean);
+          if (classes.every((cls) => elem.classList?.contains(cls) || (elem.className && elem.className.includes(cls)))) {
+            found.push(elem);
+          }
+        } else if (selector.toLowerCase() === elem.tagName?.toLowerCase()) {
+          found.push(elem);
+        }
+        if (elem.children) {
+          for (const c of elem.children) match(c);
+        }
+      };
+      for (const child of this.children) match(child);
+      return found;
+    },
+  };
+  return el;
+}
+
+function withMockDom(fn) {
+  const originalDoc = globalThis.document;
+  const originalWin = globalThis.window;
+  globalThis.document = {
+    createElement(tag) { return createMockElement(tag); },
+    createElementNS(_ns, tag) { return createMockElement(tag); },
+  };
+  globalThis.window = {
+    localStorage: { getItem: () => null, setItem: () => {} },
+  };
+  try {
+    return fn();
+  } finally {
+    globalThis.document = originalDoc;
+    globalThis.window = originalWin;
+  }
+}
+
+test("renderProjectSelectorTree mounts sessionsPanel before windowPanel and adds WINDOW ACTIVE signal", () => {
+  withMockDom(() => {
+    const deviceSelect = createMockElement("select");
+    const projectList = createMockElement("div");
+    const sessionsPanel = createMockElement("section");
+    sessionsPanel.setAttribute("id", "runtime-workflow-sessions-panel");
+    const windowPanel = createMockElement("section");
+    windowPanel.setAttribute("id", "runtime-project-window-activity-panel");
+
+    const effectiveProjects = [
+      {
+        id: "proj-active",
+        name: "Active Project",
+        client_id: "node-1",
+        connected: true,
+        sessions: { running_sessions: 0, retained_sessions: 0 },
+      },
+      {
+        id: "proj-idle",
+        name: "Idle Project",
+        client_id: "node-1",
+        connected: true,
+        sessions: { running_sessions: 0, retained_sessions: 0 },
+      },
+    ];
+
+    // 1. With active window requests > 0
+    renderProjectSelectorTree(deviceSelect, projectList, sessionsPanel, {
+      effectiveProjects,
+      devices: ["node-1"],
+      runnerRows: [{ client_id: "node-1", status: "online" }],
+      selectedDevice: "node-1",
+      selectedProject: "proj-active",
+      projectDeviceFilter: "",
+      language: "en",
+      storedDeviceDisclosure: () => true,
+      onPersistDeviceDisclosure: () => {},
+      onSelectProject: () => {},
+      windowPanel,
+      selectedProjectWindowActiveCount: 2,
+    });
+
+    const activeRow = projectList.querySelector(".project-row.selected");
+    assert.ok(activeRow, "active project row must be selected");
+    const signals = activeRow.querySelectorAll(".project-row-state");
+    const signalTexts = signals.map((s) => s.textContent);
+    assert.ok(signalTexts.includes("WINDOW ACTIVE"), "must include WINDOW ACTIVE signal when active count > 0");
+
+    // Check DOM hierarchy inside the workspace details element
+    const workspace = projectList.querySelector(".workspace-group");
+    assert.ok(workspace, "workspace element must exist");
+    const windowIdx = workspace.children.indexOf(windowPanel);
+    const sessionsIdx = workspace.children.indexOf(sessionsPanel);
+    assert.ok(windowIdx >= 0, "windowPanel must be attached inside workspace");
+    assert.ok(sessionsIdx >= 0, "sessionsPanel must be attached inside workspace");
+    assert.ok(sessionsIdx < windowIdx, "sessionsPanel must precede windowPanel in workspace DOM");
+    assert.equal(windowPanel.hidden, false);
+    assert.equal(sessionsPanel.hidden, false);
+
+    // 2. With active window requests === 0
+    const deviceSelect2 = createMockElement("select");
+    const projectList2 = createMockElement("div");
+    const sessionsPanel2 = createMockElement("section");
+    const windowPanel2 = createMockElement("section");
+
+    renderProjectSelectorTree(deviceSelect2, projectList2, sessionsPanel2, {
+      effectiveProjects,
+      devices: ["node-1"],
+      runnerRows: [{ client_id: "node-1", status: "online" }],
+      selectedDevice: "node-1",
+      selectedProject: "proj-idle",
+      projectDeviceFilter: "",
+      language: "en",
+      storedDeviceDisclosure: () => true,
+      onPersistDeviceDisclosure: () => {},
+      onSelectProject: () => {},
+      windowPanel: windowPanel2,
+      selectedProjectWindowActiveCount: 0,
+    });
+
+    const idleRow = projectList2.querySelector(".project-row.selected");
+    assert.ok(idleRow, "idle project row must be selected");
+    const idleSignals = idleRow.querySelectorAll(".project-row-state");
+    const idleSignalTexts = idleSignals.map((s) => s.textContent);
+    assert.equal(idleSignalTexts.includes("WINDOW ACTIVE"), false, "must NOT include WINDOW ACTIVE when count is 0");
+  });
+});
+

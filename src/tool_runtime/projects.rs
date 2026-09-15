@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use super::tool_result::{RecoveryKind, ToolResult};
 use super::{runner_project_runtime_id, ToolRuntime};
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, SCOPE_PROJECT_READ};
 use crate::runner_http::{RunnerFeature, RunnerSemanticView};
 use crate::runner_protocol::{RunnerProjectSummary, RUNNER_CAPABILITY_PROJECT_PATH_REGISTRATION};
 
@@ -162,6 +162,41 @@ impl ToolRuntime {
             .await
     }
 
+    /// Reuse the canonical Runner/project visibility projection for an exact
+    /// Project id without dispatching a model-visible tool. This is an
+    /// observability fence only: it grants no Project authority and callers
+    /// must still hold `project:read` explicitly.
+    pub(crate) async fn exact_project_visible_to_auth(
+        &self,
+        auth: &AuthContext,
+        project: &str,
+    ) -> bool {
+        if !auth.has_scope(SCOPE_PROJECT_READ) {
+            return false;
+        }
+        let result = self
+            .list_projects_with_options(
+                Some(auth),
+                ListProjectsOptions {
+                    project: Some(project.to_string()),
+                    limit: Some(1),
+                    summary_only: true,
+                    ..ListProjectsOptions::default()
+                },
+            )
+            .await;
+        result.success
+            && result
+                .output
+                .get("projects")
+                .and_then(Value::as_array)
+                .is_some_and(|projects| {
+                    projects
+                        .iter()
+                        .any(|value| value.get("id").and_then(Value::as_str) == Some(project))
+                })
+    }
+
     #[cfg(test)]
     pub(crate) async fn list_projects_with_visible_clients_for_test(
         &self,
@@ -203,6 +238,14 @@ impl ToolRuntime {
             candidates.truncate(limit);
         }
         let truncated = candidates.len() < matched_count;
+        let project_ids: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.runtime_id.as_str())
+            .collect();
+        let active_jobs_by_project = self
+            .runner_registry
+            .count_active_jobs_for_projects(access.as_ref(), &project_ids)
+            .await;
 
         let mut list = Vec::with_capacity(candidates.len());
         for ProjectCandidate {
@@ -211,10 +254,9 @@ impl ToolRuntime {
             project_index,
         } in candidates
         {
-            // Extract only one selected Project and the small Runner fields used by
-            // its projection before awaiting Job state. Candidate staging above
-            // never owns or clones a RunnerView (and therefore never clones
-            // the Runner's complete projects Vec per match).
+            // Extract only one selected Project and its small Runner projection.
+            // Candidate staging never clones a Runner's complete project inventory;
+            // Job counts above share one authorized registry snapshot.
             let (
                 client_id,
                 runner_status,
@@ -245,10 +287,10 @@ impl ToolRuntime {
                     smoke_project_capabilities(client, project),
                 )
             };
-            let active_jobs = self
-                .runner_registry
-                .count_active_jobs_for_project(access.as_ref(), &runtime_id)
-                .await;
+            let active_jobs = active_jobs_by_project
+                .get(&runtime_id)
+                .copied()
+                .unwrap_or(0);
             let value = if options.summary_only {
                 json!({
                     "id": runtime_id,
@@ -462,7 +504,7 @@ impl ToolRuntime {
                         "state_changed": false,
                     }),
                 )
-                .with_recovery(RecoveryKind::NoAction, None);
+                .with_recovery(RecoveryKind::NoAction);
             }
         }
         self.submit_project_op(
@@ -520,7 +562,7 @@ impl ToolRuntime {
                         "state_changed": false,
                     }),
                 )
-                .with_recovery(RecoveryKind::NoAction, None);
+                .with_recovery(RecoveryKind::NoAction);
             }
         }
         let fresh_managed_bootstrap = resume_project_id.is_none();
@@ -988,6 +1030,10 @@ fn parse_project_summary_from_result(
         .get("allow_patch")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let lineage = match result.get("lineage") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
+    };
     Some(RunnerProjectSummary {
         id: agent_project_id.to_string(),
         name: name.or_else(|| Some(agent_project_id.to_string())),
@@ -1014,6 +1060,11 @@ fn parse_project_summary_from_result(
             .get("revision")
             .and_then(Value::as_str)
             .map(str::to_string),
+        root_fingerprint: result
+            .get("root_fingerprint")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        lineage,
         git_branch: None,
         git_head: None,
         git_dirty: None,
@@ -1039,6 +1090,8 @@ mod tests {
             hooks: Vec::new(),
             disabled: false,
             revision: None,
+            root_fingerprint: None,
+            lineage: None,
             git_branch: None,
             git_head: None,
             git_dirty: None,
@@ -1061,6 +1114,8 @@ mod tests {
             hooks: Vec::new(),
             disabled: false,
             revision: None,
+            root_fingerprint: None,
+            lineage: None,
             git_branch: None,
             git_head: None,
             git_dirty: None,

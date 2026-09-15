@@ -3,12 +3,13 @@
 use super::files::{SearchOptions, SearchRequest};
 use super::project_resolution::ResolvedProject;
 use super::{SearchProjectTextsQuery, ToolResult, ToolRuntime};
+use crate::json_measurement::serialized_json_len;
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time::Instant;
+use webcodex_core::runtime_contract::MODEL_INSPECTION_MAX_RESULT_BYTES as MAX_SERIALIZED_OUTPUT_BYTES;
 use webcodex_workspace::file_read_normalize::MODEL_RESULT_ENVELOPE_RESERVE_BYTES;
-use webcodex_workspace::file_read_range::MAX_SERIALIZED_OUTPUT_BYTES;
 
 pub(crate) const MAX_SEARCH_PROJECT_TEXTS_QUERIES: usize = 8;
 // Keep search fanout below the query cap: each rg process can independently
@@ -98,17 +99,13 @@ fn serialized_batch_len(output: &Value) -> usize {
 }
 
 fn serialized_value_len(value: &Value) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
+    serialized_json_len(value).unwrap_or(usize::MAX)
 }
 
 fn projected_batch_serialized_len(output: &Value, default_timeouts: &[bool]) -> usize {
     let mut projected = ToolResult::ok(output.clone());
     super::dispatch::sparsify_search_batch_success_for_model(default_timeouts, &mut projected);
-    serde_json::to_vec(&projected)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
+    serialized_json_len(&projected).unwrap_or(usize::MAX)
 }
 
 fn projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
@@ -239,6 +236,7 @@ fn failure_reason_code(result: &ToolResult) -> &'static str {
         }
         Some("search_timeout") => "timeout",
         Some("search_backend_feature_unavailable") => "search_backend_feature_unavailable",
+        Some("search_path_not_found") => "not_found",
         Some("search_execution_failed") => "search_execution_failed",
         Some("search_request_dropped") => "search_request_dropped",
         _ if result.output.get("format").and_then(Value::as_str)
@@ -255,6 +253,7 @@ fn batch_failure_stage(result: &ToolResult, broad_reason: &str) -> &'static str 
         Some("request_validation") => "request_validation",
         Some("backend_selection") => "backend_selection",
         Some("backend_protocol") => "backend_protocol",
+        Some("path_resolution") => "path_resolution",
         Some("backend_execution") => "backend_execution",
         Some("agent_request") => "agent_request",
         Some("agent_execution") => "agent_execution",
@@ -266,6 +265,7 @@ fn batch_failure_stage(result: &ToolResult, broad_reason: &str) -> &'static str 
             "invalid_pattern" | "invalid_path" | "invalid_glob" | "invalid_search_request" => {
                 "request_validation"
             }
+            "not_found" => "path_resolution",
             "search_backend_feature_unavailable" => "backend_selection",
             "search_request_dropped" => "agent_transport",
             "external_provider_error" => "provider",
@@ -282,6 +282,7 @@ fn batch_failure_detail_code(result: &ToolResult, broad_reason: &'static str) ->
         Some("invalid_path") => "invalid_path",
         Some("invalid_glob") => "invalid_glob",
         Some("invalid_search_request") => "invalid_search_request",
+        Some("not_found") => "not_found",
         Some("backend_feature_unavailable") => "backend_feature_unavailable",
         Some("backend_identity_missing") => "backend_identity_missing",
         Some("backend_identity_invalid") => "backend_identity_invalid",
@@ -444,9 +445,7 @@ pub(crate) fn apply_model_facing_output_budget(
 fn final_model_result_len(output: &Value, default_timeouts: &[bool]) -> usize {
     let mut projected = ToolResult::ok(output.clone());
     super::dispatch::sparsify_search_batch_success_for_model(default_timeouts, &mut projected);
-    serde_json::to_vec(&projected)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
+    serialized_json_len(&projected).unwrap_or(usize::MAX)
 }
 
 fn mark_final_hard_cap_truncation(output: &mut Value, next_index: usize) {
@@ -477,7 +476,7 @@ fn mark_final_hard_cap_truncation(output: &mut Value, next_index: usize) {
     root.insert("truncation_reason".to_string(), json!("hard_result_cap"));
 }
 
-/// Enforce the repository-wide 256 KiB ceiling against the actual final
+/// Enforce the explicit 512 KiB model-inspection ceiling against the actual final
 /// serialized ToolResult, including Session/continuity overlays. Search
 /// continuation remains query-granular: whole query items are removed from the
 /// end until the fully decorated result fits, and next_index points at the first
@@ -649,6 +648,50 @@ mod tests {
     }
 
     #[test]
+    fn batch_projection_preserves_incomplete_count_truth_after_path_filtering() {
+        let options = SearchOptions::normalize(SearchRequest {
+            pattern: "needle".to_string(),
+            path: None,
+            limit: Some(10),
+            context_before: None,
+            context_after: None,
+            include_globs: None,
+            exclude_globs: None,
+            result_mode: Some(crate::tool_runtime::SearchResultMode::Count),
+            timeout_secs: None,
+        })
+        .unwrap();
+        let marker = "{\"webcodex_search\":{\"backend\":\"rg\",\"feature_unavailable\":false}}\n";
+        let stdout = format!("{marker}/private/absolute/secret.rs\u{0}2\n");
+        let single = crate::tool_runtime::files::search_project_text_output(
+            "agent:special:demo",
+            &options,
+            &stdout,
+            Some(0),
+            "",
+        );
+        assert!(single.success, "{:?}", single.error);
+
+        let item = batch_item(0, single);
+        let mut batch = ToolResult::ok(batch_output(
+            "agent:special:demo",
+            1,
+            vec![item],
+            false,
+            None,
+            None,
+        ));
+        super::super::dispatch::sparsify_search_batch_success_for_model(&[true], &mut batch);
+        let output = &batch.output["items"][0]["output"];
+        assert_eq!(output["count_complete"], false);
+        assert_eq!(output["total_matches"], Value::Null);
+        assert_eq!(output["files"], json!([]));
+        assert!(!serde_json::to_string(&batch)
+            .unwrap()
+            .contains("/private/absolute/secret.rs"));
+    }
+
+    #[test]
     fn complete_default_sparse_fit_is_not_preemptively_budget_truncated() {
         let payload_budget =
             DEFAULT_SEARCH_PROJECT_TEXTS_RESULT_BYTES - MODEL_RESULT_ENVELOPE_RESERVE_BYTES;
@@ -725,16 +768,17 @@ mod tests {
                 "error": null
             })
         };
+        let completed = vec![
+            item(0, "x".repeat(120 * 1024)),
+            item(1, "y".repeat(120 * 1024)),
+            item(2, "z".repeat(120 * 1024)),
+        ];
         let output = apply_output_budget(
             "agent:oe:demo",
             3,
-            vec![
-                item(0, "x".repeat(120 * 1024)),
-                item(1, "y".repeat(120 * 1024)),
-                item(2, "z".repeat(120 * 1024)),
-            ],
+            completed.clone(),
             &[false, false, false],
-            Some(MAX_SERIALIZED_OUTPUT_BYTES),
+            Some(256 * 1024),
         );
         assert_eq!(output["returned_count"], 2);
         assert_eq!(output["next_index"], 2);
@@ -753,6 +797,16 @@ mod tests {
             "suggested_next_tool": "session_discussion_summary"
         });
         assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_SERIALIZED_OUTPUT_BYTES);
+
+        let expanded = apply_output_budget(
+            "agent:oe:demo",
+            3,
+            completed,
+            &[false, false, false],
+            Some(MAX_SERIALIZED_OUTPUT_BYTES),
+        );
+        assert_eq!(expanded["returned_count"], 3);
+        assert_eq!(expanded["output_truncated"], false);
     }
 
     #[test]
@@ -836,7 +890,7 @@ mod tests {
         let output = apply_output_budget(
             "agent:oe:demo",
             1,
-            vec![matches_item(0, 199, 2_000)],
+            vec![matches_item(0, 199, 3_000)],
             &[false],
             Some(MAX_SERIALIZED_OUTPUT_BYTES),
         );
@@ -848,7 +902,47 @@ mod tests {
     }
 
     #[test]
-    fn search_result_budget_clamps_to_existing_hard_cap() {
+    fn final_hard_cap_accounts_for_outer_session_overlay_bytes() {
+        let completed = (0..3)
+            .map(|index| default_matches_item(index, 1, 120 * 1024))
+            .collect::<Vec<_>>();
+        let mut result = ToolResult::ok(batch_output(
+            "agent:oe:demo",
+            3,
+            completed,
+            false,
+            None,
+            None,
+        ));
+        result.output["session_recovery"] = json!({
+            "model_facing_events": ["o".repeat(220 * 1024)]
+        });
+        assert!(final_model_result_len(&result.output, &[false; 3]) > MAX_SERIALIZED_OUTPUT_BYTES);
+
+        enforce_final_model_facing_hard_cap(&mut result, &[false; 3]);
+
+        assert_eq!(result.output["output_truncated"], true);
+        assert_eq!(result.output["truncation_reason"], "hard_result_cap");
+        let returned_count = result.output["returned_count"].as_u64().unwrap();
+        let next_index = result.output["next_index"].as_u64().unwrap();
+        assert!(returned_count < 3);
+        assert_eq!(next_index, returned_count);
+        assert_eq!(
+            result.output["session_recovery"]["model_facing_events"][0]
+                .as_str()
+                .unwrap()
+                .len(),
+            220 * 1024
+        );
+        assert!(final_model_result_len(&result.output, &[false; 3]) <= MAX_SERIALIZED_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn search_result_budget_clamps_to_existing_hard_bounds() {
+        assert_eq!(
+            normalized_result_budget(Some(MIN_SEARCH_PROJECT_TEXTS_RESULT_BYTES / 2)),
+            MIN_SEARCH_PROJECT_TEXTS_RESULT_BYTES
+        );
         assert_eq!(
             normalized_result_budget(Some(MAX_SERIALIZED_OUTPUT_BYTES * 2)),
             MAX_SERIALIZED_OUTPUT_BYTES

@@ -828,6 +828,36 @@ struct SearchFileCount {
     match_count: u64,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct CountParseEvidence {
+    data_record_seen: bool,
+    parsed_record_count: usize,
+    safe_record_seen: bool,
+    filtered_record_seen: bool,
+    malformed_record_seen: bool,
+}
+
+impl CountParseEvidence {
+    fn parsed_record_seen(self) -> bool {
+        self.parsed_record_count > 0
+    }
+
+    fn projection_complete(self) -> bool {
+        !self.filtered_record_seen
+            && !self.malformed_record_seen
+            && (!self.parsed_record_seen() || self.safe_record_seen)
+    }
+}
+
+#[derive(Debug)]
+struct ParsedFileCounts {
+    files: Vec<SearchFileCount>,
+    returned_match_count: u64,
+    limit_truncated: bool,
+    bytes_truncated: bool,
+    evidence: CountParseEvidence,
+}
+
 #[derive(Debug)]
 enum SearchResultData {
     Matches(Vec<SearchMatch>),
@@ -836,6 +866,7 @@ enum SearchResultData {
         files: Vec<SearchFileCount>,
         returned_match_count: u64,
         count_complete: bool,
+        evidence: CountParseEvidence,
     },
 }
 
@@ -849,10 +880,11 @@ enum SearchTruncation {
     /// The `head -c` byte budget cut the stream, possibly mid-record; the
     /// parser drops the partial tail so only complete records are returned.
     OutputBytes,
-    /// stdout was transport-truncated (the Runner keeps a tail of the output).
-    /// Public identity validation rejects prefix loss before retained records
-    /// can be promoted; this remains parser-level truncation metadata only.
-    Transport,
+    /// stdout lost its prefix to Runner/Server result retention. Public
+    /// identity validation rejects that loss before retained records can be
+    /// promoted. The public reason string remains the legacy `transport`
+    /// spelling for compatibility; this is not a wire/body/frame ceiling.
+    ResultRetention,
     /// The search did not finish within the effective timeout; records
     /// collected before the timeout are still complete and trusted.
     Timeout,
@@ -863,7 +895,7 @@ impl SearchTruncation {
         match self {
             SearchTruncation::Limit => "limit",
             SearchTruncation::OutputBytes => "output_bytes",
-            SearchTruncation::Transport => "transport",
+            SearchTruncation::ResultRetention => "transport",
             SearchTruncation::Timeout => "timeout",
         }
     }
@@ -889,6 +921,7 @@ fn search_result_has_records(result: &SearchResult) -> bool {
 struct SearchBackendStatus {
     backend: String,
     feature_unavailable: bool,
+    path_not_found: bool,
     marker_present: bool,
     marker_invalid: bool,
     payload_start: usize,
@@ -898,6 +931,7 @@ fn missing_search_backend_status(marker_invalid: bool) -> SearchBackendStatus {
     SearchBackendStatus {
         backend: "grep".to_string(),
         feature_unavailable: false,
+        path_not_found: false,
         marker_present: false,
         marker_invalid,
         payload_start: 0,
@@ -944,12 +978,18 @@ fn parse_search_backend_status(stdout: &str) -> SearchBackendStatus {
     {
         return missing_search_backend_status(true);
     }
+    let path_not_found = match marker.get("path_status") {
+        None => false,
+        Some(value) if value.as_str() == Some("not_found") => true,
+        Some(_) => return missing_search_backend_status(true),
+    };
     SearchBackendStatus {
         backend: backend.to_string(),
         feature_unavailable: marker
             .get("feature_unavailable")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        path_not_found,
         marker_present: true,
         marker_invalid: false,
         payload_start,
@@ -1127,7 +1167,7 @@ fn parse_search_line_records(stdout: &str) -> (Vec<SearchLineRecord>, bool) {
     (records, bytes_truncated)
 }
 
-fn strip_leading_transport_truncation_marker(stdout: &str) -> (&str, bool) {
+fn strip_leading_result_retention_truncation_marker(stdout: &str) -> (&str, bool) {
     for marker in ["[output truncated]\n", "[...]\n"] {
         if let Some(rest) = stdout.strip_prefix(marker) {
             return (rest, true);
@@ -1230,13 +1270,15 @@ fn parse_file_paths(stdout: &str, limit: usize) -> (Vec<SearchFile>, bool, bool)
     )
 }
 
-fn parse_file_counts(stdout: &str, limit: usize) -> (Vec<SearchFileCount>, u64, bool, bool) {
+fn parse_file_counts(stdout: &str, limit: usize) -> ParsedFileCounts {
     let (lines, bytes_truncated) = split_complete_search_lines(stdout);
     let mut counts = Vec::<(String, u64)>::new();
+    let mut evidence = CountParseEvidence::default();
     for line in lines {
         if serde_json::from_str::<Value>(line).is_ok() {
             continue;
         }
+        evidence.data_record_seen = true;
         let parsed = line
             .split_once('\0')
             .or_else(|| line.rsplit_once(':'))
@@ -1244,33 +1286,43 @@ fn parse_file_counts(stdout: &str, limit: usize) -> (Vec<SearchFileCount>, u64, 
                 Some((path, count.trim_end_matches('\r').parse::<u64>().ok()?))
             });
         let Some((path, count)) = parsed else {
+            evidence.malformed_record_seen = true;
             continue;
         };
+        evidence.parsed_record_count = evidence.parsed_record_count.saturating_add(1);
+        if count == 0 {
+            evidence.malformed_record_seen = true;
+            continue;
+        }
         let Some(path) = normalize_search_record_path(path) else {
+            evidence.filtered_record_seen = true;
             continue;
         };
+        evidence.safe_record_seen = true;
         if let Some((_, existing)) = counts.iter_mut().find(|(existing, _)| existing == &path) {
             *existing = existing.saturating_add(count);
         } else {
             counts.push((path, count));
         }
     }
-    let limit_truncated = counts.len() > limit;
+    let limit_truncated = evidence.parsed_record_count > limit;
     counts.truncate(limit);
     let returned_match_count = counts.iter().map(|(_, count)| *count).sum();
-    (
-        counts
+    ParsedFileCounts {
+        files: counts
             .into_iter()
             .map(|(path, match_count)| SearchFileCount { path, match_count })
             .collect(),
         returned_match_count,
         limit_truncated,
         bytes_truncated,
-    )
+        evidence,
+    }
 }
 
 fn parse_search_result(stdout: &str, options: &SearchOptions, backend: String) -> SearchResult {
-    let (stdout, transport_truncated) = strip_leading_transport_truncation_marker(stdout);
+    let (stdout, result_retention_truncated) =
+        strip_leading_result_retention_truncation_marker(stdout);
     let (data, limit_truncated, bytes_truncated) = match options.result_mode {
         SearchResultMode::Matches => {
             let (records, bytes_truncated) = parse_search_line_records(stdout);
@@ -1290,21 +1342,25 @@ fn parse_search_result(stdout: &str, options: &SearchOptions, backend: String) -
             )
         }
         SearchResultMode::Count => {
-            let (files, returned_match_count, limit_truncated, bytes_truncated) =
-                parse_file_counts(stdout, options.limit);
+            let parsed = parse_file_counts(stdout, options.limit);
+            let count_complete = !parsed.limit_truncated
+                && !parsed.bytes_truncated
+                && !result_retention_truncated
+                && parsed.evidence.projection_complete();
             (
                 SearchResultData::Count {
-                    files,
-                    returned_match_count,
-                    count_complete: !limit_truncated && !bytes_truncated && !transport_truncated,
+                    files: parsed.files,
+                    returned_match_count: parsed.returned_match_count,
+                    count_complete,
+                    evidence: parsed.evidence,
                 },
-                limit_truncated,
-                bytes_truncated,
+                parsed.limit_truncated,
+                parsed.bytes_truncated,
             )
         }
     };
-    let truncation = if transport_truncated {
-        Some(SearchTruncation::Transport)
+    let truncation = if result_retention_truncated {
+        Some(SearchTruncation::ResultRetention)
     } else if limit_truncated {
         Some(SearchTruncation::Limit)
     } else if bytes_truncated {
@@ -1358,6 +1414,17 @@ pub(crate) fn search_project_text_output_with_agent_error(
             message,
             None,
             exit_code,
+        );
+    }
+    if backend_status.path_not_found {
+        return search_failure_tool_result(
+            options,
+            "search_path_not_found",
+            "path_resolution",
+            "not_found",
+            "search_project_text path was not found",
+            None,
+            None,
         );
     }
     if backend_status.feature_unavailable {
@@ -1417,16 +1484,20 @@ pub(crate) fn search_project_text_output_with_agent_error(
     }
 
     let result = parse_search_result(stdout, options, backend_status.backend.clone());
-    // Search status is part of the evidence contract: 0 means at least one
-    // match, 1 means a completed no-match scan, and 141 means bounded output
-    // stopped after at least one complete record. If parsed safe records
-    // disagree, output was malformed, transport-incomplete, or entirely
-    // rejected by the path/privacy filter. Returning an empty success in any
-    // of those cases would falsely claim proven absence.
+    // Search status is backend evidence, not a statement about the final safe
+    // projection. Count mode therefore distinguishes parseable backend count
+    // records from records later removed by path/privacy filtering. A malformed
+    // count stream still fails closed; a filtered-but-parseable stream remains
+    // an incomplete observation rather than a false no-match or protocol error.
     let has_records = search_result_has_records(&result);
-    let status_consistent = match exit_code {
-        Some(1) => !has_records,
-        Some(0 | 141) => has_records,
+    let status_consistent = match (&result.data, exit_code) {
+        (SearchResultData::Count { evidence, .. }, Some(1)) => !evidence.data_record_seen,
+        (SearchResultData::Count { evidence, .. }, Some(0 | 141)) => {
+            !evidence.malformed_record_seen
+                && (evidence.parsed_record_seen() || result.truncation_reason.is_some())
+        }
+        (_, Some(1)) => !has_records,
+        (_, Some(0 | 141)) => has_records,
         _ => true,
     };
     if !status_consistent {
@@ -1477,6 +1548,7 @@ fn search_result_json(
             files,
             returned_match_count,
             count_complete,
+            evidence: _,
         } => {
             output["returned_file_count"] = json!(files.len());
             output["returned_match_count"] = json!(returned_match_count);
@@ -1547,63 +1619,6 @@ fn empty_search_project_text_output(project: &str, options: &SearchOptions) -> T
 /// Maximum accepted size for `write_project_file` `content`.
 
 impl ToolRuntime {
-    /// `search_project_text`: bounded rg-first text search with grep fallback.
-    /// Excludes sensitive/build paths by default. Each match carries a
-    /// project-relative path, 1-based line number, preview line, and bounded
-    /// context arrays.
-    pub(crate) async fn search_project_text(
-        &self,
-        project: String,
-        pattern: String,
-        pattern_mode: Option<SearchPatternMode>,
-        path: Option<String>,
-        limit: Option<usize>,
-        context_before: Option<usize>,
-        context_after: Option<usize>,
-        include_globs: Option<Vec<String>>,
-        exclude_globs: Option<Vec<String>>,
-        result_mode: Option<SearchResultMode>,
-        timeout_secs: Option<i64>,
-    ) -> ToolResult {
-        let request = SearchRequest {
-            pattern,
-            path,
-            limit,
-            context_before,
-            context_after,
-            include_globs,
-            exclude_globs,
-            result_mode,
-            timeout_secs,
-        };
-        // Preserve the single-query validation-before-resolution ordering.
-        let options = match SearchOptions::normalize_with_pattern_mode(request, pattern_mode) {
-            Ok(options) => options,
-            Err(error) => return error.into_tool_result(),
-        };
-        let proj = match self.resolve_project(&project).await {
-            Ok(p) => p,
-            Err(e) => return ToolResult::err(e),
-        };
-        self.search_one_resolved_project_text(&proj, &project, options, None)
-            .await
-    }
-
-    pub(crate) async fn search_project_text_resolved(
-        &self,
-        resolved: &ResolvedProject,
-        output_project: &str,
-        request: SearchRequest,
-        pattern_mode: Option<SearchPatternMode>,
-    ) -> ToolResult {
-        let options = match SearchOptions::normalize_with_pattern_mode(request, pattern_mode) {
-            Ok(options) => options,
-            Err(error) => return error.into_tool_result(),
-        };
-        self.search_one_resolved_project_text(&resolved.config, output_project, options, None)
-            .await
-    }
-
     pub(crate) async fn search_one_resolved_project_text(
         &self,
         proj: &ProjectConfig,
@@ -2244,7 +2259,7 @@ mod tests {
         assert_eq!(matches[0]["path"], "src/a.rs");
     }
 
-    fn transport_truncation_markers() -> [&'static str; 3] {
+    fn result_retention_truncation_markers() -> [&'static str; 3] {
         [
             "[output truncated to last 12000 bytes]\n",
             "[output truncated]\n",
@@ -2290,7 +2305,7 @@ mod tests {
     }
 
     #[test]
-    fn search_transport_truncated_stdout_cannot_recover_backend_identity() {
+    fn search_result_retention_truncated_stdout_cannot_recover_backend_identity() {
         let options = SearchOptions::normalize(SearchRequest {
             pattern: "needle".to_string(),
             path: None,
@@ -2317,7 +2332,7 @@ mod tests {
     }
 
     #[test]
-    fn search_transport_marker_forms_cannot_recover_match_identity() {
+    fn search_result_retention_marker_forms_cannot_recover_match_identity() {
         let options = SearchOptions::normalize(SearchRequest {
             pattern: "needle".to_string(),
             path: None,
@@ -2331,7 +2346,7 @@ mod tests {
         })
         .unwrap();
 
-        for marker in transport_truncation_markers() {
+        for marker in result_retention_truncation_markers() {
             let stdout = format!(
                 "{marker}{{\"webcodex_search\":{{\"backend\":\"rg\"}}}}\nsrc/a.rs:1:needle one\nsrc/b.rs:2:needle two\n"
             );
@@ -2350,7 +2365,7 @@ mod tests {
     }
 
     #[test]
-    fn search_transport_marker_forms_cannot_recover_file_identity() {
+    fn search_result_retention_marker_forms_cannot_recover_file_identity() {
         let options = SearchOptions::normalize(SearchRequest {
             pattern: "needle".to_string(),
             path: None,
@@ -2364,7 +2379,7 @@ mod tests {
         })
         .unwrap();
 
-        for marker in transport_truncation_markers() {
+        for marker in result_retention_truncation_markers() {
             let stdout = format!(
                 "{marker}{{\"webcodex_search\":{{\"backend\":\"rg\"}}}}\nsrc/a.rs\nsrc/b.rs\n"
             );
@@ -2383,7 +2398,7 @@ mod tests {
     }
 
     #[test]
-    fn search_transport_marker_forms_cannot_recover_count_identity() {
+    fn search_result_retention_marker_forms_cannot_recover_count_identity() {
         let options = SearchOptions::normalize(SearchRequest {
             pattern: "needle".to_string(),
             path: None,
@@ -2397,7 +2412,7 @@ mod tests {
         })
         .unwrap();
 
-        for marker in transport_truncation_markers() {
+        for marker in result_retention_truncation_markers() {
             let stdout = format!(
                 "{marker}{{\"webcodex_search\":{{\"backend\":\"rg\"}}}}\nsrc/a.rs:2\nsrc/b.rs:3\n"
             );
@@ -2416,7 +2431,7 @@ mod tests {
     }
 
     #[test]
-    fn search_transport_marker_text_in_middle_is_not_transport_truncation() {
+    fn search_result_retention_marker_text_in_middle_is_not_prefix_loss() {
         let options = SearchOptions::normalize(SearchRequest {
             pattern: "needle".to_string(),
             path: None,

@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 
 use super::common::{
-    cargo_test_count_assertion_schema, job_activity_schema, nullable_schema, open_object_schema,
-    permission_decision_schema, schema_type, session_hint_schema,
+    cargo_test_count_assertion_schema, job_activity_schema, nullable_schema,
+    observe_job_continuation_schema, open_object_schema, permission_decision_schema, schema_type,
+    session_hint_schema,
 };
 
 pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
@@ -16,12 +17,6 @@ fn cargo_output_schema(tool_name: &str) -> Value {
     let mut fields = vec![
             ("project", schema_type("string", "Runtime project id.")),
             ("command_summary", schema_type("string", "Bounded structured validation command summary.")),
-            ("shell", schema_type("string", "Executor command mode.")),
-            ("executor", json!({
-                "type": "string",
-                "const": "agent",
-                "description": "Runner-backed structured validation executor."
-            })),
             (
                 "cwd",
                 schema_type("string", "Project-relative working directory."),
@@ -82,14 +77,6 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                 nullable_schema("integer", "Parsed failed test count for structured test validation."),
             ),
             (
-                "execution_source",
-                schema_type("string", "Structured validation tool that owns this execution."),
-            ),
-            (
-                "purpose",
-                schema_type("string", "Declared execution purpose (test, format, or validation)."),
-            ),
-            (
                 "execution_state",
                 schema_type("string", "not_started, outcome_unknown, completed, timed_out, queued, or running. not_started proves pre-execution rejection; outcome_unknown means side effects may have occurred and blind retry is unsafe; queued/running indicate promotion to a Job."),
             ),
@@ -100,14 +87,6 @@ fn cargo_output_schema(tool_name: &str) -> Value {
             (
                 "job_status",
                 nullable_schema("string", "Job status when the validation continues as a Job."),
-            ),
-            (
-                "observation_token",
-                json!({
-                    "type": "string",
-                    "maxLength": webcodex_core::job_observation::MAX_JOB_OBSERVATION_TOKEN_LEN,
-                    "description": "Current opaque observation token for the exact public Job snapshot returned by a promoted validation handoff."
-                }),
             ),
             ("activity", job_activity_schema()),
             (
@@ -130,9 +109,28 @@ fn cargo_output_schema(tool_name: &str) -> Value {
             ("tool_failure", schema_type("boolean", "Whether rejection happened before execution.")),
             ("async_handoff_available", schema_type("boolean", "Whether this Runner supports validation Job handoff.")),
             ("detected_summary", open_object_schema("Current bounded validation/progress summary at the initial durable Job handoff; advisory only and never retry authority.")),
+            ("continuation", observe_job_continuation_schema()),
             ("session_hint", session_hint_schema()),
             ("permission", permission_decision_schema()),
     ];
+    if tool_name == "cargo_fmt" {
+        fields.extend([
+            (
+                "changed",
+                nullable_schema(
+                    "boolean",
+                    "For check=false ensure-format: true when precheck proved formatting was needed and the mutating cargo fmt completed successfully, false when no mutation was needed or mutation definitely did not start, null when mutation may have changed source but the final effect is uncertain. Absent for check=true validation.",
+                ),
+            ),
+            (
+                "state_changed",
+                nullable_schema(
+                    "boolean",
+                    "Effect-state projection for check=false ensure-format. Mirrors changed on known outcomes and is null when post-dispatch mutation state is uncertain. Absent for check=true validation.",
+                ),
+            ),
+        ]);
+    }
     if matches!(tool_name, "cargo_check" | "cargo_test" | "go_test") {
         fields.push((
             "diagnostics",
@@ -189,14 +187,29 @@ fn cargo_output_schema(tool_name: &str) -> Value {
         .into_iter()
         .map(|(name, schema)| (name.to_string(), schema))
         .collect::<serde_json::Map<_, _>>();
-    let mut terminal_required = vec![
+    let mut terminal_success_required = Vec::new();
+    match tool_name {
+        "cargo_check" => {
+            terminal_success_required.extend(["warnings_count", "errors_count", "diagnostics"])
+        }
+        "cargo_test" | "go_test" => terminal_success_required.extend([
+            "tests_detected",
+            "tests_run_count",
+            "tests_passed",
+            "tests_failed",
+            "zero_tests_run",
+            "diagnostics",
+        ]),
+        _ => {}
+    }
+    let terminal_success_required = terminal_success_required
+        .into_iter()
+        .map(Value::from)
+        .collect::<Vec<_>>();
+    let mut terminal_failure_required = vec![
         "project",
         "command_summary",
         "cwd",
-        "shell",
-        "executor",
-        "execution_source",
-        "purpose",
         "execution_state",
         "exit_code",
         "duration_ms",
@@ -216,9 +229,9 @@ fn cargo_output_schema(tool_name: &str) -> Value {
     ];
     match tool_name {
         "cargo_check" => {
-            terminal_required.extend(["warnings_count", "errors_count", "diagnostics"])
+            terminal_failure_required.extend(["warnings_count", "errors_count", "diagnostics"])
         }
-        "cargo_test" | "go_test" => terminal_required.extend([
+        "cargo_test" | "go_test" => terminal_failure_required.extend([
             "tests_detected",
             "tests_run_count",
             "tests_passed",
@@ -228,12 +241,11 @@ fn cargo_output_schema(tool_name: &str) -> Value {
         ]),
         _ => {}
     }
-    let terminal_required = terminal_required
+    terminal_failure_required.push("failure_kind");
+    let terminal_failure_required = terminal_failure_required
         .into_iter()
         .map(Value::from)
         .collect::<Vec<_>>();
-    let mut terminal_failure_required = terminal_required.clone();
-    terminal_failure_required.push(Value::from("failure_kind"));
     let output = json!({
         "type": "object",
         "properties": properties,
@@ -266,21 +278,23 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                     "error": {"type": "null"},
                     "output": {
                         "required": [
-                            "project", "command_summary", "cwd", "shell", "executor",
-                            "execution_source", "purpose", "promoted_to_job", "terminal",
-                            "command_started", "command_completed", "execution_state", "job_id",
-                            "job_status", "observation_token", "activity", "effective_timeout_secs", "sync_wait_secs",
-                            "stdout_tail", "stderr_tail", "stdout_lines", "stderr_lines",
-                            "stdout_truncated", "stderr_truncated"
+                            "command_summary", "execution_state", "job_id", "job_status",
+                            "activity", "continuation", "effective_timeout_secs"
                         ],
                         "properties": {
-                            "promoted_to_job": {"const": true},
-                            "terminal": {"const": false},
-                            "command_completed": {"const": false},
+                            "promoted_to_job": {"enum": []},
+                            "terminal": {"enum": []},
+                            "command_started": {"enum": []},
+                            "command_completed": {"enum": []},
+                            "sync_wait_secs": {"enum": []},
+                            "async_handoff_available": {"enum": []},
+                            "command_ok": {"enum": []},
+                            "tool_failure": {"enum": []},
+                            "project": {"enum": []},
+                            "cwd": {"enum": []},
                             "execution_state": {"enum": ["queued", "running"]},
                             "job_id": {"type": "string", "minLength": 1},
                             "job_status": {"type": "string", "minLength": 1},
-                            "observation_token": {"type": "string", "minLength": 1, "maxLength": webcodex_core::job_observation::MAX_JOB_OBSERVATION_TOKEN_LEN},
                             "passed": {"enum": []},
                             "failure_kind": {"enum": []},
                             "warnings_count": {"enum": []},
@@ -300,18 +314,28 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                     "success": {"const": true},
                     "error": {"type": "null"},
                     "output": {
-                        "required": terminal_required.clone(),
+                        "required": terminal_success_required.clone(),
                         "properties": {
-                            "promoted_to_job": {"const": false},
-                            "terminal": {"const": true},
-                            "command_started": {"const": true},
-                            "command_completed": {"const": true},
-                            "execution_state": {"const": "completed"},
-                            "passed": {"const": true},
+                            "project": {"enum": []},
+                            "command_summary": {"enum": []},
+                            "cwd": {"enum": []},
+                            "execution_state": {"enum": []},
+                            "exit_code": {"enum": []},
+                            "duration_ms": {"enum": []},
+                            "promoted_to_job": {"enum": []},
+                            "terminal": {"enum": []},
+                            "command_started": {"enum": []},
+                            "command_completed": {"enum": []},
+                            "passed": {"enum": []},
+                            "effective_timeout_secs": {"enum": []},
+                            "sync_wait_secs": {"enum": []},
+                            "async_handoff_available": {"enum": []},
+                            "command_ok": {"enum": []},
+                            "tool_failure": {"enum": []},
                             "failure_kind": {"enum": []},
                             "job_id": {"enum": []},
                             "job_status": {"enum": []},
-                            "observation_token": {"enum": []}
+                            "continuation": {"enum": []}
                         }
                     }
                 }
@@ -333,7 +357,7 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                             "failure_kind": {"const": "timeout"},
                             "job_id": {"enum": []},
                             "job_status": {"enum": []},
-                            "observation_token": {"enum": []}
+                            "continuation": {"enum": []},
                         }
                     }
                 }
@@ -355,7 +379,7 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                             "failure_kind": {"const": "outcome_unknown"},
                             "job_id": {"enum": []},
                             "job_status": {"enum": []},
-                            "observation_token": {"enum": []}
+                            "continuation": {"enum": []},
                         }
                     }
                 }
@@ -377,7 +401,7 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                             "failure_kind": {"enum": ["permission_denied", "project_not_found", "cwd_invalid", "sandbox_unavailable", "executor_unavailable"]},
                             "job_id": {"enum": []},
                             "job_status": {"enum": []},
-                            "observation_token": {"enum": []}
+                            "continuation": {"enum": []},
                         }
                     }
                 }
@@ -399,7 +423,7 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                             "failure_kind": {"enum": ["validation_failed", "process_exit"]},
                             "job_id": {"enum": []},
                             "job_status": {"enum": []},
-                            "observation_token": {"enum": []}
+                            "continuation": {"enum": []},
                         }
                     }
                 }
@@ -410,14 +434,14 @@ fn cargo_output_schema(tool_name: &str) -> Value {
                     "success": {"const": false},
                     "error": {"type": "string", "minLength": 1},
                     "output": {
-                        "required": ["execution_source", "command_started", "command_completed", "failure_kind"],
+                        "required": ["command_started", "command_completed", "failure_kind"],
                         "properties": {
                             "command_started": {"const": false},
                             "command_completed": {"const": false},
                             "failure_kind": {"enum": ["invalid_arguments", "capability_unavailable", "permission_denied", "project_not_found", "cwd_invalid", "sandbox_unavailable", "executor_unavailable"]},
                             "job_id": {"enum": []},
                             "job_status": {"enum": []},
-                            "observation_token": {"enum": []},
+                            "continuation": {"enum": []},
                             "passed": {"enum": []},
                             "promoted_to_job": {"enum": []},
                             "terminal": {"enum": []}

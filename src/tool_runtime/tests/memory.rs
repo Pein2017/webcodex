@@ -24,6 +24,8 @@ fn resolved(id: &str, client: &str, root: &str) -> ResolvedProject {
             client_id: client.to_string(),
             allow_patch: true,
         },
+        root_fingerprint: None,
+        knowledge_association: None,
     }
 }
 
@@ -863,7 +865,9 @@ async fn memory_bootstrap_is_explicit_and_never_inferred_from_session_ack_recove
     )
     .await;
     assert!(missing_ack.success);
-    assert!(missing_ack.output["session_context_revision"].is_u64());
+    assert!(missing_ack.output.get("session_context_revision").is_none());
+    assert!(missing_ack.output.get("session_continuity").is_none());
+    assert!(missing_ack.output.get("session_recovery").is_none());
     assert!(missing_ack.output.get("context_projection").is_none());
     assert!(!missing_ack.output.to_string().contains(private_summary));
 

@@ -1,10 +1,19 @@
-use crate::state::RunnerRegistryInner;
+use crate::receipts::ReceiptRegistryState;
 use crate::{NoopRunnerRegistryTelemetry, RunnerAccess, RunnerRegistryTelemetry};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use tokio::sync::Mutex;
 
-pub(crate) const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+/// Server-side retained bytes for one stdout or stderr stream in an ordinary
+/// completed Runner result. This is not a polling/WebSocket/QUIC wire limit.
+pub(crate) const ORDINARY_RESULT_STREAM_RETENTION_BYTES: usize = 256 * 1024;
+/// Server-side retained bytes for one live Job stdout or stderr stream. Kept
+/// separate from ordinary results because Job cursors/truncation semantics are
+/// independently owned even though the current value is the same.
+pub(crate) const LIVE_JOB_STREAM_RETENTION_BYTES: usize = 256 * 1024;
+/// Server-side retained bytes for one stdout or stderr stream returned by a
+/// persistent-shell operation. This is an observation-retention bound, not a
+/// transport envelope limit.
+pub(crate) const PERSISTENT_SHELL_STREAM_RETENTION_BYTES: usize = 256 * 1024;
 pub const RUNNER_ONLINE_WINDOW_SECS: i64 = 60;
 pub(crate) const MAX_SHARED_KEY_RUNNERS_PER_GROUP: usize = 16;
 pub(crate) const MAX_SHARED_KEY_RUNNERS_GLOBAL: usize = 1024;
@@ -58,11 +67,15 @@ impl Default for SharedKeyRegistrationLimits {
 
 #[derive(Debug, Clone)]
 pub struct RunnerRegistry {
-    pub(crate) inner: Arc<Mutex<RunnerRegistryInner>>,
+    pub(crate) inner: Arc<ReceiptRegistryState>,
     pub(crate) observation_epoch: Arc<str>,
     pub(crate) shared_key_limits: SharedKeyRegistrationLimits,
     pub(crate) telemetry: Arc<dyn RunnerRegistryTelemetry>,
     pub(crate) cleanup_intents: Arc<StdMutex<HashMap<String, Option<RunnerAccess>>>>,
+    #[cfg(any(test, feature = "root-test-support"))]
+    pub(crate) project_job_scan_count: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "root-test-support"))]
+    pub(crate) filtered_job_refresh_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Default for RunnerRegistry {
@@ -74,12 +87,28 @@ impl Default for RunnerRegistry {
 impl RunnerRegistry {
     pub fn with_telemetry(telemetry: Arc<dyn RunnerRegistryTelemetry>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(RunnerRegistryInner::default())),
+            inner: Arc::new(ReceiptRegistryState::new(None)),
             observation_epoch: Arc::from(uuid::Uuid::new_v4().to_string()),
             shared_key_limits: SharedKeyRegistrationLimits::default(),
             telemetry,
             cleanup_intents: Arc::new(StdMutex::new(HashMap::new())),
+            #[cfg(any(test, feature = "root-test-support"))]
+            project_job_scan_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "root-test-support"))]
+            filtered_job_refresh_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(any(test, feature = "root-test-support"))]
+    pub fn project_job_scan_count_for_test(&self) -> usize {
+        self.project_job_scan_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "root-test-support"))]
+    pub fn filtered_job_refresh_count_for_test(&self) -> usize {
+        self.filtered_job_refresh_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(any(test, feature = "root-test-support"))]

@@ -7,6 +7,8 @@ const MESSAGE_ID_PATTERN: &str = "^wc_cmsg_[0-9a-f]{32}$";
 const DELIVERY_ID_PATTERN: &str = "^wc_delivery_[0-9a-f]{32}$";
 const WAKE_ID_PATTERN: &str = "^wc_wake_[0-9a-f]{32}$";
 const WAKE_CONSUME_TOKEN_PATTERN: &str = "^wc_wake_consume_[0-9a-f]{32}$";
+const WAKE_ATTEMPT_ID_PATTERN: &str = "^wc_wake_attempt_[0-9a-f]{32}$";
+const HOST_BINDING_ID_PATTERN: &str = "^wc_host_binding_[0-9a-f]{32}$";
 
 fn bounded_string(description: &str, max_length: usize) -> Value {
     json!({
@@ -48,9 +50,8 @@ fn optional_limit() -> Value {
     json!({
         "type": "integer",
         "minimum": 1,
-        "maximum": 100,
         "default": 50,
-        "description": "Maximum records to return."
+        "description": "Maximum records to return. Values above 100 are accepted and clamped to 100."
     })
 }
 
@@ -168,17 +169,110 @@ pub fn attach_agent_endpoint_input_schema() -> Value {
         "type": "object",
         "properties": {
             "agent_id": canonical_id(AGENT_ID_PATTERN, "Canonical durable Agent id owned by the current communication principal."),
-            "host": bounded_string("Endpoint host adapter name, for example ChatGPT. This is attachment metadata, not authority.", 64),
+            "host": bounded_string("Server-local continuation adapter label, for example ChatGPT. This is recorded metadata only: it does not initiate, configure, or authorize an external connection.", 64),
             "client_attachment_id": {
                 "type": "string",
                 "maxLength": 128,
-                "description": "Optional host-local attachment identifier. It is not durable Agent identity."
+                "description": "Optional opaque host-local attachment label copied into server-local Endpoint metadata. It is not durable Agent identity, remote-host authority, or a connection selector."
             },
             "idempotency_key": idempotency_key()
         },
         "required": ["agent_id", "host", "idempotency_key"],
         "additionalProperties": false
     })
+}
+
+fn exact_agent_endpoint_properties() -> Value {
+    json!({
+        "agent_id": canonical_id(AGENT_ID_PATTERN, "Exact durable Agent id; no current/recent Agent fallback is permitted."),
+        "endpoint_id": canonical_id(ENDPOINT_ID_PATTERN, "Exact current Agent Endpoint id."),
+        "expected_controller_generation": expected_controller_generation()
+    })
+}
+
+fn host_binding_id() -> Value {
+    canonical_id(
+        HOST_BINDING_ID_PATTERN,
+        "Opaque process-local MCP App View binding fence. Possession never grants communication authority.",
+    )
+}
+
+pub fn present_agent_continuation_input_schema() -> Value {
+    let exact = exact_agent_endpoint_properties();
+    json!({
+        "type": "object",
+        "properties": exact,
+        "required": ["agent_id", "endpoint_id", "expected_controller_generation"],
+        "additionalProperties": false
+    })
+}
+
+pub fn agent_continuation_bind_input_schema() -> Value {
+    agent_continuation_state_input_schema()
+}
+
+pub fn agent_continuation_recover_endpoint_input_schema() -> Value {
+    agent_continuation_state_input_schema()
+}
+
+pub fn agent_continuation_state_input_schema() -> Value {
+    let mut properties = exact_agent_endpoint_properties();
+    properties["binding_id"] = host_binding_id();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": ["agent_id", "endpoint_id", "expected_controller_generation", "binding_id"],
+        "additionalProperties": false
+    })
+}
+
+pub fn agent_continuation_wake_acquire_input_schema() -> Value {
+    agent_continuation_state_input_schema()
+}
+
+pub fn agent_continuation_wake_prepare_input_schema() -> Value {
+    let mut properties = exact_agent_endpoint_properties();
+    properties["binding_id"] = host_binding_id();
+    properties["wake_id"] = canonical_id(
+        WAKE_ID_PATTERN,
+        "Exact durable Wake acquired by this current Host binding.",
+    );
+    properties["attempt_id"] = canonical_id(
+        WAKE_ATTEMPT_ID_PATTERN,
+        "Exact durable Wake Delivery Attempt acquired by this current Host binding.",
+    );
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": [
+            "agent_id", "endpoint_id", "expected_controller_generation",
+            "binding_id", "wake_id", "attempt_id"
+        ],
+        "additionalProperties": false
+    })
+}
+
+pub fn agent_continuation_wake_finish_input_schema() -> Value {
+    let mut schema = agent_continuation_wake_prepare_input_schema();
+    schema["properties"]["outcome"] = json!({
+        "type": "string",
+        "enum": ["dispatch_accepted", "delivery_unknown"],
+        "description": "Host dispatch result after the durable fence. dispatch_accepted means only that ui/message returned success; delivery_unknown is required when post-fence delivery cannot be disproved."
+    });
+    schema["required"] = json!([
+        "agent_id",
+        "endpoint_id",
+        "expected_controller_generation",
+        "binding_id",
+        "wake_id",
+        "attempt_id",
+        "outcome"
+    ]);
+    schema
+}
+
+pub fn agent_continuation_unbind_input_schema() -> Value {
+    agent_continuation_state_input_schema()
 }
 
 pub fn detach_agent_endpoint_input_schema() -> Value {
@@ -384,7 +478,10 @@ pub fn bootstrap_agent_conversation_input_schema() -> Value {
             "expected_controller_generation": expected_controller_generation(),
             "conversation_id": canonical_id(CONVERSATION_ID_PATTERN, "Optional explicit current Conversation. When omitted, an exact Wake may select its latest Conversation; no hidden Host selection is inferred."),
             "wake_id": canonical_id(WAKE_ID_PATTERN, "Optional exact Wake identity from a continuation envelope or explicit pending-work activation."),
-            "activation_idempotency_key": idempotency_key()
+            "activation_idempotency_key": bounded_string(
+                "Caller-generated key used only to accept/replay an eligible pending Inbox-style Wake through explicit activation into this already-active model turn. OMIT this field for agent_task_attempt and attention_event continuations already dispatched by an Endpoint carrier; bootstrap those exact Wakes directly instead of converting them to explicit activation.",
+                128,
+            )
         },
         "required": ["agent_id", "endpoint_id", "expected_controller_generation"],
         "additionalProperties": false

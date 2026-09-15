@@ -3,8 +3,8 @@ use super::state::{
     ShellJobRecord,
 };
 use super::{
-    now_ts, RunnerFeature, MAX_OUTPUT_BYTES, MAX_QUEUED_REQUESTS_PER_RUNNER,
-    RUNNER_ONLINE_WINDOW_SECS,
+    now_ts, RunnerFeature, LIVE_JOB_STREAM_RETENTION_BYTES, MAX_QUEUED_REQUESTS_PER_RUNNER,
+    ORDINARY_RESULT_STREAM_RETENTION_BYTES, RUNNER_ONLINE_WINDOW_SECS,
 };
 use std::collections::VecDeque;
 use std::fmt;
@@ -175,26 +175,72 @@ mod select_lines_tests {
     }
 }
 
-pub(super) fn truncate_output(value: Option<String>) -> Option<String> {
-    truncate_output_to(value, MAX_OUTPUT_BYTES)
+pub(super) fn retain_ordinary_result_stream_with_evidence(
+    value: Option<String>,
+) -> (Option<String>, bool) {
+    retain_result_stream_to_with_evidence(value, ORDINARY_RESULT_STREAM_RETENTION_BYTES)
 }
 
-pub(super) fn truncate_output_to(value: Option<String>, max_bytes: usize) -> Option<String> {
-    value.map(|s| {
-        if s.len() <= max_bytes {
-            s
-        } else {
-            let mut start = s.len() - max_bytes;
-            while start < s.len() && !s.is_char_boundary(start) {
-                start += 1;
-            }
-            format!(
-                "[output truncated to last {} bytes]\n{}",
-                max_bytes,
-                &s[start..]
-            )
-        }
-    })
+pub(super) fn combine_result_stream_truncation(runner_reported: bool, server_side: bool) -> bool {
+    runner_reported || server_side
+}
+
+fn retain_live_job_stream(value: Option<String>) -> Option<String> {
+    retain_result_stream_to(value, LIVE_JOB_STREAM_RETENTION_BYTES)
+}
+
+pub(super) fn retain_result_stream_to(value: Option<String>, max_bytes: usize) -> Option<String> {
+    retain_result_stream_to_with_evidence(value, max_bytes).0
+}
+
+pub(super) fn retain_result_stream_to_with_evidence(
+    value: Option<String>,
+    max_bytes: usize,
+) -> (Option<String>, bool) {
+    let Some(s) = value else {
+        return (None, false);
+    };
+    if s.len() <= max_bytes {
+        return (Some(s), false);
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    (
+        Some(format!(
+            "[output truncated to last {} bytes]\n{}",
+            max_bytes,
+            &s[start..]
+        )),
+        true,
+    )
+}
+
+#[cfg(test)]
+mod result_retention_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn synchronous_result_retention_reports_server_side_truncation() {
+        let (small, small_truncated) =
+            retain_result_stream_to_with_evidence(Some("small".to_string()), 8);
+        assert_eq!(small.as_deref(), Some("small"));
+        assert!(!small_truncated);
+
+        let (large, large_truncated) =
+            retain_result_stream_to_with_evidence(Some("0123456789".to_string()), 4);
+        assert!(large_truncated);
+        assert!(large.unwrap().ends_with("6789"));
+    }
+
+    #[test]
+    fn runner_and_server_truncation_evidence_is_combined_with_or() {
+        assert!(!combine_result_stream_truncation(false, false));
+        assert!(combine_result_stream_truncation(true, false));
+        assert!(combine_result_stream_truncation(false, true));
+        assert!(combine_result_stream_truncation(true, true));
+    }
 }
 
 pub(super) fn job_view(job: &ShellJobRecord) -> ShellJobInfo {
@@ -244,6 +290,7 @@ pub(super) fn job_view(job: &ShellJobRecord) -> ShellJobInfo {
         codex: job.codex.clone(),
         result,
         validation_progress: job.validation_progress.clone(),
+        test_count_evidence: job.test_count_evidence.clone(),
         activity: job.activity,
         validation: job.validation.clone(),
         recovery_state: job.recovery.public_state().map(str::to_string),
@@ -310,11 +357,11 @@ pub(super) fn append_log_limited(target: &mut ShellJobLogState, chunk: Option<St
         return;
     };
     target.tail.push_str(&chunk);
-    if target.tail.len() > MAX_OUTPUT_BYTES {
+    if target.tail.len() > LIVE_JOB_STREAM_RETENTION_BYTES {
         let observed_next = target
             .first_retained_line
             .saturating_add(retained_line_count(&target.tail));
-        let minimum_start = target.tail.len() - MAX_OUTPUT_BYTES;
+        let minimum_start = target.tail.len() - LIVE_JOB_STREAM_RETENTION_BYTES;
         if let Some(relative_newline) = target.tail[minimum_start..].find('\n') {
             let drop_end = minimum_start + relative_newline + 1;
             let dropped_lines = target.tail[..drop_end]
@@ -345,7 +392,7 @@ pub(super) fn append_log_limited(target: &mut ShellJobLogState, chunk: Option<St
         .saturating_add(retained_line_count(&target.tail));
 }
 
-fn has_leading_transport_truncation_marker(value: &str) -> bool {
+fn has_leading_result_retention_truncation_marker(value: &str) -> bool {
     if value.starts_with("[output truncated]\n") || value.starts_with("[...]\n") {
         return true;
     }
@@ -367,11 +414,11 @@ pub(super) fn replace_log_limited(target: &mut ShellJobLogState, value: Option<S
     let Some(value) = value else {
         return;
     };
-    let value = truncate_output(Some(value)).unwrap_or_default();
+    let value = retain_live_job_stream(Some(value)).unwrap_or_default();
     target.tail = value;
     target.first_retained_line = 1;
     target.next_line = 1usize.saturating_add(retained_line_count(&target.tail));
-    target.truncated = has_leading_transport_truncation_marker(&target.tail);
+    target.truncated = has_leading_result_retention_truncation_marker(&target.tail);
 }
 
 #[cfg(test)]
@@ -379,7 +426,7 @@ mod replace_log_limited_tests {
     use super::*;
 
     #[test]
-    fn recognizes_all_supported_transport_truncation_markers() {
+    fn recognizes_all_supported_result_retention_truncation_markers() {
         for marker in [
             "[output truncated to last 12000 bytes]\n",
             "[output truncated]\n",
@@ -482,6 +529,11 @@ pub(super) fn notify_job_update(job: &ShellJobRecord) {
     use std::sync::atomic::Ordering;
     job.observation.revision.fetch_add(1, Ordering::Relaxed);
     job.observation.notify.notify_waiters();
+    if job.lifecycle.is_terminal() {
+        if let Some(candidates) = &job.observation.receipt_candidates {
+            candidates.lock().unwrap().insert(job.job_id.clone());
+        }
+    }
 }
 
 pub(super) fn is_runner_active_job_status(status: &str) -> bool {

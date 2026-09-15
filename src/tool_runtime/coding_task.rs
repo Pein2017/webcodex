@@ -32,8 +32,9 @@ use super::session_context::{
 use super::sessions::tool_failure_summary_from_events;
 use super::sessions::{self, SessionTransport, TOOL_CALL_RECORDING_SESSION_ID_FIELD};
 use super::startup_brief::{
-    build_startup_brief, builtin_coding_workflow_projection, startup_brief_from_output,
-    StartupBriefInput, REPOSITORY_OVERVIEW_NOT_REQUESTED_REASON,
+    bounded_extension_description, build_startup_brief, builtin_coding_workflow_projection,
+    startup_brief_from_output, StartupBriefInput, StartupExtensions, StartupPluginEntry,
+    StartupPluginsCatalog, REPOSITORY_OVERVIEW_NOT_REQUESTED_REASON,
 };
 use super::tool_catalog::TOOL_RECOMMENDED_FLOWS;
 use super::tool_inputs::{SessionMode, StartupDetail};
@@ -98,6 +99,7 @@ struct CodingStartupOptions {
     detail: StartupDetail,
     include_repository_overview: bool,
     include_project_instructions: bool,
+    include_extension_catalog: bool,
     include_reused_instruction_content: bool,
 }
 
@@ -109,16 +111,21 @@ impl CodingStartupOptions {
             tool_name: "work_on_project",
             include_repository_overview: true,
             include_project_instructions: true,
+            include_extension_catalog: false,
             include_reused_instruction_content: false,
         }
     }
 
-    fn work_on_project(include_project_instructions: bool) -> Self {
+    fn work_on_project(
+        include_project_instructions: bool,
+        include_extension_catalog: bool,
+    ) -> Self {
         Self {
             detail: StartupDetail::Standard,
             tool_name: "work_on_project",
             include_repository_overview: false,
             include_project_instructions,
+            include_extension_catalog,
             include_reused_instruction_content: include_project_instructions,
         }
     }
@@ -134,7 +141,7 @@ fn invalid_project_source(message: impl Into<String>, fields: Value) -> ToolResu
     if let (Some(output), Some(fields)) = (output.as_object_mut(), fields.as_object()) {
         output.extend(fields.clone());
     }
-    ToolResult::err_with_output(message, output).with_recovery(RecoveryKind::FixInput, None)
+    ToolResult::err_with_output(message, output).with_recovery(RecoveryKind::FixInput)
 }
 
 #[cfg(test)]
@@ -238,7 +245,7 @@ fn registration_scope_denied(auth: Option<&AuthContext>, operation: &str) -> Opt
                     "state_changed": false,
                 }),
             )
-            .with_recovery(RecoveryKind::UserAction, None)
+            .with_recovery(RecoveryKind::UserAction)
         })
 }
 
@@ -757,27 +764,46 @@ impl ToolRuntime {
             }
         }
         // Semantic-navigation and fixed project-instruction observation remain
-        // mandatory startup probes. Diagnostic test projections also run the
-        // independent repository overview concurrently. The ordinary
-        // work_on_project entry deliberately omits that optional scan/request.
-        let (semantic_navigation, project_instructions, repository_overview) =
-            if startup.include_repository_overview {
-                futures_util::future::join3(
-                    self.probe_semantic_navigation_for_startup(&resolved),
-                    self.load_coding_project_instructions(&resolved.config),
-                    self.repository_overview_for_startup(&resolved, auth),
-                )
-                .await
+        // mandatory startup probes. Extension discovery is an independent,
+        // bounded observation that runs concurrently only when the caller keeps
+        // include_extension_catalog enabled. Diagnostic projections can still
+        // run the optional repository overview concurrently.
+        let extension_discovery = async {
+            if startup.include_extension_catalog {
+                Some(self.extension_discovery_for_startup(&resolved, auth).await)
             } else {
-                let (semantic_navigation, project_instructions) = futures_util::future::join(
-                    self.probe_semantic_navigation_for_startup(&resolved),
-                    self.load_coding_project_instructions(&resolved.config),
+                None
+            }
+        };
+        let (semantic_navigation, project_instructions, repository_overview, extensions) =
+            if startup.include_repository_overview {
+                let (semantic_navigation, project_instructions, repository_overview, extensions) =
+                    futures_util::future::join4(
+                        self.probe_semantic_navigation_for_startup(&resolved),
+                        self.load_coding_project_instructions(&resolved.config),
+                        self.repository_overview_for_startup(&resolved, auth),
+                        extension_discovery,
+                    )
+                    .await;
+                (
+                    semantic_navigation,
+                    project_instructions,
+                    repository_overview,
+                    extensions,
                 )
-                .await;
+            } else {
+                let (semantic_navigation, project_instructions, extensions) =
+                    futures_util::future::join3(
+                        self.probe_semantic_navigation_for_startup(&resolved),
+                        self.load_coding_project_instructions(&resolved.config),
+                        extension_discovery,
+                    )
+                    .await;
                 (
                     semantic_navigation,
                     project_instructions,
                     repository_overview_not_requested(),
+                    extensions,
                 )
             };
         let semantic_navigation = serde_json::to_value(semantic_navigation).unwrap_or_else(|_| {
@@ -1035,7 +1061,12 @@ impl ToolRuntime {
         // potentially slow startup probes, then share it across continuation,
         // the legacy full verdict, and the model-facing brief.
         let active_jobs = self
-            .active_jobs_summary(Some(&resolved.resolved_id), auth, 10)
+            .active_jobs_summary(
+                Some(&resolved.resolved_id),
+                Some(&session_outcome.summary.session_id),
+                auth,
+                10,
+            )
             .await;
         let continuation_feedback = self
             .startup_continuation_feedback(
@@ -1126,6 +1157,9 @@ impl ToolRuntime {
             // A fresh Session starts at the currently resolved canonical root.
             Some(true)
         };
+        let knowledge_association = self
+            .project_knowledge_association_diagnostic(&resolved, auth)
+            .await;
         let project_resolution_value =
             serde_json::to_value(&project_resolution).unwrap_or_else(|_| json!({}));
         let startup_brief = build_startup_brief(StartupBriefInput {
@@ -1133,6 +1167,7 @@ impl ToolRuntime {
             requested_project: &project,
             project_resolution: &project_resolution_value,
             resolved: &resolved,
+            knowledge_association: knowledge_association.as_ref(),
             session: session_summary,
             continuation_kind,
             reused: session_outcome.reused,
@@ -1142,6 +1177,7 @@ impl ToolRuntime {
             force_instruction_load,
             include_project_instructions: startup.include_project_instructions,
             include_reused_instruction_content: startup.include_reused_instruction_content,
+            extensions: extensions.as_ref(),
             git: &git,
             semantic_navigation: &semantic_navigation,
             repository: &repository_overview,
@@ -1202,6 +1238,46 @@ impl ToolRuntime {
         .await
     }
 
+    async fn extension_discovery_for_startup(
+        &self,
+        project: &ResolvedProject,
+        auth: Option<&AuthContext>,
+    ) -> StartupExtensions {
+        let skills = self.startup_skills_catalog(project, auth);
+        let plugins = async {
+            if auth.is_some_and(|auth| !auth.has_scope(crate::auth::SCOPE_PLUGIN_INSPECT)) {
+                return StartupPluginsCatalog::unavailable("plugin_inspect_scope_unavailable");
+            }
+            match self.project_plugin_catalog(project, auth).await {
+                Ok(catalog) => {
+                    let entries = catalog
+                        .entries
+                        .into_iter()
+                        .map(|entry| StartupPluginEntry {
+                            plugin: entry.plugin,
+                            name: entry.name,
+                            tool: entry.tool,
+                            title: entry.title,
+                            description: entry
+                                .description
+                                .as_deref()
+                                .map(bounded_extension_description),
+                            annotations: entry.annotations,
+                        })
+                        .collect();
+                    StartupPluginsCatalog::available(
+                        catalog.catalog_revision,
+                        catalog.total_count,
+                        entries,
+                    )
+                }
+                Err(reason_code) => StartupPluginsCatalog::unavailable(reason_code),
+            }
+        };
+        let (skills, plugins) = futures_util::future::join(skills, plugins).await;
+        StartupExtensions { skills, plugins }
+    }
+
     /// Canonical entry for the daily model coding loop.
     ///
     /// This validates the public inputs, maps them onto the shared coding
@@ -1219,6 +1295,7 @@ impl ToolRuntime {
         session_id: Option<String>,
         include_project_instructions: bool,
         include_workflow_guidance: bool,
+        include_extension_catalog: bool,
         auth: Option<&AuthContext>,
         trusted_recording_session_id: Option<&str>,
         trusted_recording_session_project: Option<&str>,
@@ -1318,7 +1395,10 @@ impl ToolRuntime {
                 SessionMode::Normal,
                 false,
                 false,
-                CodingStartupOptions::work_on_project(include_project_instructions),
+                CodingStartupOptions::work_on_project(
+                    include_project_instructions,
+                    include_extension_catalog,
+                ),
                 session_id.clone(),
                 None,
                 auth,
@@ -1492,7 +1572,7 @@ impl ToolRuntime {
         append_hygiene_warnings(&hygiene, &mut final_warnings);
 
         let jobs = self
-            .active_jobs_summary(Some(&resolved.resolved_id), auth, 10)
+            .active_jobs_summary(Some(&resolved.resolved_id), Some(&session_id), auth, 10)
             .await;
         if let Some(warnings) = jobs.get("warnings").and_then(Value::as_array) {
             final_warnings.extend(warnings.iter().cloned());
@@ -1980,6 +2060,8 @@ struct WorkOnProjectBriefProjection {
     workflow: Value,
     instructions: WorkOnProjectInstructionsProjection,
     semantic_navigation: WorkOnProjectSemanticNavigationProjection,
+    #[serde(default)]
+    extensions: Option<Value>,
     repository: Value,
     continuation: WorkOnProjectContinuationProjection,
     blockers: Vec<String>,
@@ -1997,6 +2079,8 @@ struct WorkOnProjectSessionProjection {
 #[derive(Deserialize)]
 struct WorkOnProjectProjectProjection {
     resolved_id: String,
+    #[serde(default)]
+    knowledge_association: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -2370,6 +2454,12 @@ fn project_work_on_project_output_with_workflow_inner(
         "instructions": instructions,
         "semantic_navigation": semantic_navigation,
     }));
+    if let Some(knowledge_association) = projection.project.knowledge_association {
+        result.output["knowledge_association"] = knowledge_association;
+    }
+    if let Some(extensions) = projection.extensions {
+        result.output["extensions"] = extensions;
+    }
     if include_workflow_guidance {
         result.output["workflow"] = projection.workflow;
     }
@@ -2992,7 +3082,7 @@ fn finish_suggested_next_actions(output: &Value) -> Vec<String> {
         == Some(false)
     {
         if output
-            .pointer("/changes/show_changes/diff_review_handoff/tool")
+            .pointer("/changes/show_changes/diff_review_handoff/recovery/tool")
             .and_then(Value::as_str)
             == Some("git_diff_hunks")
         {
@@ -3097,7 +3187,9 @@ mod startup_runner_tests {
             "workspace": {"clean": false},
             "changes": {
                 "show_changes": {
-                    "diff_review_handoff": {"tool": "git_diff_hunks"}
+                    "diff_review_handoff": {
+                        "recovery": {"tool": "git_diff_hunks", "arguments": {}}
+                    }
                 }
             },
             "jobs": {"blocking_active_count": 0},
@@ -3110,7 +3202,7 @@ mod startup_runner_tests {
             .any(|action| action == "continue the diff review with git_diff_hunks"));
         assert!(
             crate::tool_runtime::tool_definition::is_adaptive_runtime_direct_tool(
-                output["changes"]["show_changes"]["diff_review_handoff"]["tool"]
+                output["changes"]["show_changes"]["diff_review_handoff"]["recovery"]["tool"]
                     .as_str()
                     .unwrap()
             )
@@ -3129,6 +3221,8 @@ mod startup_runner_tests {
                 client_id: client_id.to_string(),
                 allow_patch: true,
             },
+            root_fingerprint: None,
+            knowledge_association: None,
         }
     }
 

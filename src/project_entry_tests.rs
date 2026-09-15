@@ -158,6 +158,29 @@ fn npm_wrapper_network_credentials_are_removed_from_runtime_children() {
     }));
 }
 
+#[test]
+fn runner_parent_credentials_are_removed_before_spawn() {
+    let mut command = tokio::process::Command::new("webcodex-runner");
+    for key in ["WEBCODEX_TOKEN", "WEBCODEX_PAT", "WEBCODEX_AGENT_TOKEN"] {
+        command.env(key, "credential-like-value");
+    }
+    command.env("WEBCODEX_TEST_UNRELATED_ENV", "preserved");
+
+    remove_runner_parent_credentials(&mut command);
+    let envs: Vec<_> = command.as_std().get_envs().collect();
+    for key in ["WEBCODEX_TOKEN", "WEBCODEX_PAT", "WEBCODEX_AGENT_TOKEN"] {
+        assert!(
+            envs.iter()
+                .any(|(candidate, value)| { candidate.to_str() == Some(key) && value.is_none() }),
+            "Runner parent credential was not removed before spawn: {key}"
+        );
+    }
+    assert!(envs.iter().any(|(key, value)| {
+        key.to_str() == Some("WEBCODEX_TEST_UNRELATED_ENV")
+            && value.and_then(|value| value.to_str()) == Some("preserved")
+    }));
+}
+
 fn fact<'a>(readiness: &'a ProjectReadiness, code: &str) -> &'a ReadinessFact {
     readiness
         .findings
@@ -300,6 +323,8 @@ async fn authenticated_project_fixture_for(recipe: &str) -> AuthenticatedProject
             hooks: Vec::new(),
             disabled: false,
             revision: None,
+            root_fingerprint: None,
+            lineage: None,
             git_branch: Some("main".to_string()),
             git_head: None,
             git_dirty: Some(false),
@@ -553,6 +578,8 @@ async fn complete_project_agent_request(
             exit_code: Some(exit_code),
             stdout: Some(stdout),
             stderr: Some(stderr),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(1),
             error: None,
         })
@@ -611,6 +638,7 @@ async fn complete_project_job(
                 current_step: None,
                 failed_step: None,
             }),
+            test_count_evidence: None,
             activity: None,
             finished: true,
         })

@@ -10,7 +10,7 @@ fn structured_execution_output(
     job_id: Option<&str>,
     job_status: Option<&str>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut instance = serde_json::json!({
         "success": promoted_to_job,
         "output": {
             "execution_source": execution_source,
@@ -36,7 +36,167 @@ fn structured_execution_output(
             "async_handoff_available": true
         },
         "error": null
-    })
+    });
+    if promoted_to_job {
+        instance["output"]["continuation"] = serde_json::json!({
+            "tool": "observe_jobs",
+            "arguments": {
+                "items": [{
+                    "job_id": job_id.expect("promoted Job id"),
+                    "after_observation_token": "observation"
+                }],
+                "wait_secs": 100,
+                "wake_on": "terminal"
+            }
+        });
+    }
+    if promoted_to_job {
+        for key in [
+            "promoted_to_job",
+            "observation_token",
+            "async_handoff_available",
+        ] {
+            instance["output"].as_object_mut().unwrap().remove(key);
+        }
+    }
+    instance
+}
+
+#[test]
+fn t2_continuation_output_schemas_distinguish_cursor_kinds_and_carriers() {
+    let specs = registered_tool_specs();
+
+    let coding = spec_named(&specs, "coding_agent_observe");
+    let coding_semantics = &coding.output_schema["properties"]["output"]["properties"]
+        ["continuation_semantics"]["properties"];
+    assert_eq!(coding_semantics["kind"]["const"], "observe");
+    assert_eq!(coding_semantics["carrier"]["const"], "observation_token");
+
+    let session = spec_named(&specs, "observe_session_messages");
+    let session_semantics = &session.output_schema["properties"]["output"]["properties"]
+        ["continuation_semantics"]["properties"];
+    assert_eq!(session_semantics["kind"]["const"], "observe");
+    assert_eq!(session_semantics["carrier"]["const"], "observation_token");
+}
+
+#[test]
+fn git_diff_hunks_recovery_schema_accepts_only_sparse_actionable_lanes() {
+    let specs = registered_tool_specs();
+    let git = spec_named(&specs, "git_diff_hunks");
+    let schema = &git.output_schema["properties"]["output"]["properties"]["recovery"];
+    let arguments = json!({
+        "project": "agent:special:webcodex", "paths": ["a.txt"],
+        "max_hunks": 10, "max_hunk_lines": 400, "max_page_bytes": 65536, "cached": false
+    });
+    let refine = json!({"current_hunk": {
+        "reason_code": "larger_max_hunk_lines_available",
+        "next_call": {"tool": "git_diff_hunks", "arguments": arguments}
+    }});
+    test_support::validate_schema_instance(&refine, schema).unwrap();
+    let mut fragment = refine.clone();
+    fragment["current_hunk"]["reason_code"] = json!("hunk_fragment_continuation_available");
+    assert!(test_support::validate_schema_instance(&fragment, schema).is_err());
+    fragment["current_hunk"]["next_call"]["arguments"]["continuation"] = json!("wcdh2.fragment");
+    test_support::validate_schema_instance(&fragment, schema).unwrap();
+    let mut mixed = fragment.clone();
+    mixed["later_hunks"] = json!({"next_call": fragment["current_hunk"]["next_call"]});
+    mixed["later_hunks"]["next_call"]["arguments"]["continuation"] = json!("wcdh2.page");
+    test_support::validate_schema_instance(&mixed, schema).unwrap();
+    mixed.as_object_mut().unwrap().remove("current_hunk");
+    test_support::validate_schema_instance(&mixed, schema).unwrap();
+
+    for reason in [
+        "page_byte_budget_prevents_proven_recovery",
+        "max_hunk_lines_ceiling_reached",
+        "max_hunk_lines_ceiling_insufficient",
+        "bounded_recovery_unavailable",
+    ] {
+        let mut blocked = json!({"current_hunk": {"reason_code": reason}});
+        test_support::validate_schema_instance(&blocked, schema).unwrap();
+        blocked["current_hunk"]["next_call"] = fragment["current_hunk"]["next_call"].clone();
+        assert!(test_support::validate_schema_instance(&blocked, schema).is_err());
+    }
+    for field in [
+        "kind",
+        "arguments",
+        "tool",
+        "safe_continuation_for_omitted_lines",
+        "continuation",
+        "omitted_lines",
+    ] {
+        let mut duplicate = fragment.clone();
+        duplicate[field] = Value::Null;
+        assert!(test_support::validate_schema_instance(&duplicate, schema).is_err());
+    }
+    for field in [
+        "present",
+        "recoverable",
+        "continuation_semantics",
+        "paths",
+        "path_provenance",
+    ] {
+        let mut duplicate = fragment.clone();
+        duplicate["current_hunk"][field] = Value::Null;
+        assert!(test_support::validate_schema_instance(&duplicate, schema).is_err());
+    }
+    for invalid in [
+        json!({}),
+        json!({"later_hunks": {"next_call": null}}),
+        json!({"current_hunk": {"reason_code": "hunk_fragment_continuation_available"}}),
+    ] {
+        assert!(test_support::validate_schema_instance(&invalid, schema).is_err());
+    }
+    let mut invalid_refine = refine;
+    invalid_refine["current_hunk"]["next_call"]["arguments"]["continuation"] =
+        json!("wcdh2.fragment");
+    assert!(test_support::validate_schema_instance(&invalid_refine, schema).is_err());
+}
+
+#[test]
+fn inspection_truthfulness_schemas_keep_typed_missing_and_canonical_diff_recovery() {
+    let specs = registered_tool_specs();
+
+    let search = spec_named(&specs, "search_project_texts");
+    let search_failure = &search.output_schema["properties"]["output"]["anyOf"][0]["anyOf"][0]
+        ["properties"]["items"]["items"]["properties"]["output"]["anyOf"][1];
+    assert!(search_failure["properties"]["reason_code"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("not_found")));
+    assert!(search_failure["properties"]["failure_stage"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("path_resolution")));
+    assert!(search_failure["properties"]["detail_code"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("not_found")));
+
+    let show_changes = spec_named(&specs, "show_changes");
+    let properties = &show_changes.output_schema["properties"]["output"]["properties"];
+    assert!(properties["hunks"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("source_completeness"));
+    let file = &properties["hunks"]["items"];
+    assert_eq!(file["additionalProperties"], true);
+    let hunk = &file["properties"]["hunks"]["items"];
+    assert_eq!(hunk["additionalProperties"], true);
+    assert!(hunk["properties"].get("truncated").is_none());
+    assert_eq!(hunk["required"], json!(["source_completeness"]));
+    assert_eq!(
+        hunk["properties"]["source_completeness"]["enum"],
+        json!(["complete", "unknown"])
+    );
+    let handoff = &properties["diff_review_handoff"];
+    assert_eq!(handoff["required"], json!(["next_call"]));
+    assert_eq!(
+        handoff["properties"]["next_call"]["properties"]["tool"]["const"],
+        "git_diff_hunks"
+    );
+    for legacy in ["scope", "reason", "truncation_reasons", "recovery"] {
+        assert!(handoff["properties"].get(legacy).is_none(), "{legacy}");
+    }
 }
 
 fn continuation_feedback_subschema(specs: &[ToolSpec], tool: &str) -> Value {
@@ -75,6 +235,202 @@ fn assert_all_objects_strict(schema: &Value, path: &str, open_boundaries: &[&str
         }
         _ => {}
     }
+}
+
+#[test]
+fn agent_continuation_projection_schema_requires_strict_nullable_restart_recovery() {
+    let schema = output_schema_for_tool("present_agent_continuation");
+    let projection = &schema["properties"]["output"]["properties"]["agent_continuation"];
+    assert_eq!(projection["additionalProperties"], false);
+    assert!(projection["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "recovery"));
+
+    let recovery_variants = projection["properties"]["recovery"]["anyOf"]
+        .as_array()
+        .expect("recovery must be nullable through anyOf");
+    assert_eq!(recovery_variants.len(), 2);
+    let recovery = recovery_variants
+        .iter()
+        .find(|variant| variant["type"] == "object")
+        .expect("recovery object variant");
+    assert_eq!(recovery["additionalProperties"], false);
+    assert_eq!(recovery["required"], json!(["kind"]));
+    assert_eq!(
+        recovery["properties"]["kind"]["const"],
+        "host_binding_missing_in_process"
+    );
+    assert!(recovery_variants
+        .iter()
+        .any(|variant| variant["type"] == "null"));
+}
+
+#[test]
+fn generic_agent_task_read_schema_never_exposes_attempt_fence_or_active_turn_token() {
+    let schema = output_schema_for_tool("read_agent_task");
+    let latest_attempt = &schema["properties"]["output"]["properties"]["task"]["properties"]
+        ["summary"]["properties"]["latest_attempt"]["anyOf"][0];
+    let properties = latest_attempt["properties"].as_object().unwrap();
+    for forbidden in [
+        "attempt_fence",
+        "consume_token",
+        "active_turn_wake_id",
+        "active_turn_consume_token",
+    ] {
+        assert!(
+            !properties.contains_key(forbidden),
+            "generic Task read leaked {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn goal_plan_activity_schema_is_bounded_soft_and_payload_free() {
+    let schema = output_schema_for_tool("present_goal_plan");
+    let plan = &schema["properties"]["output"]["properties"]["goal_plan"];
+    assert_eq!(plan["properties"]["version"]["const"], 1);
+    assert!(plan["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "activity"));
+    let activity = &plan["properties"]["activity"];
+    assert_eq!(activity["additionalProperties"], false);
+    assert_eq!(
+        activity["properties"]["idle_threshold_ms"]["const"],
+        300_000
+    );
+    assert_eq!(
+        activity["properties"]["state"]["enum"],
+        json!(["active", "attention_needed", "unobserved", "not_applicable"])
+    );
+    let linked = activity["properties"]["linked_window_count"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["type"] == "integer")
+        .unwrap();
+    assert_eq!(linked["maximum"], 16);
+    let active = activity["properties"]["active_meaningful_request_count"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["type"] == "integer")
+        .unwrap();
+    assert_eq!(active["maximum"], 64);
+    let encoded = activity.to_string();
+    for forbidden in [
+        "client_window_key",
+        "openai/session",
+        "tool_arguments",
+        "tool_outputs",
+        "attempt_fence",
+        "consume_token",
+    ] {
+        assert!(
+            !encoded.contains(forbidden),
+            "activity schema leaked {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn git_diff_hunks_output_schema_keeps_page_and_model_budgets_distinct() {
+    let specs = registered_tool_specs();
+    let spec = spec_named(&specs, "git_diff_hunks");
+    let output = &spec.output_schema["properties"]["output"]["properties"];
+    assert!(output["max_page_bytes"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("producer-page"));
+    let recovery = &output["recovery"]["properties"]["later_hunks"]["properties"]["next_call"]
+        ["properties"]["arguments"];
+    assert_eq!(
+        recovery["properties"]["max_page_bytes"]["minimum"],
+        16 * 1024
+    );
+    assert_eq!(
+        recovery["properties"]["max_page_bytes"]["maximum"],
+        192 * 1024
+    );
+    assert!(recovery["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "max_page_bytes"));
+}
+
+#[test]
+fn git_log_and_directory_listing_expose_parser_ready_next_pages() {
+    let specs = registered_tool_specs();
+
+    let git_log =
+        &spec_named(&specs, "git_log").output_schema["properties"]["output"]["properties"];
+    assert!(git_log["next_skip"]["anyOf"].is_array());
+    assert!(git_log["next_skip"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("Exact skip value"));
+
+    let files = &spec_named(&specs, "list_project_files").output_schema["properties"]["output"]
+        ["properties"];
+    for field in [
+        "returned",
+        "total_entries",
+        "offset",
+        "next_offset",
+        "truncated",
+    ] {
+        assert!(
+            files.get(field).is_some(),
+            "missing list_project_files.{field}"
+        );
+    }
+    assert!(files["next_offset"]["anyOf"].is_array());
+    assert!(files["total_entries"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("fully acquired"));
+}
+
+#[test]
+fn cargo_fmt_output_schema_exposes_bounded_ensure_format_effect_state() {
+    let specs = registered_tool_specs();
+    let output = output_schema_properties(&specs, "cargo_fmt");
+    for field in ["changed", "state_changed"] {
+        assert!(output[field]["anyOf"].is_array(), "cargo_fmt.{field}");
+        let description = output[field]["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("check=false"),
+            "{field}: {description}"
+        );
+    }
+}
+
+#[test]
+fn tracked_listing_schema_separates_source_incomplete_from_safe_page_truncation() {
+    let specs = registered_tool_specs();
+    let properties = output_schema_properties(&specs, "list_project_tracked_files");
+    let truncated = properties["truncated"]["description"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    let next_offset = properties["next_offset"]["description"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    let list_truncated = properties["list_truncated"]["description"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(truncated.contains("completely acquired source"));
+    assert!(truncated.contains("list_truncated=true"));
+    assert!(next_offset.contains("null"));
+    assert!(next_offset.contains("list_truncated=true"));
+    assert!(list_truncated.contains("source acquisition"));
+    assert!(list_truncated.contains("narrow path"));
 }
 
 #[test]
@@ -250,7 +606,7 @@ fn observe_jobs_failure_item_schema_closes_recovery_metadata() {
                 "output": null,
                 "error_kind": "unknown_job",
                 "recovery_kind": "reobserve",
-                "recovery_tool": "list_jobs",
+                "suggested_call": {"tool": "list_jobs", "arguments": {}},
                 "error": "unknown job"
             }],
             "wait": {
@@ -270,163 +626,78 @@ fn observe_jobs_failure_item_schema_closes_recovery_metadata() {
     invalid_kind["output"]["items"][0]["recovery_kind"] = json!("blind_retry");
     assert!(validate(&invalid_kind).is_err());
 
-    let mut invalid_tool = result;
-    invalid_tool["output"]["items"][0]["recovery_tool"] = json!("computer_list_windows");
+    let mut invalid_tool = result.clone();
+    invalid_tool["output"]["items"][0]["suggested_call"]["tool"] = json!("computer_list_windows");
     assert!(validate(&invalid_tool).is_err());
+
+    let mut inferred_scope = result.clone();
+    inferred_scope["output"]["items"][0]["suggested_call"]["arguments"] =
+        json!({"project": "agent:should-not-be-inferred:demo"});
+    assert!(validate(&inferred_scope).is_err());
+
+    let mut duplicate_alias = result;
+    duplicate_alias["output"]["items"][0]["recovery_tool"] = json!("list_jobs");
+    assert!(validate(&duplicate_alias).is_err());
 }
 
 #[test]
-fn read_continuation_output_schemas_accept_actionable_recovery_shapes() {
-    let read_file = output_schema_for_tool("read_file");
-    test_support::validate_schema_instance(
-        &json!({
-            "success": true,
-            "output": {
-                "text": "two",
-                "format": "plain",
-                "path": "src/lib.rs",
-                "sha256": "a".repeat(64),
-                "start_line": 2,
-                "limit": 1,
-                "total_lines": 3,
-                "returned_lines": 1,
-                "end_line": 2,
-                "has_more": true,
-                "next_start_line": 3,
-                "continuation": {
-                    "kind": "read_range",
-                    "safe_cursor": true,
-                    "source_sha256": "a".repeat(64),
-                    "snapshot_stable": false,
-                    "suggested_call": {
-                        "tool": "read_file",
-                        "arguments": {
-                            "project": "agent:oe:demo",
-                            "path": "src/lib.rs",
-                            "session_id": "wc_sess_demo",
-                            "start_line": 3,
-                            "limit": 1
-                        }
-                    }
-                }
-            },
-            "error": null
-        }),
-        &read_file,
-    )
-    .unwrap();
-
-    let read_files = output_schema_for_tool("read_files");
-    test_support::validate_schema_instance(
-        &json!({
-            "success": true,
-            "output": {
-                "project": "agent:oe:demo",
-                "requested_count": 3,
-                "returned_count": 1,
-                "succeeded_count": 1,
-                "failed_count": 0,
-                "items": [{
-                    "index": 0,
-                    "path": "src/0.rs",
-                    "success": true,
-                    "output": {
-                        "text": "first",
-                        "format": "plain",
-                        "path": "src/0.rs",
-                        "sha256": "b".repeat(64),
-                        "start_line": 1,
-                        "limit": 100,
-                        "total_lines": 200,
-                        "returned_lines": 50,
-                        "end_line": 50,
-                        "has_more": true,
-                        "next_start_line": 51,
-                        "budget_truncated": true,
-                        "budget_next_limit": 50
-                    },
-                    "error": null,
-                    "continuation": {
-                        "kind": "read_range",
-                        "safe_cursor": true,
-                        "source_sha256": "b".repeat(64),
-                        "snapshot_stable": false,
-                        "suggested_call": {
-                            "tool": "read_file",
-                            "arguments": {
-                                "project": "agent:oe:demo",
-                                "path": "src/0.rs",
-                                "start_line": 51,
-                                "limit": 50
-                            }
-                        }
-                    }
-                }],
-                "output_truncated": true,
-                "next_index": 0,
-                "truncation_reason": "batch_response_budget",
-                "continuation": {
-                    "kind": "batch_items",
-                    "safe_cursor": true,
-                    "next_index": 1,
-                    "recommended_order": "after_partial_item",
-                    "suggested_call": {
-                        "tool": "read_files",
-                        "arguments": {
-                            "project": "agent:oe:demo",
-                            "session_id": "wc_sess_demo",
-                            "items": [
-                                {"path": "src/1.rs"},
-                                {"path": "src/2.rs", "start_line": 4, "limit": 20}
-                            ]
-                        }
-                    }
-                }
-            },
-            "error": null
-        }),
-        &read_files,
-    )
-    .unwrap();
-
-    test_support::validate_schema_instance(
-        &json!({
-            "success": true,
-            "output": {
-                "project": "agent:oe:demo",
-                "requested_count": 1,
-                "returned_count": 0,
-                "succeeded_count": 0,
-                "failed_count": 0,
-                "items": [],
-                "output_truncated": true,
-                "next_index": 0,
-                "truncation_reason": "batch_response_budget",
-                "continuation": {
-                    "kind": "increase_result_budget",
-                    "safe_cursor": false,
-                    "next_index": 0,
-                    "suggested_max_result_bytes": 262144,
-                    "suggested_call": {
-                        "tool": "read_files",
-                        "arguments": {
-                            "project": "agent:oe:demo",
-                            "items": [{"path": "src/0.rs"}],
-                            "max_result_bytes": 262144
-                        }
-                    }
-                }
-            },
-            "error": null
-        }),
-        &read_files,
-    )
-    .unwrap();
+fn read_continuation_output_schemas_accept_one_action_and_snapshot_truth() {
+    let schema = output_schema_for_tool("read_files");
+    let mut result = json!({"success": true, "output": {
+        "project": "agent:oe:demo", "requested_count": 3, "returned_count": 1,
+        "succeeded_count": 1, "failed_count": 0,
+        "items": [{"index": 0, "path": "src/0.rs", "success": true, "error": null,
+            "output": {"text": "first", "format": "plain", "path": "src/0.rs",
+                "read_revision": 3817291045227_u64, "start_line": 1, "limit": 100, "total_lines": 200,
+                "returned_lines": 50, "end_line": 50, "has_more": true, "budget_truncated": true}}],
+        "output_truncated": true, "truncation_reason": "batch_response_budget",
+        "suggested_call": {"tool": "read_files", "arguments": {"project": "agent:oe:demo", "session_id": "wc_sess_demo",
+            "items": [{"path": "src/0.rs", "start_line": 51, "limit": 50, "expected_read_revision": 3817291045227_u64}, {"path": "src/1.rs"}, {"path": "src/2.rs", "start_line": 4, "limit": 20}]}}
+    }});
+    test_support::validate_schema_instance(&result, &schema).unwrap();
+    let mut invalid_fence = result.clone();
+    invalid_fence["output"]["suggested_call"]["arguments"]["items"][0]["expected_read_revision"] =
+        json!(0);
+    assert!(test_support::validate_schema_instance(&invalid_fence, &schema).is_err());
+    let mut digest_leak = result.clone();
+    digest_leak["output"]["items"][0]["output"]["sha256"] = json!("b".repeat(64));
+    assert!(test_support::validate_schema_instance(&digest_leak, &schema).is_err());
+    for field in [
+        "continuation",
+        "next_index",
+        "recommended_order",
+        "safe_cursor",
+        "continuation_semantics",
+    ] {
+        let mut duplicate = result.clone();
+        duplicate["output"][field] = Value::Null;
+        assert!(test_support::validate_schema_instance(&duplicate, &schema).is_err());
+    }
+    let mut duplicate = result.clone();
+    duplicate["output"]["items"][0]["continuation"] = result["output"]["suggested_call"].clone();
+    assert!(test_support::validate_schema_instance(&duplicate, &schema).is_err());
+    let mut missing_snapshot = result.clone();
+    missing_snapshot["output"]["items"][0]["output"]
+        .as_object_mut()
+        .unwrap()
+        .remove("read_revision");
+    assert!(test_support::validate_schema_instance(&missing_snapshot, &schema).is_err());
+    result["output"]["items"] = json!([]);
+    result["output"]["returned_count"] = json!(0);
+    result["output"]["succeeded_count"] = json!(0);
+    result["output"]["suggested_call"]["arguments"]["max_result_bytes"] = json!(524288);
+    test_support::validate_schema_instance(&result, &schema).unwrap();
+    result["output"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suggested_call");
+    result["output"]["truncation_reason"] = json!("hard_result_cap");
+    test_support::validate_schema_instance(&result, &schema).unwrap();
 }
 
 #[test]
 fn read_recovery_schemas_keep_transport_and_recorder_identifiers_private() {
-    for tool in ["read_file", "read_files"] {
+    for tool in ["read_files"] {
         let schema = output_schema_for_tool(tool);
         let serialized = serde_json::to_string(&schema).unwrap();
         for forbidden in ["window_id", "client_window", "recording_session_id"] {
@@ -521,12 +792,14 @@ fn key_tool_output_schemas_include_expected_fields() {
         "executor",
         "execution_source",
         "execution_state",
+        "expectation_satisfied",
         "promoted_to_job",
         "terminal",
         "job_id",
         "job_status",
         "observation_token",
         "effective_timeout_secs",
+        "continuation",
         "sync_wait_secs",
         "async_handoff_available",
     ] {
@@ -695,6 +968,7 @@ fn key_tool_output_schemas_include_expected_fields() {
         "job_status",
         "observation_token",
         "effective_timeout_secs",
+        "continuation",
         "sync_wait_secs",
         "async_handoff_available",
     ] {
@@ -705,7 +979,7 @@ fn key_tool_output_schemas_include_expected_fields() {
     }
     assert_eq!(
         output_schema_property(&specs, "run_script", "language")["enum"],
-        serde_json::json!(["sh", "bash", "powershell"])
+        serde_json::json!(["sh", "bash", "powershell", "javascript", "typescript"])
     );
     assert_eq!(
         output_schema_property(&specs, "run_script", "execution_source")["const"],
@@ -860,6 +1134,23 @@ fn key_tool_output_schemas_include_expected_fields() {
                     Some("completed"),
                 ),
             ),
+            ("handoff without its observation token", {
+                let mut instance = structured_execution_output(
+                    execution_source,
+                    "running",
+                    true,
+                    false,
+                    true,
+                    false,
+                    Some("job-1"),
+                    Some("running"),
+                );
+                instance["output"]["continuation"]["arguments"]["items"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("after_observation_token");
+                instance
+            }),
             (
                 "not_started execution with command_started=true",
                 structured_execution_output(
@@ -941,14 +1232,37 @@ fn key_tool_output_schemas_include_expected_fields() {
         );
     }
     for name in ["cargo_fmt", "cargo_check", "cargo_test", "go_test"] {
-        assert!(
-            has_output_field(name, "observation_token"),
-            "{name} missing promoted Job observation_token"
+        for redundant in [
+            "observation_token",
+            "continuation_semantics",
+            "execution_source",
+            "purpose",
+            "executor",
+            "shell",
+        ] {
+            assert!(
+                !has_output_field(name, redundant),
+                "{name} model projection must not expose {redundant}"
+            );
+        }
+        let continuation = output_schema_property(&specs, name, "continuation");
+        assert_eq!(continuation["properties"]["tool"]["const"], "observe_jobs");
+        assert_eq!(
+            continuation["properties"]["arguments"]["properties"]["wait_secs"]["maximum"],
+            webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS
         );
         assert_eq!(
-            output_schema_property(&specs, name, "observation_token")["maxLength"],
-            webcodex_core::job_observation::MAX_JOB_OBSERVATION_TOKEN_LEN
+            continuation["properties"]["arguments"]["properties"]["wait_secs"]["const"],
+            webcodex_core::runtime_contract::MAX_JOB_OBSERVATION_WAIT_SECS
         );
+        assert_eq!(
+            continuation["properties"]["arguments"]["properties"]["wake_on"]["const"],
+            "terminal"
+        );
+        assert!(continuation["properties"]["arguments"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("wake_on")));
         assert!(
             has_output_field(name, "failure_kind"),
             "{name} missing failure_kind"
@@ -1060,52 +1374,6 @@ fn key_tool_output_schemas_include_expected_fields() {
             "cargo_test diagnostics.test_summary missing {field}"
         );
     }
-    for field in [
-        "text",
-        "format",
-        "start_line",
-        "limit",
-        "total_lines",
-        "returned_lines",
-        "end_line",
-        "has_more",
-        "next_start_line",
-        "sha256",
-        "continuation",
-    ] {
-        assert!(
-            has_output_field("read_file", field),
-            "read_file missing {field}"
-        );
-    }
-    for removed in ["content", "numbered_text"] {
-        assert!(
-            !has_output_field("read_file", removed),
-            "read_file must not duplicate its primary text as {removed}"
-        );
-    }
-    for field in [
-        "backend",
-        "result_mode",
-        "effective_timeout_secs",
-        "matches",
-        "count",
-        "files",
-        "returned_file_count",
-        "returned_match_count",
-        "count_complete",
-        "total_matches",
-        "truncated",
-        "truncation_reason",
-        "continuation",
-        "context_before",
-        "context_after",
-    ] {
-        assert!(
-            has_output_field("search_project_text", field),
-            "search_project_text missing {field}"
-        );
-    }
     for field in ["project", "path", "entries", "truncated"] {
         assert!(
             has_output_field("list_project_files", field),
@@ -1152,6 +1420,7 @@ fn key_tool_output_schemas_include_expected_fields() {
         "project",
         "ssh_resource",
         "last_update_seq",
+        "continuation",
     ] {
         assert!(
             has_output_field("run_job", field),
@@ -1177,67 +1446,6 @@ fn key_tool_output_schemas_include_expected_fields() {
         assert!(
             has_output_field("stop_job", field),
             "stop_job missing {field}"
-        );
-    }
-    for field in [
-        "job_id",
-        "project",
-        "session_id",
-        "ssh_resource",
-        "status",
-        "exit_code",
-        "started_at",
-        "ended_at",
-        "error",
-        "command_execution_state",
-        "structured_execution",
-        "command_preview_included",
-        "active",
-        "blocking_active",
-        "terminal",
-        "terminal_pending",
-        "command_preview",
-        "command_preview_truncated",
-        "command_preview_max_chars",
-        "command_preview_bounded",
-    ] {
-        assert!(
-            has_output_field("job_status", field),
-            "job_status missing {field}"
-        );
-    }
-    for field in [
-        "job_id",
-        "session_id",
-        "ssh_resource",
-        "exit_code",
-        "command_execution_state",
-        "structured_execution",
-        "stdout_tail",
-        "stderr_tail",
-        "stdout_lines",
-        "stderr_lines",
-        "stdout_truncated",
-        "stderr_truncated",
-        "log_delta_status",
-        "stdout_delta_reset",
-        "stderr_delta_reset",
-        "cursor",
-        "status",
-        "executor",
-        "cwd",
-        "shell",
-        "purpose",
-        "command_summary",
-        "detected_summary",
-        "wait_outcome",
-        "waited_ms",
-        "changed",
-        "terminal",
-    ] {
-        assert!(
-            has_output_field("job_log", field),
-            "job_log missing {field}"
         );
     }
     for field in ["jobs", "count", "truncated"] {
@@ -1284,66 +1492,6 @@ fn key_tool_output_schemas_include_expected_fields() {
             "list_jobs summary schema must not expose {forbidden} bodies"
         );
     }
-    for field in [
-        "job_id",
-        "session_id",
-        "ssh_resource",
-        "exit_code",
-        "command_execution_state",
-        "structured_execution",
-        "stdout_tail",
-        "stderr_tail",
-        "stdout_lines",
-        "stderr_lines",
-        "stdout_truncated",
-        "stderr_truncated",
-        "log_delta_status",
-        "stdout_delta_reset",
-        "stderr_delta_reset",
-        "cursor",
-        "status",
-        "executor",
-        "cwd",
-        "shell",
-        "purpose",
-        "command_summary",
-        "detected_summary",
-        "wait_outcome",
-        "waited_ms",
-        "changed",
-        "terminal",
-    ] {
-        assert!(
-            has_output_field("job_log", field),
-            "job_log missing {field}"
-        );
-    }
-    for field in ["stdout_tail", "stderr_tail"] {
-        let description = output_schema_property(&specs, "job_log", field)["description"]
-            .as_str()
-            .expect("job_log stream description")
-            .to_lowercase();
-        assert!(
-            description.contains("bounded"),
-            "job_log {field} description must describe bounded tail text: {description}"
-        );
-    }
-    assert_eq!(
-        output_schema_property(&specs, "job_log", "log_delta_status")["enum"],
-        serde_json::json!(["baseline", "delta", "unchanged", "reset"])
-    );
-    assert_eq!(
-        output_schema_property(&specs, "job_log", "observation_token")["maxLength"],
-        webcodex_core::job_observation::MAX_JOB_OBSERVATION_TOKEN_LEN
-    );
-    let cursor_description = output_schema_property(&specs, "job_log", "cursor")["description"]
-        .as_str()
-        .expect("job_log cursor description")
-        .to_lowercase();
-    assert!(
-        cursor_description.contains("cursor") && cursor_description.contains("bounded"),
-        "job_log cursor must describe bounded continuation metadata: {cursor_description}"
-    );
     for field in [
         "path",
         "exists",
@@ -1670,9 +1818,7 @@ fn write_project_file_output_schema_include_metadata_fields() {
         "execution_state",
         "error_kind",
         "failure_kind",
-        "recovery_action",
-        "retry_guidance",
-        "error",
+        "recovery",
     ] {
         assert!(
             output_schema_properties(&specs, "write_project_file").contains_key(field),
@@ -1680,6 +1826,19 @@ fn write_project_file_output_schema_include_metadata_fields() {
         );
     }
     assert!(!output_schema_properties(&specs, "write_project_file").contains_key("warning"));
+    for removed in [
+        "recovery_action",
+        "retry_guidance",
+        "expected_read_revision",
+        "reread_required",
+        "suggested_call",
+        "error",
+    ] {
+        assert!(
+            !output_schema_properties(&specs, "write_project_file").contains_key(removed),
+            "write_project_file still exposes {removed}"
+        );
+    }
     assert_eq!(
         output_schema_property(&specs, "write_project_file", "bytes_written")["type"],
         "integer"
@@ -1741,13 +1900,157 @@ fn cleanup_and_compatibility_write_output_schemas_do_not_advertise_broad_exfiltr
     }
 }
 
+#[test]
+fn computer_recovery_output_schemas_use_canonical_action_shapes() {
+    let specs = registered_tool_specs();
+    for spec in specs
+        .iter()
+        .filter(|spec| spec.name.starts_with("computer_"))
+    {
+        let props = spec.output_schema["properties"]["output"]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{} output properties", spec.name));
+        assert!(
+            !props.contains_key("recovery_tool"),
+            "{} still declares legacy recovery_tool",
+            spec.name
+        );
+        assert!(
+            props.contains_key("suggested_call"),
+            "{} suggested_call",
+            spec.name
+        );
+        assert!(
+            props.contains_key("reconcile_with"),
+            "{} reconcile_with",
+            spec.name
+        );
+    }
+
+    let suggested = output_schema_property(&specs, "computer_launch_application", "suggested_call");
+    let variants = suggested["oneOf"]
+        .as_array()
+        .expect("Computer suggested_call oneOf");
+    for (tool, required) in [
+        ("computer_list_windows", vec!["client_id"]),
+        ("computer_list_applications", vec!["client_id"]),
+        ("computer_list_displays", vec!["client_id"]),
+        ("computer_snapshot_display", vec!["client_id", "display_id"]),
+        ("read_project_artifact_metadata", vec!["project", "path"]),
+    ] {
+        let variant = variants
+            .iter()
+            .find(|variant| variant["properties"]["tool"]["const"] == tool)
+            .unwrap_or_else(|| panic!("missing Computer recovery target {tool}"));
+        assert_eq!(
+            variant["properties"]["arguments"]["required"],
+            serde_json::json!(required)
+        );
+        assert_eq!(
+            variant["properties"]["arguments"]["additionalProperties"],
+            false
+        );
+    }
+
+    let schema = output_schema_for_tool("computer_list_windows");
+    let canonical_recovery = json!({
+        "success": false,
+        "output": {
+            "recovery_kind": "reobserve",
+            "suggested_call": {
+                "tool": "computer_list_windows",
+                "arguments": {"client_id": "special"}
+            }
+        },
+        "error": "reobserve"
+    });
+    test_support::validate_schema_instance(&canonical_recovery, &schema).unwrap();
+
+    let mut legacy = canonical_recovery.clone();
+    legacy["output"]["recovery_tool"] = json!("computer_list_windows");
+    assert!(test_support::validate_schema_instance(&legacy, &schema).is_err());
+
+    let mut duplicate_recovery_shape = canonical_recovery;
+    duplicate_recovery_shape["output"]["reconcile_with"] = json!("computer_list_windows");
+    assert!(test_support::validate_schema_instance(&duplicate_recovery_shape, &schema).is_err());
+}
+
+#[test]
+fn skill_recovery_output_schema_accepts_canonical_shapes_and_declares_legacy_rejection() {
+    let schema = output_schema_for_tool("skill_install");
+    let actionable = json!({
+        "success": false,
+        "output": {
+            "error_kind": "skill_store_outcome_unknown",
+            "project": "agent:test:demo",
+            "skill_key": "demo",
+            "outcome_unknown": true,
+            "state_changed": null,
+            "recovery_kind": "reconcile",
+            "suggested_call": {
+                "tool": "skill_versions",
+                "arguments": {
+                    "project": "agent:test:demo",
+                    "skill_key": "demo"
+                }
+            },
+            "retry_same_idempotency_key": true
+        },
+        "error": "skill_store_outcome_unknown"
+    });
+    test_support::validate_schema_instance(&actionable, &schema).unwrap();
+
+    let mut family_only = actionable.clone();
+    family_only["output"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suggested_call");
+    family_only["output"]["reconcile_with"] = json!("skill_versions");
+    test_support::validate_schema_instance(&family_only, &schema).unwrap();
+
+    let mut legacy = actionable.clone();
+    legacy["output"]["recovery_tool"] = json!("skill_versions");
+    assert!(test_support::validate_schema_instance(&legacy, &schema).is_err());
+
+    let mut duplicate_recovery_shape = actionable.clone();
+    duplicate_recovery_shape["output"]["reconcile_with"] = json!("skill_versions");
+    assert!(test_support::validate_schema_instance(&duplicate_recovery_shape, &schema).is_err());
+
+    let recovery_constraints = schema["properties"]["output"]["allOf"]
+        .as_array()
+        .expect("Skill recovery constraints");
+    assert!(recovery_constraints
+        .iter()
+        .any(|constraint| constraint["not"]["required"] == json!(["recovery_tool"])));
+    assert!(recovery_constraints.iter().any(|constraint| {
+        constraint["if"]["required"] == json!(["suggested_call"])
+            && constraint["then"]["not"]["required"] == json!(["reconcile_with"])
+    }));
+    assert!(recovery_constraints.iter().any(|constraint| {
+        constraint["if"]["required"] == json!(["reconcile_with"])
+            && constraint["then"]["not"]["required"] == json!(["suggested_call"])
+    }));
+
+    let mut guessed_extra = actionable;
+    guessed_extra["output"]["suggested_call"]["arguments"]["package_revision"] =
+        json!("wc_skillpkg_deadbeef");
+    assert!(test_support::validate_schema_instance(&guessed_extra, &schema).is_err());
+}
+
 fn default_output_schema_field_names() -> BTreeSet<&'static str> {
-    BTreeSet::from([
-        "session_hint",
-        "permission",
-        "recovery_kind",
-        "recovery_tool",
-    ])
+    BTreeSet::from(["session_hint", "permission", "recovery_kind"])
+}
+
+#[test]
+fn model_facing_output_schemas_do_not_publish_retired_recovery_tool() {
+    for spec in registered_tool_specs() {
+        let serialized = serde_json::to_string(&spec.output_schema).unwrap();
+        assert!(
+            !serialized.contains("\"recovery_tool\":"),
+            "{} still declares a retired recovery_tool property",
+            spec.name
+        );
+    }
 }
 
 #[test]
@@ -1765,7 +2068,6 @@ fn model_facing_output_schemas_do_not_publish_recorder_only_telemetry() {
     }
 
     for tool in [
-        "read_file",
         "read_files",
         "search_project_texts",
         "apply_patch",
@@ -1862,6 +2164,43 @@ fn validation_summary_schema_exposes_optional_recoverable_assertion_label_only()
     let event = &schema["properties"]["output"]["properties"]["validation"]["properties"]["events"]
         ["items"];
     let properties = event["properties"].as_object().unwrap();
+    let expected_purposes = webcodex_core::workflow_session_contract::EXECUTION_PURPOSE_VALUES
+        .iter()
+        .copied()
+        .filter(|purpose| {
+            webcodex_core::workflow_session_contract::is_validation_like_execution_purpose(purpose)
+        })
+        .map(Value::from)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        properties["purpose"]["enum"],
+        Value::Array(expected_purposes),
+        "validation summary purpose vocabulary must derive from canonical ExecutionPurpose classification"
+    );
+    assert!(properties.contains_key("tests_passed"));
+    assert!(properties.contains_key("tests_failed"));
+    let representative_test_event = json!({
+        "tool_name": "cargo_test",
+        "identity": "structured:demo",
+        "purpose": "test",
+        "validation_kind": "test",
+        "success": true,
+        "validation_passed": true,
+        "failure_class": "none",
+        "failure_kind": "unknown",
+        "unresolved_failure": false,
+        "cwd": ".",
+        "shell": "configured",
+        "execution_state": "completed",
+        "tests_detected": true,
+        "tests_run_count": 3,
+        "tests_passed": 3,
+        "tests_failed": 0,
+        "zero_tests_run": false,
+        "stdout_truncated": false,
+        "stderr_truncated": false
+    });
+    test_support::validate_schema_instance(&representative_test_event, event).unwrap();
     let assertion = &properties["assertion_name"];
     assert_eq!(assertion["type"], "string");
     assert_eq!(assertion["minLength"], 1);
@@ -1871,7 +2210,15 @@ fn validation_summary_schema_exposes_optional_recoverable_assertion_label_only()
     );
     let required = event["required"].as_array().unwrap();
     assert!(!required.iter().any(|field| field == "assertion_name"));
-    for hidden in ["expected_failure", "expected_failure_kind"] {
+    for hidden in [
+        "expected_failure",
+        "expected_failure_kind",
+        "execution_success",
+        "failure_category",
+        "execution_source",
+        "summary",
+        "session_id",
+    ] {
         assert!(
             !properties.contains_key(hidden),
             "validation event schema must not expose internal expectation field {hidden}"
@@ -2173,4 +2520,40 @@ fn assert_outcome_model_schema_fields(output_props: &serde_json::Map<String, Val
         json!(["clean", "warning", "error"])
     );
     assert_eq!(output_props["informational_notes"]["type"], "array");
+}
+
+#[test]
+fn agent_wait_model_schema_separates_matches_from_durable_bookkeeping() {
+    let specs = registered_tool_specs();
+    let wait_id = format!("wc_agent_wait_{}", "1".repeat(32));
+    let matched = serde_json::json!({
+        "task_id": format!("wc_agent_task_{}", "2".repeat(32)),
+        "task_attempt_id": format!("wc_agent_task_attempt_{}", "3".repeat(32)),
+        "terminal_task_state": "succeeded"
+    });
+    for tool in [
+        "wait_for_agent_events",
+        "read_agent_wait",
+        "cancel_agent_wait",
+    ] {
+        let schema = &spec_named(&specs, tool).output_schema["properties"]["output"]["properties"]
+            ["agent_wait"];
+        for state in ["waiting", "triggered", "resumed", "cancelled"] {
+            let mut wait = serde_json::json!({"wait_id": wait_id, "state": state});
+            if matches!(state, "triggered" | "resumed") {
+                wait["matches"] = serde_json::json!([matched]);
+            }
+            test_support::validate_schema_instance(&wait, schema).unwrap();
+            let mut duplicate = wait.clone();
+            duplicate["match_count"] = serde_json::json!(1);
+            assert!(test_support::validate_schema_instance(&duplicate, schema).is_err());
+            if matches!(state, "triggered" | "resumed") {
+                let mut missing = wait.clone();
+                missing.as_object_mut().unwrap().remove("matches");
+                assert!(test_support::validate_schema_instance(&missing, schema).is_err());
+                wait["matches"][0]["sequence"] = serde_json::json!(1);
+                assert!(test_support::validate_schema_instance(&wait, schema).is_err());
+            }
+        }
+    }
 }

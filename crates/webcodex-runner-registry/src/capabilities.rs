@@ -15,6 +15,7 @@ pub enum RunnerFeature {
     ArtifactExportStreamingMetadata,
     StructuredFileDelete,
     ApplyTextEditOccurrence,
+    ApplyTextEditLocalGuardWithoutSha,
     ApplyTextEditLineScope,
     ApplyPatch,
     ApplyPatchMatchMetadata,
@@ -30,11 +31,14 @@ pub enum RunnerFeature {
     StructuredValidationArgv,
     StructuredCargoTestCountAssertion,
     StructuredCargoTestExecutionPolicy,
+    StructuredCargoTestLib,
     StructuredGoTestJson,
     StructuredGoTestTool,
     StructuredGoTestPackages,
     StructuredProcessArgv,
     StructuredScriptPayload,
+    StructuredScriptJavascript,
+    StructuredScriptTypescript,
     InternalPosixScript,
     StructuredExecutionJobs,
     DetachedProcessJobs,
@@ -43,8 +47,8 @@ pub enum RunnerFeature {
     ProjectLifecycle,
     ProjectPathRegistration,
     ManagedWorktree,
-    SkillStoreRead,
-    SkillStoreManage,
+    SkillRuntime,
+    SkillManagement,
     ComputerObserve,
     ComputerApplicationDiscovery,
     ComputerApplicationLaunch,
@@ -67,7 +71,7 @@ pub enum RunnerFeature {
     ComputerTextInput,
 }
 
-const ALL_RUNNER_FEATURES: [RunnerFeature; 57] = [
+const ALL_RUNNER_FEATURES: &[RunnerFeature] = &[
     RunnerFeature::Shell,
     RunnerFeature::FileRead,
     RunnerFeature::FileWrite,
@@ -75,6 +79,7 @@ const ALL_RUNNER_FEATURES: [RunnerFeature; 57] = [
     RunnerFeature::ArtifactExportStreamingMetadata,
     RunnerFeature::StructuredFileDelete,
     RunnerFeature::ApplyTextEditOccurrence,
+    RunnerFeature::ApplyTextEditLocalGuardWithoutSha,
     RunnerFeature::ApplyTextEditLineScope,
     RunnerFeature::ApplyPatch,
     RunnerFeature::ApplyPatchMatchMetadata,
@@ -90,11 +95,14 @@ const ALL_RUNNER_FEATURES: [RunnerFeature; 57] = [
     RunnerFeature::StructuredValidationArgv,
     RunnerFeature::StructuredCargoTestCountAssertion,
     RunnerFeature::StructuredCargoTestExecutionPolicy,
+    RunnerFeature::StructuredCargoTestLib,
     RunnerFeature::StructuredGoTestJson,
     RunnerFeature::StructuredGoTestTool,
     RunnerFeature::StructuredGoTestPackages,
     RunnerFeature::StructuredProcessArgv,
     RunnerFeature::StructuredScriptPayload,
+    RunnerFeature::StructuredScriptJavascript,
+    RunnerFeature::StructuredScriptTypescript,
     RunnerFeature::InternalPosixScript,
     RunnerFeature::StructuredExecutionJobs,
     RunnerFeature::DetachedProcessJobs,
@@ -103,8 +111,8 @@ const ALL_RUNNER_FEATURES: [RunnerFeature; 57] = [
     RunnerFeature::ProjectLifecycle,
     RunnerFeature::ProjectPathRegistration,
     RunnerFeature::ManagedWorktree,
-    RunnerFeature::SkillStoreRead,
-    RunnerFeature::SkillStoreManage,
+    RunnerFeature::SkillRuntime,
+    RunnerFeature::SkillManagement,
     RunnerFeature::ComputerObserve,
     RunnerFeature::ComputerApplicationDiscovery,
     RunnerFeature::ComputerApplicationLaunch,
@@ -141,7 +149,7 @@ pub(crate) enum RunnerFeatureInference {
 
 impl RunnerFeature {
     pub(crate) const fn all() -> &'static [Self] {
-        &ALL_RUNNER_FEATURES
+        ALL_RUNNER_FEATURES
     }
 
     pub const fn as_wire_name(self) -> &'static str {
@@ -155,6 +163,9 @@ impl RunnerFeature {
             }
             Self::StructuredFileDelete => wire::RUNNER_CAPABILITY_STRUCTURED_FILE_DELETE,
             Self::ApplyTextEditOccurrence => wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_OCCURRENCE,
+            Self::ApplyTextEditLocalGuardWithoutSha => {
+                wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LOCAL_GUARD_WITHOUT_SHA
+            }
             Self::ApplyTextEditLineScope => wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LINE_SCOPE,
             Self::ApplyPatch => wire::RUNNER_CAPABILITY_APPLY_PATCH,
             Self::ApplyPatchMatchMetadata => wire::RUNNER_CAPABILITY_APPLY_PATCH_MATCH_METADATA,
@@ -174,11 +185,18 @@ impl RunnerFeature {
             Self::StructuredCargoTestExecutionPolicy => {
                 wire::RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_EXECUTION_POLICY
             }
+            Self::StructuredCargoTestLib => wire::RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_LIB,
             Self::StructuredGoTestJson => wire::RUNNER_CAPABILITY_STRUCTURED_GO_TEST_JSON,
             Self::StructuredGoTestTool => wire::RUNNER_CAPABILITY_STRUCTURED_GO_TEST_TOOL,
             Self::StructuredGoTestPackages => wire::RUNNER_CAPABILITY_STRUCTURED_GO_TEST_PACKAGES,
             Self::StructuredProcessArgv => wire::RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV,
             Self::StructuredScriptPayload => wire::RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD,
+            Self::StructuredScriptJavascript => {
+                wire::RUNNER_CAPABILITY_STRUCTURED_SCRIPT_JAVASCRIPT
+            }
+            Self::StructuredScriptTypescript => {
+                wire::RUNNER_CAPABILITY_STRUCTURED_SCRIPT_TYPESCRIPT
+            }
             Self::InternalPosixScript => wire::RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT,
             Self::StructuredExecutionJobs => wire::RUNNER_CAPABILITY_STRUCTURED_EXECUTION_JOBS,
             Self::DetachedProcessJobs => wire::RUNNER_CAPABILITY_DETACHED_PROCESS_JOBS,
@@ -187,8 +205,8 @@ impl RunnerFeature {
             Self::ProjectLifecycle => wire::RUNNER_CAPABILITY_PROJECT_LIFECYCLE,
             Self::ProjectPathRegistration => wire::RUNNER_CAPABILITY_PROJECT_PATH_REGISTRATION,
             Self::ManagedWorktree => wire::RUNNER_CAPABILITY_MANAGED_WORKTREE,
-            Self::SkillStoreRead => wire::RUNNER_CAPABILITY_SKILL_STORE_READ,
-            Self::SkillStoreManage => wire::RUNNER_CAPABILITY_SKILL_STORE_MANAGE,
+            Self::SkillRuntime => wire::RUNNER_CAPABILITY_SKILL_RUNTIME,
+            Self::SkillManagement => wire::RUNNER_CAPABILITY_SKILL_MANAGEMENT,
             Self::ComputerObserve => wire::RUNNER_CAPABILITY_COMPUTER_OBSERVE,
             Self::ComputerApplicationDiscovery => {
                 wire::RUNNER_CAPABILITY_COMPUTER_APPLICATION_DISCOVERY
@@ -227,6 +245,9 @@ impl RunnerFeature {
             }
             wire::RUNNER_CAPABILITY_STRUCTURED_FILE_DELETE => Self::StructuredFileDelete,
             wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_OCCURRENCE => Self::ApplyTextEditOccurrence,
+            wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LOCAL_GUARD_WITHOUT_SHA => {
+                Self::ApplyTextEditLocalGuardWithoutSha
+            }
             wire::RUNNER_CAPABILITY_APPLY_TEXT_EDIT_LINE_SCOPE => Self::ApplyTextEditLineScope,
             wire::RUNNER_CAPABILITY_APPLY_PATCH => Self::ApplyPatch,
             wire::RUNNER_CAPABILITY_APPLY_PATCH_MATCH_METADATA => Self::ApplyPatchMatchMetadata,
@@ -246,11 +267,18 @@ impl RunnerFeature {
             wire::RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_EXECUTION_POLICY => {
                 Self::StructuredCargoTestExecutionPolicy
             }
+            wire::RUNNER_CAPABILITY_STRUCTURED_CARGO_TEST_LIB => Self::StructuredCargoTestLib,
             wire::RUNNER_CAPABILITY_STRUCTURED_GO_TEST_JSON => Self::StructuredGoTestJson,
             wire::RUNNER_CAPABILITY_STRUCTURED_GO_TEST_TOOL => Self::StructuredGoTestTool,
             wire::RUNNER_CAPABILITY_STRUCTURED_GO_TEST_PACKAGES => Self::StructuredGoTestPackages,
             wire::RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV => Self::StructuredProcessArgv,
             wire::RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD => Self::StructuredScriptPayload,
+            wire::RUNNER_CAPABILITY_STRUCTURED_SCRIPT_JAVASCRIPT => {
+                Self::StructuredScriptJavascript
+            }
+            wire::RUNNER_CAPABILITY_STRUCTURED_SCRIPT_TYPESCRIPT => {
+                Self::StructuredScriptTypescript
+            }
             wire::RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT => Self::InternalPosixScript,
             wire::RUNNER_CAPABILITY_STRUCTURED_EXECUTION_JOBS => Self::StructuredExecutionJobs,
             wire::RUNNER_CAPABILITY_DETACHED_PROCESS_JOBS => Self::DetachedProcessJobs,
@@ -259,8 +287,8 @@ impl RunnerFeature {
             wire::RUNNER_CAPABILITY_PROJECT_LIFECYCLE => Self::ProjectLifecycle,
             wire::RUNNER_CAPABILITY_PROJECT_PATH_REGISTRATION => Self::ProjectPathRegistration,
             wire::RUNNER_CAPABILITY_MANAGED_WORKTREE => Self::ManagedWorktree,
-            wire::RUNNER_CAPABILITY_SKILL_STORE_READ => Self::SkillStoreRead,
-            wire::RUNNER_CAPABILITY_SKILL_STORE_MANAGE => Self::SkillStoreManage,
+            wire::RUNNER_CAPABILITY_SKILL_RUNTIME => Self::SkillRuntime,
+            wire::RUNNER_CAPABILITY_SKILL_MANAGEMENT => Self::SkillManagement,
             wire::RUNNER_CAPABILITY_COMPUTER_OBSERVE => Self::ComputerObserve,
             wire::RUNNER_CAPABILITY_COMPUTER_APPLICATION_DISCOVERY => {
                 Self::ComputerApplicationDiscovery
@@ -315,8 +343,12 @@ impl RunnerFeature {
             | Self::ProjectPathRegistration => RunnerFeatureInference::GenerationEligible,
             Self::Shell
             | Self::Git
+            | Self::StructuredScriptJavascript
+            | Self::StructuredScriptTypescript
             | Self::StructuredCargoTestExecutionPolicy
+            | Self::StructuredCargoTestLib
             | Self::ApplyTextEditLineScope
+            | Self::ApplyTextEditLocalGuardWithoutSha
             | Self::ApplyPatch
             | Self::ApplyPatchMatchMetadata
             | Self::ApplyPatchMatchingMode
@@ -326,8 +358,8 @@ impl RunnerFeature {
             | Self::SshPersistentShell
             | Self::DetachedProcessJobs
             | Self::ManagedWorktree
-            | Self::SkillStoreRead
-            | Self::SkillStoreManage
+            | Self::SkillRuntime
+            | Self::SkillManagement
             | Self::ComputerObserve
             | Self::ComputerApplicationDiscovery
             | Self::ComputerApplicationLaunch
@@ -362,6 +394,9 @@ impl RunnerFeature {
             }
             Self::StructuredFileDelete => capabilities.structured_file_delete,
             Self::ApplyTextEditOccurrence => capabilities.apply_text_edit_occurrence,
+            Self::ApplyTextEditLocalGuardWithoutSha => {
+                capabilities.apply_text_edit_local_guard_without_sha
+            }
             Self::ApplyTextEditLineScope => capabilities.apply_text_edit_line_scope,
             Self::ApplyPatch => capabilities.apply_patch,
             Self::ApplyPatchMatchMetadata => capabilities.apply_patch_match_metadata,
@@ -381,11 +416,14 @@ impl RunnerFeature {
             Self::StructuredCargoTestExecutionPolicy => {
                 capabilities.structured_cargo_test_execution_policy
             }
+            Self::StructuredCargoTestLib => capabilities.structured_cargo_test_lib,
             Self::StructuredGoTestJson => capabilities.structured_go_test_json,
             Self::StructuredGoTestTool => capabilities.structured_go_test_tool,
             Self::StructuredGoTestPackages => capabilities.structured_go_test_packages,
             Self::StructuredProcessArgv => capabilities.structured_process_argv,
             Self::StructuredScriptPayload => capabilities.structured_script_payload,
+            Self::StructuredScriptJavascript => capabilities.structured_script_javascript,
+            Self::StructuredScriptTypescript => capabilities.structured_script_typescript,
             Self::InternalPosixScript => capabilities.internal_posix_script,
             Self::StructuredExecutionJobs => capabilities.structured_execution_jobs,
             Self::DetachedProcessJobs => capabilities.detached_process_jobs,
@@ -394,8 +432,8 @@ impl RunnerFeature {
             Self::ProjectLifecycle => capabilities.project_lifecycle,
             Self::ProjectPathRegistration => capabilities.project_path_registration,
             Self::ManagedWorktree => capabilities.managed_worktree,
-            Self::SkillStoreRead => capabilities.skill_store_read,
-            Self::SkillStoreManage => capabilities.skill_store_manage,
+            Self::SkillRuntime => capabilities.skill_runtime,
+            Self::SkillManagement => capabilities.skill_management,
             Self::ComputerObserve => capabilities.computer_observe,
             Self::ComputerApplicationDiscovery => capabilities.computer_application_discovery,
             Self::ComputerApplicationLaunch => capabilities.computer_application_launch,

@@ -69,17 +69,17 @@ async fn assert_no_pending_shell_request(
 }
 
 #[test]
-fn resolve_sync_timeout_secs_rejects_out_of_range() {
+fn resolve_sync_timeout_secs_clamps_above_max_and_rejects_zero() {
     assert_eq!(
         resolve_sync_timeout_secs(None, DEFAULT_RUN_SHELL_TIMEOUT_SECS).unwrap(),
         DEFAULT_RUN_SHELL_TIMEOUT_SECS
     );
     assert_eq!(resolve_sync_timeout_secs(Some(1), 120).unwrap(), 1);
     assert_eq!(resolve_sync_timeout_secs(Some(120), 120).unwrap(), 120);
+    assert_eq!(resolve_sync_timeout_secs(Some(121), 120).unwrap(), 120);
+    assert_eq!(resolve_sync_timeout_secs(Some(300), 120).unwrap(), 120);
+    assert_eq!(resolve_sync_timeout_secs(Some(600), 60).unwrap(), 120);
     assert!(resolve_sync_timeout_secs(Some(0), 120).is_err());
-    assert!(resolve_sync_timeout_secs(Some(121), 120).is_err());
-    assert!(resolve_sync_timeout_secs(Some(300), 120).is_err());
-    assert!(resolve_sync_timeout_secs(Some(600), 60).is_err());
 }
 
 #[test]
@@ -148,7 +148,7 @@ async fn cargo_fmt_check_short_grace_hands_off_within_short_total_budget() {
 }
 
 #[tokio::test]
-async fn cargo_validation_tools_reject_timeout_outside_1_3600() {
+async fn cargo_validation_tools_reject_zero_timeout() {
     let runtime = runtime_with_agent_project("sync-timeout-cargo-range");
     let caps = RunnerCapabilities {
         shell: true,
@@ -157,14 +157,7 @@ async fn cargo_validation_tools_reject_timeout_outside_1_3600() {
     register_agent(&runtime, "sync-timeout-cargo-range", None, caps).await;
     let project = agent_test_project_id("sync-timeout-cargo-range");
 
-    for (tool_name, timeout) in [
-        ("cargo_check", 0u64),
-        ("cargo_test", 0),
-        ("cargo_fmt", 0),
-        ("cargo_check", 3601),
-        ("cargo_test", 3601),
-        ("cargo_fmt", 3601),
-    ] {
+    for (tool_name, timeout) in [("cargo_check", 0u64), ("cargo_test", 0), ("cargo_fmt", 0)] {
         let result = match tool_name {
             "cargo_check" => {
                 runtime
@@ -210,7 +203,7 @@ async fn cargo_validation_tools_reject_timeout_outside_1_3600() {
 }
 
 #[tokio::test]
-async fn structured_validation_sync_wait_rejects_invalid_or_over_budget_values_before_enqueue() {
+async fn structured_validation_sync_wait_rejects_zero_before_enqueue() {
     let client_id = "sync-wait-validation-range";
     let runtime = runtime_with_agent_project(client_id);
     register_agent(&runtime, client_id, None, RunnerCapabilities::default()).await;
@@ -219,17 +212,9 @@ async fn structured_validation_sync_wait_rejects_invalid_or_over_budget_values_b
 
     for (tool_name, sync_wait_secs, timeout_secs, extra) in [
         ("cargo_check", 0u64, 600u64, json!({})),
-        ("cargo_check", 61, 600, json!({})),
-        ("cargo_check", 31, 30, json!({})),
         ("cargo_test", 0, 600, json!({})),
-        ("cargo_test", 61, 600, json!({})),
-        ("cargo_test", 31, 30, json!({})),
         ("go_test", 0, 600, json!({})),
-        ("go_test", 61, 600, json!({})),
-        ("go_test", 31, 30, json!({})),
         ("cargo_fmt", 0, 600, json!({"check": true})),
-        ("cargo_fmt", 61, 600, json!({"check": true})),
-        ("cargo_fmt", 31, 30, json!({"check": true})),
     ] {
         let mut args = json!({
             "project": project,
@@ -246,9 +231,9 @@ async fn structured_validation_sync_wait_rejects_invalid_or_over_budget_values_b
         assert_no_pending_shell_request(&runtime, client_id).await;
     }
 
-    // The runtime keeps the same fail-closed bound even if an internal caller
-    // bypasses model-facing ToolCall parsing.
-    for (sync_wait_secs, timeout_secs) in [(0u64, 600u64), (61, 600), (31, 30)] {
+    // Zero remains invalid even if an internal caller bypasses model-facing
+    // ToolCall parsing.
+    for (sync_wait_secs, timeout_secs) in [(0u64, 600u64)] {
         let result = runtime
             .cargo_check_with_context(
                 project.clone(),
@@ -270,56 +255,36 @@ async fn structured_validation_sync_wait_rejects_invalid_or_over_budget_values_b
     }
 }
 
-#[tokio::test]
-async fn cargo_fmt_mutating_rejects_sync_wait_before_enqueue_or_job_creation() {
-    let client_id = "sync-wait-fmt-mutating";
-    let runtime = runtime_with_agent_project(client_id);
-    register_agent(&runtime, client_id, None, RunnerCapabilities::default()).await;
-    let project = agent_test_project_id(client_id);
-    let auth = auth_context(None, true);
-
+#[test]
+fn cargo_fmt_mutating_accepts_sync_wait_as_inert_compatibility_input() {
     for args in [
-        json!({"project": project, "check": false, "timeout_secs": 120, "sync_wait_secs": 1}),
-        json!({"project": project, "timeout_secs": 120, "sync_wait_secs": 1}),
+        json!({"project": "agent:demo:repo", "check": false, "timeout_secs": 120, "sync_wait_secs": 1}),
+        json!({"project": "agent:demo:repo", "timeout_secs": 120, "sync_wait_secs": 60}),
     ] {
-        let error = ToolCall::from_tool_name("cargo_fmt", args)
-            .expect_err("mutating cargo_fmt sync_wait_secs must fail in the typed parser");
-        assert!(error.contains("check=true"), "{error}");
-        assert_no_pending_shell_request(&runtime, client_id).await;
-        assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
+        ToolCall::from_tool_name("cargo_fmt", args)
+            .expect("ensure-format cargo_fmt should accept inert sync_wait_secs");
     }
 
-    // Runtime callers cannot background a mutating formatter even when they do
-    // not pass through the model-facing parser.
-    let result = runtime
-        .cargo_fmt_with_context(
-            project,
-            None,
-            Some(false),
-            Some(120),
-            Some(1),
-            None,
-            None,
-            Some(&auth),
-        )
-        .await;
-    assert_sync_wait_rejected(&result, "cargo_fmt");
-    assert_no_pending_shell_request(&runtime, client_id).await;
-    assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
+    for args in [
+        json!({"project": "agent:demo:repo", "check": false, "sync_wait_secs": 0}),
+        json!({"project": "agent:demo:repo", "sync_wait_secs": 0}),
+    ] {
+        let error = ToolCall::from_tool_name("cargo_fmt", args)
+            .expect_err("zero sync_wait_secs remains invalid in every cargo_fmt mode");
+        assert!(error.contains("sync_wait_secs"), "{error}");
+    }
 }
 
 #[tokio::test]
-async fn cargo_fmt_mutating_rejects_timeout_above_120_before_enqueue() {
+async fn cargo_fmt_mutating_rejects_zero_timeout_before_enqueue() {
     let client_id = "sync-timeout-fmt-mutating";
     let runtime = runtime_with_agent_project(client_id);
     register_agent(&runtime, client_id, None, RunnerCapabilities::default()).await;
     let project = agent_test_project_id(client_id);
 
-    // The successful 120-second synchronous lifecycle is owned by
-    // validation_handoff::cargo_fmt_mutating_never_auto_promotes.
     for check in [Some(false), None] {
         let rejected = runtime
-            .cargo_fmt(project.clone(), None, check, Some(121))
+            .cargo_fmt(project.clone(), None, check, Some(0))
             .await;
         assert_timeout_rejected(&rejected, "cargo_fmt");
         assert_no_pending_shell_request(&runtime, client_id).await;
@@ -327,7 +292,7 @@ async fn cargo_fmt_mutating_rejects_timeout_above_120_before_enqueue() {
 }
 
 #[tokio::test]
-async fn run_shell_rejects_timeout_above_120_before_enqueue() {
+async fn run_shell_rejects_zero_timeout_before_enqueue() {
     let runtime = runtime_with_agent_project("sync-timeout-shell");
     let caps = RunnerCapabilities {
         shell: true,
@@ -336,13 +301,11 @@ async fn run_shell_rejects_timeout_above_120_before_enqueue() {
     register_agent(&runtime, "sync-timeout-shell", None, caps).await;
     let project = agent_test_project_id("sync-timeout-shell");
 
-    for timeout in [121u64, 300] {
-        let result = runtime
-            .run_shell(project.clone(), "echo hi".to_string(), Some(timeout), None)
-            .await;
-        assert_timeout_rejected(&result, "run_shell");
-        assert_no_pending_shell_request(&runtime, "sync-timeout-shell").await;
-    }
+    let result = runtime
+        .run_shell(project, "echo hi".to_string(), Some(0), None)
+        .await;
+    assert_timeout_rejected(&result, "run_shell");
+    assert_no_pending_shell_request(&runtime, "sync-timeout-shell").await;
 }
 
 #[tokio::test]
@@ -373,6 +336,7 @@ async fn dispatched_shared_capture_wait_timeout_reports_outcome_unknown_without_
                         session_id: Some(session_id),
                         cwd: None,
                         filter: None,
+                        lib: None,
                         all_targets: None,
                         all_features: None,
                         no_default_features: None,
@@ -429,6 +393,8 @@ async fn dispatched_shared_capture_wait_timeout_reports_outcome_unknown_without_
             exit_code: Some(0),
             stdout: Some("late result".to_string()),
             stderr: Some(String::new()),
+            stdout_truncated: false,
+            stderr_truncated: false,
             duration_ms: Some(3_000),
             error: None,
         })

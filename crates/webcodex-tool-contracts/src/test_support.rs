@@ -26,6 +26,11 @@ fn validate_schema_instance_at(instance: &Value, schema: &Value, path: &str) -> 
             validate_schema_instance_at(instance, branch, path)?;
         }
     }
+    if let Some(negated) = schema.get("not") {
+        if validate_schema_instance_at(instance, negated, path).is_ok() {
+            return Err(format!("{path}: negated schema matched"));
+        }
+    }
     if let Some(variants) = schema.get("oneOf").and_then(Value::as_array) {
         let results = variants
             .iter()
@@ -169,6 +174,14 @@ fn validate_schema_instance_at(instance: &Value, schema: &Value, path: &str) -> 
         schema.get("pattern").and_then(Value::as_str),
     ) {
         let matches = match pattern {
+            "^wc_host_binding_[0-9a-f]{32}$" => {
+                value.strip_prefix("wc_host_binding_").is_some_and(|tail| {
+                    tail.len() == 32
+                        && tail
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            }
             "^wc_sess_[A-Za-z0-9_]+$" => value.strip_prefix("wc_sess_").is_some_and(|tail| {
                 !tail.is_empty()
                     && tail
@@ -196,4 +209,64 @@ fn validate_schema_instance_at(instance: &Value, schema: &Value, path: &str) -> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn schema_not_inverts_child_validation() {
+        let schema = json!({"not": {"required": ["forbidden"]}});
+        validate_schema_instance(&json!({}), &schema).unwrap();
+        assert!(validate_schema_instance(&json!({"forbidden": true}), &schema).is_err());
+    }
+
+    #[test]
+    fn schema_nested_then_not_rejects_the_forbidden_sibling_shape() {
+        let schema = json!({
+            "if": {"required": ["suggested_call"]},
+            "then": {"not": {"required": ["reconcile_with"]}}
+        });
+        validate_schema_instance(&json!({"suggested_call": {}}), &schema).unwrap();
+        assert!(validate_schema_instance(
+            &json!({"suggested_call": {}, "reconcile_with": "skill_versions"}),
+            &schema,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn schema_all_of_and_not_validate_as_sibling_constraints() {
+        let schema = json!({
+            "allOf": [
+                {"required": ["present"]},
+                {"properties": {"present": {"const": true}}}
+            ],
+            "not": {"required": ["forbidden"]}
+        });
+        validate_schema_instance(&json!({"present": true}), &schema).unwrap();
+        assert!(
+            validate_schema_instance(&json!({"present": true, "forbidden": true}), &schema,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn schema_not_is_not_bypassed_by_one_of_or_any_of_early_returns() {
+        for keyword in ["oneOf", "anyOf"] {
+            let mut schema = json!({"not": {"required": ["forbidden"]}});
+            schema[keyword] = json!([
+                {"required": ["allowed"]},
+                {"required": ["alternate"]}
+            ]);
+            validate_schema_instance(&json!({"allowed": true}), &schema).unwrap();
+            assert!(
+                validate_schema_instance(&json!({"allowed": true, "forbidden": true}), &schema,)
+                    .is_err(),
+                "{keyword} returned before sibling not was enforced"
+            );
+        }
+    }
 }

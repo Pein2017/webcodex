@@ -2,7 +2,6 @@ use super::Database;
 use anyhow::Context;
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 impl Database {
     pub fn open(db_path: &PathBuf) -> anyhow::Result<Self> {
@@ -19,23 +18,20 @@ impl Database {
             ",
         )?;
         let state_path = std::fs::canonicalize(db_path).context("resolve database state path")?;
-        let db = Self {
-            conn: Mutex::new(conn),
-            state_path,
-            window_projects: Mutex::new(std::collections::HashMap::new()),
-        };
+        let db = Self::from_connection(conn, state_path);
         db.init_tables()?;
         // Personal-use instance: reclaim dead auth rows on every open rather
         // than running a background reaper.
         let now = chrono::Utc::now().timestamp();
         db.purge_stale_auth_rows(now)?;
+        db.prune_job_receipts(now)?;
         Ok(db)
     }
 
     /// Delete expired / used / revoked auth material that can never be used
     /// again. Safe to call repeatedly; returns the total number of deleted rows.
     pub fn purge_stale_auth_rows(&self, now: i64) -> anyhow::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_connection(crate::StoreDomain::Core);
         let mut deleted = 0usize;
         deleted += conn.execute(
             "DELETE FROM oauth_authorization_codes
@@ -72,9 +68,25 @@ impl Database {
     }
 
     fn init_tables(&self) -> anyhow::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_connection(crate::StoreDomain::Schema);
         conn.execute_batch(
             "
+            CREATE TABLE IF NOT EXISTS wc_job_receipts (
+                job_id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                runner_instance_id TEXT NOT NULL,
+                auth_kind TEXT NOT NULL,
+                auth_partition TEXT,
+                owner_at_admission TEXT,
+                kind TEXT NOT NULL,
+                snapshot TEXT NOT NULL,
+                terminal_observed_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_job_receipts_expiry ON wc_job_receipts(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_job_receipts_runner_history
+                ON wc_job_receipts(client_id, terminal_observed_at DESC, job_id DESC);
+
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
@@ -632,15 +644,27 @@ impl Database {
         // communication domain. Workflow Session and project Memory ledgers
         // remain separate authoritative stores.
         Self::ensure_communication_schema(&mut conn)?;
-        // Agent Wake is a distinct durable continuation/outbox domain. It is
-        // initialized only after Agent, Endpoint, Message, and Inbox tables so
-        // all stable references are enforceable by foreign keys.
-        Self::ensure_agent_wake_schema(&mut conn)?;
-
         // AgentTask and AgentTaskAttempt are an independent durable work-ownership
         // domain. They reference durable Agents/Conversations for correlation only
         // and deliberately do not bind any execution backend in A3.
         Self::ensure_agent_task_schema(&mut conn)?;
+
+        // AgentWait is a one-shot durable interest in future source facts. Sources
+        // reference AgentTasks, while the Wait itself owns no source-domain authority.
+        Self::ensure_agent_wait_schema(&mut conn)?;
+
+        // Agent Wake is the shared durable continuation/outbox domain. Initialize it
+        // after AgentTask and AgentWait so every source foreign key is enforceable.
+        Self::ensure_agent_wake_schema(&mut conn)?;
+
+        // Goal is independent high-level durable intent/control state. It may
+        // correlate AgentTasks and Workflow Sessions, but owns no execution authority.
+        Self::ensure_goal_schema(&mut conn)?;
+
+        // Agent attention is a narrow semantic-fact domain. The first and only
+        // event kind records terminal Goal-correlated AgentTask facts; it is not
+        // a generic event bus and owns no scheduling or Goal authority.
+        Self::ensure_agent_attention_schema(&mut conn)?;
 
         // Project Memory was introduced after v0.3.9. Only the current schema is
         // supported; development-only intermediate shapes are rejected.
@@ -990,7 +1014,7 @@ mod action_event_window_migration_tests {
         assert!(!rows[0].window_meaningful);
         assert!(rows[0].recorder_gap_session_id.is_none());
         {
-            let conn = db.conn.lock().unwrap();
+            let conn = db.conn_for_tests();
             let columns = table_columns(&conn, "action_events").unwrap();
             for expected in [
                 "client_window_key",

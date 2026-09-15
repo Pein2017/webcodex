@@ -307,6 +307,7 @@ impl DetachedJobStore {
         self.root.join(digest)
     }
 
+    #[cfg(test)]
     fn state_path_for_job(&self, job_id: &str) -> PathBuf {
         self.job_dir(job_id).join(STATE_FILE)
     }
@@ -1394,6 +1395,7 @@ pub(crate) fn snapshot_from_detached_record(
         stdout: stream(&record.stdout),
         stderr: stream(&record.stderr),
         validation_progress: None,
+        test_count_evidence: None,
         activity,
     })
 }

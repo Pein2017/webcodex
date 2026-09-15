@@ -140,6 +140,7 @@ async fn promoted_run_shell_preserves_assertion_identity_in_terminal_validation_
             error: None,
             command_execution_state: None,
             validation_progress: None,
+            test_count_evidence: None,
             activity: None,
             finished: false,
         })
@@ -147,7 +148,8 @@ async fn promoted_run_shell_preserves_assertion_identity_in_terminal_validation_
         .unwrap();
     let handoff = task.await.unwrap();
     assert!(handoff.success, "{:?}", handoff.error);
-    assert_eq!(handoff.output["promoted_to_job"], true);
+    assert!(handoff.output.get("promoted_to_job").is_none());
+    assert_eq!(handoff.output["continuation"]["tool"], "observe_jobs");
     assert_eq!(handoff.output["job_id"], job_id);
 
     runtime
@@ -171,6 +173,7 @@ async fn promoted_run_shell_preserves_assertion_identity_in_terminal_validation_
                 crate::runner_protocol::ShellCommandExecutionState::Completed,
             ),
             validation_progress: None,
+            test_count_evidence: None,
             activity: None,
             finished: true,
         })
@@ -192,7 +195,8 @@ async fn promoted_run_shell_preserves_assertion_identity_in_terminal_validation_
     assert_eq!(validation["status"], "passed");
     assert_eq!(validation["unresolved_failures"]["count"], 0);
     let latest = &validation["latest"];
-    assert_eq!(latest["execution_source"], "run_shell");
+    assert!(latest.get("execution_source").is_none());
+    assert_eq!(latest["tool_name"], "run_shell");
     assert_eq!(latest["validation_kind"], "test");
     assert_eq!(latest["identity"], expected_identity);
     assert_eq!(latest["assertion_name"], assertion_name);

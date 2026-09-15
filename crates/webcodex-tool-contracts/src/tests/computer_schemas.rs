@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn tool_specs_generic_sync_wait_is_bounded_and_scoped_to_process_and_script() {
+fn tool_specs_generic_sync_wait_is_runtime_clamped_and_scoped_to_process_and_script() {
     let specs = registered_tool_specs();
     for name in ["run_process", "run_script"] {
         let spec = spec_named(&specs, name);
@@ -9,13 +9,14 @@ fn tool_specs_generic_sync_wait_is_bounded_and_scoped_to_process_and_script() {
         let sync_wait = &props["sync_wait_secs"];
         assert_eq!(sync_wait["type"], "integer", "{name}");
         assert_eq!(sync_wait["minimum"], 1, "{name}");
-        assert_eq!(sync_wait["maximum"], 60, "{name}");
+        assert!(sync_wait.get("maximum").is_none(), "{name}");
         assert!(
             !required_fields(spec).contains(&"sync_wait_secs".to_string()),
             "{name} sync_wait_secs must remain optional"
         );
         let description = sync_wait["description"].as_str().unwrap();
         assert!(description.contains("Omit to use 10 seconds"), "{name}");
+        assert!(description.to_ascii_lowercase().contains("clamp"), "{name}");
         assert!(
             description.contains("does not extend the total runtime timeout"),
             "{name}"
@@ -48,7 +49,10 @@ fn tool_specs_computer_find_elements_is_bounded_semantic_observation() {
         present: ["client_id", "surface_id", "role", "subrole", "label", "focused", "enabled", "limit"]
     );
     assert_eq!(props["limit"]["minimum"], 1);
-    assert_eq!(props["limit"]["maximum"], 32);
+    assert!(props["limit"].get("maximum").is_none());
+    assert!(props["limit"]["description"]
+        .as_str()
+        .is_some_and(|description| description.to_ascii_lowercase().contains("clamp")));
     assert!(props["label"]["description"]
         .as_str()
         .is_some_and(|description| description.contains("AXValue is never searched")));
@@ -124,8 +128,13 @@ fn tool_specs_computer_snapshot_has_bounded_region_without_format_controls() {
         present: ["client_id", "surface_id", "region", "max_width", "max_height"],
         absent: ["format", "quality", "save", "display_id"]
     );
-    assert_eq!(props["max_width"]["maximum"], 4096);
-    assert_eq!(props["max_height"]["maximum"], 4096);
+    for field in ["max_width", "max_height"] {
+        assert_eq!(props[field]["minimum"], 1);
+        assert!(props[field].get("maximum").is_none());
+        assert!(props[field]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("clamped to 4096")));
+    }
     let region = props["region"]["properties"].as_object().unwrap();
     assert_schema_fields!(
         region,
@@ -161,7 +170,12 @@ fn tool_specs_full_display_observation_is_closed_and_bounded() {
     let specs = registered_tool_specs();
     let list = spec_named(&specs, "computer_list_displays");
     assert_eq!(list.input_schema["additionalProperties"], false);
-    assert_eq!(list.input_schema["properties"]["limit"]["maximum"], 16);
+    assert!(list.input_schema["properties"]["limit"]
+        .get("maximum")
+        .is_none());
+    assert!(list.input_schema["properties"]["limit"]["description"]
+        .as_str()
+        .is_some_and(|description| description.to_ascii_lowercase().contains("clamp")));
     let display = &list.output_schema["properties"]["output"]["properties"]["displays"]["items"];
     assert_eq!(display["additionalProperties"], false);
     assert_schema_fields!(
@@ -183,8 +197,13 @@ fn tool_specs_full_display_observation_is_closed_and_bounded() {
         present: ["client_id", "display_id", "max_width", "max_height"],
         absent: ["region", "x", "y", "global_x", "pointer", "click", "monitor_id"]
     );
-    assert_eq!(props["max_width"]["maximum"], 4096);
-    assert_eq!(props["max_height"]["maximum"], 4096);
+    for field in ["max_width", "max_height"] {
+        assert_eq!(props[field]["minimum"], 1);
+        assert!(props[field].get("maximum").is_none());
+        assert!(props[field]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("clamped to 4096")));
+    }
     let output = snapshot.output_schema["properties"]["output"]["properties"]
         .as_object()
         .unwrap();
@@ -356,6 +375,13 @@ fn tool_specs_computer_save_snapshot_is_create_only_and_returns_metadata_only() 
         absent: ["overwrite", "format", "quality", "mime_type", "content_base64", "save"]
     );
     assert_eq!(props["region"]["additionalProperties"], false);
+    for field in ["max_width", "max_height"] {
+        assert_eq!(props[field]["minimum"], 1);
+        assert!(props[field].get("maximum").is_none());
+        assert!(props[field]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("clamped to 4096")));
+    }
 
     let output = spec.output_schema["properties"]["output"]["properties"]
         .as_object()
@@ -380,6 +406,58 @@ fn tool_specs_computer_save_snapshot_is_create_only_and_returns_metadata_only() 
         ],
         absent: ["content_base64", "surface", "captured_at_unix_ms"]
     );
+}
+
+#[test]
+fn computer_snapshot_dimension_budget_schemas_accept_oversized_positive_values_only() {
+    let specs = registered_tool_specs();
+    let cases = [
+        (
+            "computer_snapshot",
+            json!({"client_id": "special", "surface_id": "surface_test"}),
+        ),
+        (
+            "computer_snapshot_display",
+            json!({
+                "client_id": "special",
+                "display_id": "display_0123456789abcdef0123456789abcdef"
+            }),
+        ),
+        (
+            "computer_save_snapshot",
+            json!({
+                "project": "agent:special:demo",
+                "path": "artifacts/snapshot.jpg",
+                "client_id": "special",
+                "surface_id": "surface_test"
+            }),
+        ),
+    ];
+
+    for (name, base) in cases {
+        let schema = &spec_named(&specs, name).input_schema;
+        for (field, valid_values) in [
+            ("max_width", [json!(1024), json!(10_000), json!(u32::MAX)]),
+            ("max_height", [json!(1024), json!(10_000), json!(u32::MAX)]),
+        ] {
+            for value in valid_values {
+                let mut request = base.clone();
+                request[field] = value;
+                assert!(
+                    test_support::validate_schema_instance(&request, schema).is_ok(),
+                    "{name}.{field} should accept positive runtime-clamped budget: {request}"
+                );
+            }
+            for value in [json!(0), json!(-1), json!(1.5), json!("4096")] {
+                let mut request = base.clone();
+                request[field] = value;
+                assert!(
+                    test_support::validate_schema_instance(&request, schema).is_err(),
+                    "{name}.{field} should reject non-positive/non-integer budget: {request}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

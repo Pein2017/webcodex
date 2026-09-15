@@ -33,13 +33,14 @@ use webcodex_tool_contracts::{
 
 pub(crate) use webcodex_workflow_session::closeout_work_projection;
 
-const DEFAULT_HANDOFF_LIMIT: usize = 20;
+pub(super) const DEFAULT_HANDOFF_LIMIT: usize = 20;
 const MAX_HANDOFF_LIMIT: usize = 100;
 const HANDOFF_CLOSEOUT_SESSION_EVENT_LIMIT: usize = 200;
 const MAX_RECENT_FAILED_TOOLS: usize = 10;
 const MAX_RECENT_PROGRESS: usize = 10;
 const MAX_RECENT_DECISIONS: usize = 10;
 const MAX_OPEN_ITEMS: usize = 20;
+#[cfg(feature = "workspace-checkpoints")]
 const MAX_RECENT_CHECKPOINTS: usize = 10;
 const HANDOFF_MESSAGE_CHARS: usize = 240;
 
@@ -68,6 +69,8 @@ impl ToolRuntime {
             .min(MAX_HANDOFF_LIMIT);
         let include_workspace = include_workspace.unwrap_or(true);
         let include_checkpoints = include_checkpoints.unwrap_or(true);
+        #[cfg(not(feature = "workspace-checkpoints"))]
+        let _ = include_checkpoints;
         let include_validation = include_validation.unwrap_or(true);
 
         let authorized_target = match self
@@ -223,7 +226,7 @@ impl ToolRuntime {
         };
         let jobs_project = (!jobs_project.is_empty()).then_some(jobs_project);
         let jobs = self
-            .active_jobs_summary(jobs_project.as_deref(), auth, 10)
+            .active_jobs_summary(jobs_project.as_deref(), Some(&summary.session_id), auth, 10)
             .await;
         if let Some(job_warnings) = jobs.get("warnings").and_then(Value::as_array) {
             warnings.extend(job_warnings.iter().cloned());
@@ -273,6 +276,7 @@ impl ToolRuntime {
         }
 
         // --- optional checkpoint candidates ---
+        #[cfg(feature = "workspace-checkpoints")]
         if has_project && include_checkpoints {
             let project = project.clone().unwrap_or_default();
             let checkpoints = self.handoff_checkpoint_summary(&project, limit).await;
@@ -464,6 +468,7 @@ impl ToolRuntime {
     /// `workspace_checkpoint_list` path. Returns the latest
     /// `last_known_good` checkpoint (preferring `validation_status == passed`)
     /// and a bounded recent list. Never returns validation.commands or diffs.
+    #[cfg(feature = "workspace-checkpoints")]
     async fn handoff_checkpoint_summary(&self, project: &str, limit: usize) -> Value {
         let list_result = self
             .workspace_checkpoint_list(project.to_string(), Some(limit))
@@ -662,13 +667,17 @@ fn compact_handoff_output(output: &Value) -> Value {
 }
 
 pub(crate) fn compact_jobs(jobs: &Value) -> Value {
-    json!({
+    let mut compact = json!({
         "active_count": jobs.get("active_count").and_then(Value::as_u64).unwrap_or(0),
         "blocking_active_count": jobs.get("blocking_active_count").and_then(Value::as_u64).unwrap_or(0),
         "nonblocking_active_count": jobs.get("nonblocking_active_count").and_then(Value::as_u64).unwrap_or(0),
         "terminal_pending_count": jobs.get("terminal_pending_count").and_then(Value::as_u64).unwrap_or(0),
         "warnings": jobs.get("warnings").cloned().unwrap_or_else(|| json!([])),
-    })
+    });
+    if jobs.get("active_job").is_some_and(Value::is_object) {
+        compact["active_job"] = jobs["active_job"].clone();
+    }
+    compact
 }
 
 pub(crate) fn compact_permissions(permissions: &Value) -> Value {

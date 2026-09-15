@@ -29,27 +29,24 @@ impl ToolRuntime {
                 project,
                 session_id: _,
             } => self.git_status(project).await,
-            ToolCall::GitDiff {
-                project,
-                session_id: _,
-                args,
-            } => self.git_diff(project, args).await,
             ToolCall::GitDiffHunks {
                 project,
                 session_id: _,
                 paths,
                 max_hunks,
                 max_hunk_lines,
+                max_page_bytes,
                 cached,
                 base_commit,
                 head_commit,
                 continuation,
             } => {
-                self.git_diff_hunks_continued_with_range(
+                self.git_diff_hunks_continued_with_range_and_page_bytes(
                     project,
                     paths,
                     max_hunks,
                     max_hunk_lines,
+                    max_page_bytes,
                     cached,
                     base_commit,
                     head_commit,
@@ -72,10 +69,6 @@ impl ToolRuntime {
                 self.git_review_summary(project, base_commit, head_commit)
                     .await
             }
-            ToolCall::GitDiffSummary {
-                project,
-                session_id: _,
-            } => self.git_diff_summary(project).await,
             ToolCall::ShowChanges {
                 project,
                 session_id,

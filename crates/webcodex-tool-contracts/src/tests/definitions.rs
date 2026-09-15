@@ -45,6 +45,166 @@ fn tool_definitions_cover_known_names_and_public_specs() {
 }
 
 #[test]
+fn tool_definitions_are_activity_semantics_ssot() {
+    use ToolActivityInteraction::{Meaningful, NonMeaningful};
+    use ToolActivityKind::{Edit, Navigate, None as NoKind, Read, Review, Run, Search, Test};
+    use ToolActivityPresentation::{Support, Transport, Work};
+
+    for (name, presentation, interaction, kind) in [
+        ("read_files", Work, Meaningful, Read),
+        ("search_project_texts", Work, Meaningful, Search),
+        ("apply_text_edits", Work, Meaningful, Edit),
+        ("run_process", Work, Meaningful, Run),
+        ("run_shell", Work, Meaningful, Run),
+        ("cargo_test", Work, Meaningful, Test),
+        ("cargo_check", Work, Meaningful, Test),
+        ("git_review_summary", Work, Meaningful, Review),
+        ("git_diff_hunks", Work, Meaningful, Review),
+        ("show_changes", Work, Meaningful, Review),
+        ("lsp_status", Work, Meaningful, Navigate),
+        ("finish_coding_task", Work, Meaningful, Review),
+        ("observe_jobs", Transport, Meaningful, NoKind),
+        ("list_jobs", Support, Meaningful, NoKind),
+        ("session_handoff_summary", Support, Meaningful, NoKind),
+        ("work_on_project", Support, Meaningful, NoKind),
+        ("validation_summary", Support, Meaningful, NoKind),
+        ("runtime_status", Support, NonMeaningful, NoKind),
+        ("tool_manifest", Support, NonMeaningful, NoKind),
+        ("goal_plan_state", Transport, NonMeaningful, NoKind),
+        ("agent_continuation_state", Transport, NonMeaningful, NoKind),
+    ] {
+        assert_eq!(
+            runtime_tool_activity_semantics(name),
+            ToolActivitySemantics {
+                presentation,
+                interaction,
+                kind,
+            },
+            "{name}"
+        );
+    }
+
+    for name in [
+        "runtime_status",
+        "list_tools",
+        "list_runners",
+        "list_projects",
+        "tool_manifest",
+        "read_tool_trace",
+        "goal_plan_state",
+        "work_result_state",
+        "agent_wait_state",
+        "agent_continuation_bind",
+        "agent_continuation_recover_endpoint",
+        "agent_continuation_state",
+        "agent_continuation_wake_acquire",
+        "agent_continuation_wake_prepare",
+        "agent_continuation_wake_finish",
+        "agent_continuation_unbind",
+    ] {
+        assert_eq!(
+            runtime_tool_activity_interaction(name),
+            NonMeaningful,
+            "legacy non-meaningful behavior changed for {name}"
+        );
+    }
+
+    assert_eq!(
+        runtime_tool_activity_semantics("unknown_open_world_tool"),
+        ToolActivitySemantics {
+            presentation: Work,
+            interaction: Meaningful,
+            kind: NoKind,
+        },
+        "unknown names must preserve the legacy conservative meaningful default"
+    );
+
+    let hidden = lookup_tool_definition("job_tail").expect("job_tail definition");
+    assert!(hidden.visibility.is_model_hidden());
+    let hidden_activity = hidden.activity_semantics();
+    assert_eq!(hidden_activity.presentation, Work);
+    assert_eq!(hidden_activity.interaction, Meaningful);
+}
+
+#[test]
+fn execution_selection_contract_is_canonical_closed_and_sparse() {
+    use ToolExecutionContinuation::{ObserveJobs, SessionShell};
+    use ToolExecutionForm::{
+        NativeArgv, PersistentShellCommand, ShellCommand, StructuredValidation, TypedScript,
+    };
+    use ToolExecutionLifetime::{Runner, SessionShell as SessionShellLifetime, Supervisor};
+    use ToolExecutionStart::{AsyncImmediate, ExistingSession, SyncFirst};
+
+    let cases = [
+        (
+            "run_process",
+            ToolExecutionContract::new(NativeArgv, Runner, SyncFirst, ObserveJobs),
+        ),
+        (
+            "run_script",
+            ToolExecutionContract::new(TypedScript, Runner, SyncFirst, ObserveJobs),
+        ),
+        (
+            "run_shell",
+            ToolExecutionContract::new(ShellCommand, Runner, SyncFirst, ObserveJobs),
+        ),
+        (
+            "run_job",
+            ToolExecutionContract::new(ShellCommand, Runner, AsyncImmediate, ObserveJobs),
+        ),
+        (
+            "run_detached_process",
+            ToolExecutionContract::new(NativeArgv, Supervisor, AsyncImmediate, ObserveJobs),
+        ),
+        (
+            "session_shell_exec",
+            ToolExecutionContract::new(
+                PersistentShellCommand,
+                SessionShellLifetime,
+                ExistingSession,
+                SessionShell,
+            ),
+        ),
+        (
+            "cargo_fmt",
+            ToolExecutionContract::new(StructuredValidation, Runner, SyncFirst, ObserveJobs),
+        ),
+        (
+            "cargo_check",
+            ToolExecutionContract::new(StructuredValidation, Runner, SyncFirst, ObserveJobs),
+        ),
+        (
+            "cargo_test",
+            ToolExecutionContract::new(StructuredValidation, Runner, SyncFirst, ObserveJobs),
+        ),
+        (
+            "go_test",
+            ToolExecutionContract::new(StructuredValidation, Runner, SyncFirst, ObserveJobs),
+        ),
+    ];
+    for (name, expected) in cases {
+        let definition = lookup_tool_definition(name).unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(definition.execution, Some(expected), "{name}");
+        assert_eq!(
+            runtime_tool_execution_contract(name),
+            Some(expected),
+            "{name}"
+        );
+    }
+
+    for name in [
+        "read_files",
+        "apply_text_edits",
+        "show_changes",
+        "observe_jobs",
+        "stop_job",
+        "open_session_shell",
+    ] {
+        assert_eq!(runtime_tool_execution_contract(name), None, "{name}");
+    }
+}
+
+#[test]
 fn every_runtime_tool_has_an_explicit_fail_closed_audit_contract() {
     for definition in tool_definitions() {
         assert_eq!(
@@ -138,23 +298,27 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         assert!(pair[0].adaptive_runtime_direct_rank() < pair[1].adaptive_runtime_direct_rank());
     }
     assert_eq!(derived.len(), seen_ranks.len());
-    let apply_patch = derived
-        .iter()
-        .find(|definition| definition.name == "apply_patch")
-        .expect("apply_patch must be adaptive-direct");
-    let apply_text_edits = derived
-        .iter()
-        .find(|definition| definition.name == "apply_text_edits")
-        .expect("apply_text_edits must be adaptive-direct");
+    let apply_patch = lookup_tool_definition("apply_patch").expect("apply_patch definition");
+    assert!(apply_patch.visibility.is_model_visible());
+    assert_eq!(
+        apply_patch.adaptive_runtime_direct_rank(),
+        None,
+        "specialized patching should stay ModelVisible but use Adaptive discovery/gateway"
+    );
     assert!(
-        apply_text_edits.adaptive_runtime_direct_rank()
-            < apply_patch.adaptive_runtime_direct_rank()
+        derived
+            .iter()
+            .any(|definition| definition.name == "apply_text_edits"),
+        "canonical ordinary edits must remain adaptive-direct"
     );
 
     for (name, expected_rank) in [
+        ("rotate_agent_continuation_endpoint", 19),
         ("import_conversation_files_to_project", 55),
         ("export_project_artifact", 56),
+        ("run_detached_process", 72),
         ("run_shell", 75),
+        ("observe_jobs", 80),
     ] {
         let definition = derived
             .iter()
@@ -176,6 +340,8 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         "session_shell_status",
         "close_session_shell",
         "run_script",
+        "attach_agent_endpoint",
+        "apply_patch",
         "save_project_artifact",
         "read_project_artifact",
         "artifact_upload_begin",
@@ -216,6 +382,83 @@ fn adaptive_runtime_direct_declarations_are_visible_ranked_and_unique() {
         );
     }
 
+    let gpt_action_direct = gpt_action_direct_tool_definitions();
+    let expected_gpt_action_direct = derived
+        .iter()
+        .copied()
+        .filter(|definition| definition.supports_gpt_actions())
+        .map(|definition| definition.name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        gpt_action_direct
+            .iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>(),
+        expected_gpt_action_direct,
+        "GPT Actions direct exposure must inherit Adaptive Direct ordering minus explicit protocol exceptions"
+    );
+    assert!(gpt_action_tool_supported("apply_patch"));
+    assert!(
+        !gpt_action_direct
+            .iter()
+            .any(|definition| definition.name == "apply_patch"),
+        "apply_patch stays GPT-Action-supported long-tail behind call_runtime_tool"
+    );
+    for name in [
+        "present_goal_plan",
+        "present_agent_continuation",
+        "present_work_result",
+        "export_project_artifact",
+        "rotate_agent_continuation_endpoint",
+    ] {
+        assert!(
+            !gpt_action_tool_supported(name),
+            "{name} depends on MCP-only presentation/resource semantics"
+        );
+    }
+
+    for definition in &gpt_action_direct {
+        let model_spec = definition
+            .model_spec
+            .expect("model-visible direct tool spec");
+        let action_description = definition
+            .gpt_action_description()
+            .expect("GPT Action description projection");
+        assert!(
+            action_description.chars().count() <= GPT_ACTION_DESCRIPTION_MAX_CHARS,
+            "{} GPT Action description exceeds {} characters",
+            definition.name,
+            GPT_ACTION_DESCRIPTION_MAX_CHARS
+        );
+        if model_spec.description.chars().count() > GPT_ACTION_DESCRIPTION_MAX_CHARS {
+            assert!(
+                model_spec.gpt_action_description.is_some(),
+                "{} needs an explicit short GPT Action presentation description",
+                definition.name
+            );
+        }
+    }
+
+    let observe_jobs = registered_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "observe_jobs")
+        .expect("observe_jobs ToolSpec");
+    let list_jobs = registered_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "list_jobs")
+        .expect("list_jobs ToolSpec");
+    assert!(observe_jobs
+        .description
+        .contains("do not call list_jobs first"));
+    assert!(observe_jobs.description.contains("after_observation_token"));
+    assert!(observe_jobs.description.contains("bounded wait_secs"));
+    assert!(list_jobs
+        .description
+        .contains("Recovery and inventory primitive"));
+    assert!(list_jobs
+        .description
+        .contains("continue that Job with observe_jobs"));
+
     let git_review = registered_tool_specs()
         .into_iter()
         .find(|spec| spec.name == "git_review_summary")
@@ -240,4 +483,91 @@ fn tool_definitions_drive_metadata_visibility_and_categories() {
         assert_eq!(definition.category, runtime_tool_category(definition.name));
         assert_eq!(definition.metadata().authority, metadata.authority);
     }
+}
+
+#[test]
+fn operator_extension_families_are_definition_owned_and_registry_derived() {
+    use ToolOperatorExtensionFamily::{
+        MemoryManagement, MemoryRuntime, SkillManagement, SkillRuntime, TraceDiagnostics,
+    };
+
+    let cases: &[(ToolOperatorExtensionFamily, &[&str])] = &[
+        (SkillRuntime, &["skill_list", "skill_read_file"]),
+        (
+            SkillManagement,
+            &[
+                "skill_versions",
+                "skill_install",
+                "skill_activate",
+                "skill_remove_revision",
+            ],
+        ),
+        (MemoryRuntime, &["memory_search", "memory_read"]),
+        (
+            MemoryManagement,
+            &[
+                "memory_set",
+                "memory_delete",
+                "memory_scope_list",
+                "memory_scope_purge",
+            ],
+        ),
+        (TraceDiagnostics, &["read_tool_trace"]),
+    ];
+
+    for (family, expected_names) in cases {
+        for name in *expected_names {
+            assert_eq!(runtime_tool_operator_extension_family(name), Some(*family));
+            assert_eq!(
+                lookup_tool_definition(name)
+                    .and_then(|definition| definition.operator_extension_family),
+                Some(*family)
+            );
+        }
+
+        let actual_names = match family {
+            SkillRuntime => skill_runtime_tool_specs(),
+            SkillManagement => skill_management_tool_specs(),
+            MemoryRuntime => memory_runtime_tool_specs(),
+            MemoryManagement => memory_management_tool_specs(),
+            TraceDiagnostics => operator_diagnostic_tool_specs(),
+        }
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            actual_names,
+            expected_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    for definition in
+        tool_definitions().filter(|definition| definition.operator_extension_family.is_some())
+    {
+        assert!(
+            definition.visibility.is_model_hidden(),
+            "{} operator extension must remain ModelHidden and surface-gated",
+            definition.name
+        );
+    }
+
+    let declared_names = tool_definitions()
+        .filter(|definition| definition.operator_extension_family.is_some())
+        .map(|definition| definition.name)
+        .collect::<BTreeSet<_>>();
+    let registry_names = stateless_operator_extension_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        declared_names,
+        registry_names.iter().map(String::as_str).collect(),
+        "registry operator-extension membership must be derived from ToolDefinition families"
+    );
+
+    assert_eq!(runtime_tool_operator_extension_family("run_shell"), None);
+    assert_eq!(runtime_tool_operator_extension_family("unknown_tool"), None);
 }

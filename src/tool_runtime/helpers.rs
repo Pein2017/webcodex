@@ -599,22 +599,22 @@ pub(crate) const DEFAULT_CARGO_FMT_TIMEOUT_SECS: u64 = 120;
 /// hard ceiling so transport/result serialization retains substantial headroom.
 pub(crate) const SYNC_VALIDATION_WAIT_SECS: u64 = 60;
 
-/// Resolve a synchronous command timeout. Out-of-range values are rejected
-/// (not clamped) so callers cannot request longer waits than the sync path
-/// can honor.
+/// Resolve a synchronous command timeout. Zero remains invalid, while an
+/// oversized caller preference is clamped to the largest wait this path can
+/// actually honor so the model does not need a second decision just to retry
+/// with the documented ceiling.
 pub(crate) fn resolve_sync_timeout_secs(
     timeout_secs: Option<u64>,
     default: u64,
 ) -> Result<u64, String> {
     debug_assert!((MIN_SYNC_TIMEOUT_SECS..=MAX_SYNC_TIMEOUT_SECS).contains(&default));
     let value = timeout_secs.unwrap_or(default);
-    if !(MIN_SYNC_TIMEOUT_SECS..=MAX_SYNC_TIMEOUT_SECS).contains(&value) {
+    if value < MIN_SYNC_TIMEOUT_SECS {
         return Err(format!(
-            "timeout_secs must be between {} and {}",
-            MIN_SYNC_TIMEOUT_SECS, MAX_SYNC_TIMEOUT_SECS
+            "timeout_secs must be at least {MIN_SYNC_TIMEOUT_SECS}"
         ));
     }
-    Ok(value)
+    Ok(value.min(MAX_SYNC_TIMEOUT_SECS))
 }
 
 /// Structured pre-execution rejection for an out-of-range synchronous timeout.
@@ -630,7 +630,7 @@ pub(crate) fn sync_timeout_out_of_range_result(
                 "{tool_name} timeout_secs must be between {MIN_SYNC_TIMEOUT_SECS} and {MAX_SYNC_TIMEOUT_SECS}"
             ),
             format!(
-                "pass timeout_secs between {MIN_SYNC_TIMEOUT_SECS} and {MAX_SYNC_TIMEOUT_SECS}, or omit it for the default of {default} seconds. For longer work use run_job."
+                "pass timeout_secs between {MIN_SYNC_TIMEOUT_SECS} and {MAX_SYNC_TIMEOUT_SECS}, or omit it for the default of {default} seconds. Duration alone does not select run_job or run_detached_process: ordinary long work should keep the canonical tool/Job handoff; use run_job only for intentional asynchronous shell start, and run_detached_process only for a native child that must survive Runner restart/replacement."
             ),
         ),
         json!({
@@ -683,7 +683,7 @@ pub(crate) fn command_timeout_message(
     stderr_tail: &str,
 ) -> String {
     format!(
-        "Command timed out after {}s.\nCommand definitely started, but WebCodex cannot prove its side effects ended with the timeout.\nOutput tails before timeout:\nstdout_tail:\n{}\nstderr_tail:\n{}\nRetry guidance: do not blindly retry. First inspect the actual process, service, and target state. If validation is safe and idempotent, use run_job for longer observation or a narrower invocation.",
+        "Command timed out after {}s.\nCommand definitely started, but WebCodex cannot prove its side effects ended with the timeout.\nOutput tails before timeout:\nstdout_tail:\n{}\nstderr_tail:\n{}\nRetry guidance: do not blindly retry. First inspect the actual Job, process, service, and target state. On a fresh safe attempt, keep ordinary long work on its canonical execution tool and Job handoff; use run_job only for intentional asynchronous shell start. If a new native child must survive Runner restart/replacement, use run_detached_process from the start instead of changing tools merely for duration.",
         timeout_secs, stdout_tail, stderr_tail
     )
 }

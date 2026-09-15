@@ -53,6 +53,8 @@ fn project_summary(id: &str, path: &str) -> RunnerProjectSummary {
         hooks: vec!["doctor".to_string(), "precommit".to_string()],
         disabled: false,
         revision: None,
+        root_fingerprint: None,
+        lineage: None,
         git_branch: Some("codex".to_string()),
         git_head: Some("9a7d3ce".to_string()),
         git_dirty: Some(false),
@@ -295,6 +297,8 @@ mod abandoned_sync;
 mod apply_patch;
 #[path = "tests/apply_text_edit_line_scope.rs"]
 mod apply_text_edit_line_scope;
+#[path = "tests/apply_text_edit_local_guard.rs"]
+mod apply_text_edit_local_guard;
 #[path = "tests/apply_text_edit_occurrence.rs"]
 mod apply_text_edit_occurrence;
 #[path = "tests/artifact_export.rs"]
@@ -333,6 +337,8 @@ mod mcp_gateway;
 mod plugin_gateway;
 #[path = "tests/polling.rs"]
 mod polling;
+#[path = "tests/project_file_read.rs"]
+mod project_file_read;
 #[path = "tests/project_inventory.rs"]
 mod project_inventory;
 #[path = "tests/project_projection.rs"]
@@ -359,8 +365,8 @@ mod runner_liveness;
 mod shared_key_limits;
 #[path = "tests/shared_key_ttl.rs"]
 mod shared_key_ttl;
-#[path = "tests/skill_store.rs"]
-mod skill_store;
+#[path = "tests/skills.rs"]
+mod skills;
 #[path = "tests/ssh_resource.rs"]
 mod ssh_resource;
 #[path = "tests/structured_file_delete.rs"]

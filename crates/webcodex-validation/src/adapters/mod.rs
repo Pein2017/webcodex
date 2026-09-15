@@ -4,11 +4,13 @@ mod go;
 mod rust;
 
 use webcodex_core::validation_evidence::ValidationDiagnostics;
+use webcodex_core::workflow_session_contract::ExecutionPurpose;
 
 #[derive(Debug, Clone, Default)]
 pub struct ValidationCommandOptions {
     pub check: bool,
     pub filter: Option<String>,
+    pub lib: Option<bool>,
     pub all_targets: Option<bool>,
     pub all_features: Option<bool>,
     pub no_default_features: Option<bool>,
@@ -47,6 +49,16 @@ pub trait ValidationAdapter: Sync {
 
     fn reports_test_run_metadata(&self) -> bool {
         false
+    }
+}
+
+/// Canonical mapping from structured validation classification to execution
+/// evidence intent. Tool selection determines this purpose; callers do not.
+pub fn execution_purpose_for_validation_kind(validation_kind: &str) -> ExecutionPurpose {
+    match validation_kind {
+        "test" => ExecutionPurpose::Test,
+        "format" => ExecutionPurpose::Format,
+        _ => ExecutionPurpose::Validation,
     }
 }
 

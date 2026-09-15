@@ -22,7 +22,7 @@ use super::{
 };
 use crate::DetachedInitiatorIdentity;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 use webcodex_core::runner_operation::{
@@ -35,9 +35,10 @@ use webcodex_core::runner_protocol::{
     RunnerJobUpdateRequest, RunnerRequest, ShellCommandExecutionState, ShellJobActivity,
     ShellJobActivityPhase, ShellJobActivitySource, ShellJobContext, ShellJobInfo,
     ShellJobOpRequest, ShellJobStructuredExecutionMetadata, ShellJobValidationMetadata,
-    ShellJobValidationStep, ShellProcessArgv, ShellRunRequest, ShellScriptPayload,
-    DETACHED_IDEMPOTENCY_KEY_MAX_BYTES, PROCESS_CWD_MAX_BYTES, PROCESS_STDIN_MAX_BYTES,
-    STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS, STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS,
+    ShellJobValidationStep, ShellProcessArgv, ShellRunRequest, ShellScriptLanguage,
+    ShellScriptPayload, DETACHED_IDEMPOTENCY_KEY_MAX_BYTES, PROCESS_CWD_MAX_BYTES,
+    PROCESS_STDIN_MAX_BYTES, STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS,
+    STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS,
 };
 
 #[derive(Clone, Copy)]
@@ -294,6 +295,7 @@ struct JobPublicMutationSignature {
     duration_ms: Option<u64>,
     command_execution_state: Option<ShellCommandExecutionState>,
     validation_progress: Option<webcodex_core::runner_protocol::ShellJobValidationProgress>,
+    test_count_evidence: Option<webcodex_core::runner_protocol::ShellJobTestCountEvidence>,
     activity: Option<ShellJobActivity>,
     recovered_after_server_restart: bool,
     reconciled_at: Option<i64>,
@@ -313,6 +315,7 @@ fn public_mutation_signature(job: &ShellJobRecord) -> JobPublicMutationSignature
         duration_ms: job.duration_ms,
         command_execution_state: job.command_execution_state,
         validation_progress: job.validation_progress.clone(),
+        test_count_evidence: job.test_count_evidence.clone(),
         activity: job.activity,
         recovered_after_server_restart: job.recovery.recovered_after_server_restart,
         reconciled_at: job.recovery.reconciled_at,
@@ -412,6 +415,23 @@ fn validate_validation_progress(
     } else {
         invalid_progress("validation_progress_invalid")
     }
+}
+
+fn validate_test_count_evidence(
+    job: &ShellJobRecord,
+    update: &RunnerJobUpdateRequest,
+    lifecycle: JobLifecycleState,
+) -> Result<(), ValidationProtocolError> {
+    let Some(evidence) = update.test_count_evidence.as_ref() else {
+        return Ok(());
+    };
+    let cargo_test = job.validation.as_ref().is_some_and(|metadata| {
+        metadata.tool == "cargo_test" && metadata.kind == "test" && metadata.no_run != Some(true)
+    });
+    if !cargo_test || !lifecycle.is_terminal() || !update.finished || !evidence.is_valid() {
+        return invalid_progress("test_count_evidence_invalid");
+    }
+    Ok(())
 }
 
 fn validation_activity_phase(step: &str) -> Option<ShellJobActivityPhase> {
@@ -693,6 +713,16 @@ impl RunnerRegistry {
         let validation_tool = metadata.validation_tool.clone();
         let assertion_name = metadata.assertion_name.clone();
         let structured_execution = metadata.structured_execution;
+        let javascript_script_request = matches!(
+            structured_execution.as_ref(),
+            Some(StructuredJobExecution::Script(script))
+                if script.language == ShellScriptLanguage::Javascript
+        );
+        let typescript_script_request = matches!(
+            structured_execution.as_ref(),
+            Some(StructuredJobExecution::Script(script))
+                if script.language == ShellScriptLanguage::Typescript
+        );
         let structured_stdin = metadata.stdin;
         if validation_steps.len() > 3
             || validation_steps.iter().any(|step| !step.is_canonical())
@@ -951,6 +981,24 @@ impl RunnerRegistry {
                 "capability_unavailable: runner {client_id} does not support structured_execution_jobs"
             ));
         }
+        if javascript_script_request
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::StructuredScriptJavascript)
+        {
+            return Err(format!(
+                "capability_unavailable: runner {client_id} does not support structured_script_javascript"
+            ));
+        }
+        if typescript_script_request
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::StructuredScriptTypescript)
+        {
+            return Err(format!(
+                "capability_unavailable: runner {client_id} does not support structured_script_typescript"
+            ));
+        }
         if detached_request
             && !runner
                 .runner_features
@@ -1009,6 +1057,19 @@ impl RunnerRegistry {
                 client_id
             ));
         }
+        if validation_steps.iter().any(|step| {
+            step.program == "cargo"
+                && step.args.first().is_some_and(|arg| arg == "test")
+                && step.args.iter().any(|arg| arg == "--lib")
+        }) && !runner
+            .runner_features
+            .supports(RunnerFeature::StructuredCargoTestLib)
+        {
+            return Err(format!(
+                "structured_cargo_test_lib_unavailable: runner {} does not support Cargo test --lib validation argv",
+                client_id
+            ));
+        }
         if validation_steps
             .iter()
             .any(webcodex_core::runner_protocol::ShellJobValidationStep::is_structured_go_test_json)
@@ -1053,6 +1114,7 @@ impl RunnerRegistry {
         }
         let runner_instance_id = runner.runner_instance_id.clone();
         let auth_group = runner.auth_group.clone();
+        let owner_at_admission = runner.owner.clone();
         if let Some(intent) = detached_intent.as_ref() {
             if let Some(existing) = inner.jobs_by_id.get(&job_id) {
                 if existing.kind != "run_detached_process" {
@@ -1089,6 +1151,7 @@ impl RunnerRegistry {
             request_id: Some(request_id.clone()),
             client_id: client_id.clone(),
             auth_group,
+            owner_at_admission,
             runner_instance_id,
             kind: job_kind.to_string(),
             project_id: metadata.project_id,
@@ -1115,12 +1178,16 @@ impl RunnerRegistry {
             validation_steps: validation_step_names,
             validation,
             validation_progress: None,
+            test_count_evidence: None,
             activity: None,
             last_update_seq: 0,
             visibility: metadata.visibility,
 
             recovery: JobRecoveryState::default(),
-            observation: JobObservationState::new(self.observation_epoch.clone()),
+            observation: JobObservationState {
+                receipt_candidates: self.inner.capture_candidates(),
+                ..JobObservationState::new(self.observation_epoch.clone())
+            },
         };
         inner.request_to_job.insert(request_id, job_id.clone());
         inner.jobs_by_id.insert(job_id.clone(), job);
@@ -1469,6 +1536,62 @@ impl RunnerRegistry {
             .collect()
     }
 
+    /// Complete caller-visible Job set after exact static identity filters.
+    /// Project/session selection happens before lifecycle refresh so focused
+    /// model-facing inventory queries do not refresh unrelated Jobs. Status is
+    /// intentionally not accepted here because it depends on the refreshed
+    /// lifecycle and must be applied by the caller afterwards.
+    pub async fn list_jobs_for_auth_filtered(
+        &self,
+        auth: Option<&crate::RunnerAccess>,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Vec<ShellJobInfo> {
+        let mut inner = self.inner.lock().await;
+        let candidate_ids = inner
+            .jobs_by_id
+            .values()
+            .filter(|job| job.visibility == ShellJobVisibility::Public)
+            .filter(|job| shell_job_visible_to_auth(auth, &inner, job))
+            .filter(|job| {
+                project_id
+                    .map(|project_id| job.project_id.as_deref() == Some(project_id))
+                    .unwrap_or(true)
+            })
+            .filter(|job| {
+                session_id
+                    .map(|session_id| job.session_id.as_deref() == Some(session_id))
+                    .unwrap_or(true)
+            })
+            .map(|job| job.job_id.clone())
+            .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "root-test-support"))]
+        self.filtered_job_refresh_count
+            .fetch_add(candidate_ids.len(), Ordering::Relaxed);
+        for job_id in candidate_ids {
+            refresh_job_status_locked(&mut inner, &job_id);
+        }
+        let mut jobs = inner
+            .jobs_by_id
+            .values()
+            .filter(|job| job.visibility == ShellJobVisibility::Public)
+            .filter(|job| shell_job_visible_to_auth(auth, &inner, job))
+            .filter(|job| {
+                project_id
+                    .map(|project_id| job.project_id.as_deref() == Some(project_id))
+                    .unwrap_or(true)
+            })
+            .filter(|job| {
+                session_id
+                    .map(|session_id| job.session_id.as_deref() == Some(session_id))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
+        jobs.into_iter().map(|job| job_view(&job)).collect()
+    }
+
     async fn visible_job_records_for_auth(
         &self,
         auth: Option<&crate::RunnerAccess>,
@@ -1489,27 +1612,52 @@ impl RunnerRegistry {
         jobs
     }
 
-    /// Count active jobs for one exact runtime project without applying the
-    /// display-list pagination limit. Jobs without a runtime project id are
-    /// intentionally excluded.
+    /// Count caller-visible active Jobs for the requested exact Projects in one
+    /// registry snapshot. Refresh lifecycle once, then aggregate once: O(P + J),
+    /// with output bounded by requested Projects, not the complete Job inventory.
+    /// Private, projectless, terminal and unauthorized Jobs never contribute.
+    pub async fn count_active_jobs_for_projects(
+        &self,
+        auth: Option<&crate::RunnerAccess>,
+        runtime_project_ids: &[&str],
+    ) -> HashMap<String, usize> {
+        let mut counts: HashMap<String, usize> = runtime_project_ids
+            .iter()
+            .map(|id| ((*id).to_string(), 0))
+            .collect();
+        if counts.is_empty() {
+            return counts;
+        }
+        let mut inner = self.inner.lock().await;
+        #[cfg(any(test, feature = "root-test-support"))]
+        self.project_job_scan_count.fetch_add(1, Ordering::Relaxed);
+        let job_ids = inner.jobs_by_id.keys().cloned().collect::<Vec<_>>();
+        for job_id in job_ids {
+            refresh_job_status_locked(&mut inner, &job_id);
+        }
+        for job in inner.jobs_by_id.values().filter(|job| {
+            job.visibility == ShellJobVisibility::Public
+                && job.lifecycle.is_active()
+                && shell_job_visible_to_auth(auth, &inner, job)
+        }) {
+            if let Some(count) = job.project_id.as_deref().and_then(|id| counts.get_mut(id)) {
+                *count += 1;
+            }
+        }
+        counts
+    }
+
+    /// Single-Project observation shares the same unpaginated, authorized path.
     pub async fn count_active_jobs_for_project(
         &self,
         auth: Option<&crate::RunnerAccess>,
         runtime_project_id: &str,
     ) -> usize {
-        let mut inner = self.inner.lock().await;
-        let job_ids = inner.jobs_by_id.keys().cloned().collect::<Vec<_>>();
-        for job_id in job_ids {
-            refresh_job_status_locked(&mut inner, &job_id);
-        }
-        inner
-            .jobs_by_id
-            .values()
-            .filter(|job| job.visibility == ShellJobVisibility::Public)
-            .filter(|job| shell_job_visible_to_auth(auth, &inner, job))
-            .filter(|job| job.project_id.as_deref() == Some(runtime_project_id))
-            .filter(|job| job.lifecycle.is_active())
-            .count()
+        self.count_active_jobs_for_projects(auth, &[runtime_project_id])
+            .await
+            .get(runtime_project_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Atomically fence new job starts and count all currently active jobs for
@@ -2038,6 +2186,7 @@ impl RunnerRegistry {
                 &body,
             );
             if let Err(error) = validate_validation_progress(job, &body, incoming_lifecycle)
+                .and_then(|_| validate_test_count_evidence(job, &body, incoming_lifecycle))
                 .and_then(|_| validate_command_execution_state(job, &body, incoming_lifecycle))
                 .and_then(|_| validate_job_activity(job, &body, incoming_lifecycle))
             {
@@ -2070,6 +2219,9 @@ impl RunnerRegistry {
                 }
                 if body.validation_progress.is_some() {
                     job.validation_progress = body.validation_progress.clone();
+                }
+                if body.test_count_evidence.is_some() {
+                    job.test_count_evidence = body.test_count_evidence.clone();
                 }
                 if body.activity.is_some() {
                     job.activity = body.activity;

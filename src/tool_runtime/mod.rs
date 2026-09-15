@@ -5,8 +5,10 @@
 
 pub mod activity;
 mod agent_task;
+mod agent_wait;
 mod cargo;
 mod cargo_tools;
+#[cfg(feature = "workspace-checkpoints")]
 mod checkpoint;
 mod coding_agent;
 mod coding_task;
@@ -30,6 +32,7 @@ pub(crate) use git::{framed_clean_show_changes_test_stdout, framed_show_changes_
 mod git_committed;
 mod git_review;
 mod git_tools;
+mod goal;
 mod handoff;
 mod handoff_brief;
 mod handoff_tools;
@@ -42,6 +45,7 @@ mod job_tools;
 mod jobs;
 pub(crate) mod kernel;
 mod lsp_tools;
+pub(crate) use lsp_tools::runner_local_project_id;
 pub(crate) mod memory;
 pub(crate) mod metadata;
 pub(crate) mod model_ergonomics_telemetry;
@@ -53,9 +57,11 @@ pub(crate) mod permissions;
 mod process;
 pub(crate) mod project_instructions;
 mod project_resolution;
+pub(crate) use project_resolution::ResolvedProject;
 mod project_tools;
 mod projects;
 mod read_files;
+mod read_revisions;
 mod registry;
 mod runtime;
 mod runtime_info;
@@ -64,7 +70,6 @@ mod script;
 mod search_project_texts;
 mod semantic_navigation;
 mod session_context;
-pub(crate) use observations::is_meaningful_activity_tool;
 pub(crate) use session_context::runtime_observation_principal;
 pub(crate) use window_activity::{
     ToolCallCorrelation, WindowActivityGuard, WindowLoopTransition, WorkflowSessionCorrelation,
@@ -92,7 +97,8 @@ mod tool_spec;
 mod validation_events;
 pub(crate) mod validation_parser;
 pub(crate) mod validation_profile;
-mod window_activity;
+pub(crate) mod window_activity;
+mod work_result;
 pub(crate) use window_activity::{ActiveWindowRequest, MAX_ACTIVE_REQUESTS_PER_WINDOW};
 
 #[cfg(test)]
@@ -107,7 +113,6 @@ pub(crate) use files::{
     validate_project_artifact_export_snapshot, ProjectArtifactExportSnapshot,
     MAX_PROJECT_ARTIFACT_EXPORT_BYTES, MAX_READ_PROJECT_ARTIFACT_LENGTH,
 };
-pub(crate) use patch::MAX_UNIFIED_DIFF_BYTES;
 #[cfg(test)]
 pub(crate) use permissions::{AuthorityMode, PermissionEvaluator};
 #[cfg(test)]
@@ -119,8 +124,9 @@ pub(crate) use session_context::workflow_session_authority_fingerprint;
 #[cfg(test)]
 pub(crate) use sessions::{SessionCreateOptions, SessionGuards, SessionSummary};
 pub use tool_call::{
-    ObserveJobsItem, PluginToolCall, ReadFilesItem, SearchPatternMode, SearchProjectTextsQuery,
-    SearchResultMode, SshResourceToolCall, ToolCall,
+    AgentWaitEventSelectorCall, HostFileImportProvenance, ObserveJobsItem, ObserveJobsWakeOn,
+    PluginToolCall, ReadFilesItem, SearchPatternMode, SearchProjectTextsQuery, SearchResultMode,
+    SshResourceToolCall, ToolCall,
 };
 pub(crate) use tool_call::{
     TOOL_CALL_PARAMS_FIELD, TOOL_CALL_TOOL_FIELD, TOOL_CALL_WRAPPER_FIELDS,
@@ -134,24 +140,26 @@ pub(crate) use tool_definition::{
 };
 #[cfg(test)]
 pub use tool_inputs::ApplyFileChangeInput;
+#[cfg(all(test, feature = "workspace-checkpoints"))]
+pub use tool_inputs::CheckpointValidationInput;
 pub use tool_inputs::{default_true, ExecutionPurpose, ExecutionShell, ListToolsOptions};
 #[cfg(test)]
 pub use tool_inputs::{
-    ApplyFileChangeKind, ApplyTextEditInput, ApplyTextEditKind, CheckpointValidationInput,
-    SessionMode, StartupDetail,
+    ApplyFileChangeKind, ApplyTextEditInput, ApplyTextEditKind, SessionMode, StartupDetail,
 };
 pub use tool_result::ToolResult;
-pub(crate) use tool_result::{RecoveryKind, RecoveryTool, RECOVERY_KIND_VALUES};
+pub(crate) use tool_result::{
+    ContinuationCarrier, ContinuationKind, ContinuationSemantics, RecoveryKind, SuggestedToolCall,
+    RECOVERY_KIND_VALUES,
+};
 pub use tool_spec::ToolSpec;
 
 #[cfg(test)]
 pub(crate) use project_resolution::ProjectResolverErrorKind;
 pub(crate) use project_resolution::{runner_project_runtime_id, ProjectResolverError};
-#[cfg(test)]
-pub(crate) use registry::accepted_flattened_args_for_spec;
 pub(crate) use registry::{
-    generic_tool_call_flattened_args_for_spec, registered_tool_specs,
-    stateless_operator_extension_tool_specs,
+    agent_continuation_app_tool_specs, goal_plan_app_tool_specs, registered_tool_specs,
+    stateless_operator_extension_tool_specs, work_result_app_tool_specs,
 };
 #[cfg(test)]
 pub(crate) use registry::{
