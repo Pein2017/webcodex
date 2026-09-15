@@ -28,3 +28,15 @@ The merged upstream Git review path requires Git with `check-attr --source` supp
 - Retain old binaries, operator config and a consistent Server-state backup. Check active jobs before restarting the existing Server/Runner. A schema migration may require restoring the matching backup when rolling back.
 - Publish only reviewed source and Linux artifacts with scope/validation notes to the fork. Do not invoke upstream package publication workflows. Never publish private configuration, memory content or operational credentials.
 - After deployment, verify MCP initialization, effective guidance identity, all registered projects, shared context, and the edit/test path on a disposable project. Refresh the ChatGPT connection when tool metadata changes, then start a new conversation if it retained old schemas.
+
+The fork's focused real-entry smoke uses only disposable state and the selected binaries:
+
+```bash
+python3 scripts/e2e_web_workflow.py \
+  --server-bin target/release/webcodex-server \
+  --runner-bin target/release/webcodex-runner \
+  --artifact-dir /absolute/private/verification-output \
+  --timeout-secs 300
+```
+
+It checks current full-operator MCP contracts, guarded edits, actual command validation, and asynchronous Job terminal/log observation. Preserve its receipt and logs outside the public release assets. It does not claim to test ChatGPT's browser UI or the separate Actions surface.

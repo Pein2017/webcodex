@@ -6,7 +6,7 @@
 ## 2. Runtime entry and shared context
 
 - [x] 2.1 Enhance work_on_project with effective guidance identity while reusing bounded upstream catalogs; verify focused startup and MCP tests.
-- [ ] 2.2 Reproduce and fix Git hygiene false negatives if present; verify a discriminating regression and real Runner worktree check.
+- [x] 2.2 Reproduce and fix Git hygiene false negatives if present; verify a discriminating regression and real Runner worktree check.
 - [ ] 2.3 Add a Web-specific instruction example and configure shared skills plus read-only memories; verify discovery/read from all three registered projects without context copies.
 
 ## 3. Python and code intelligence
