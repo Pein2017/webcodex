@@ -13,7 +13,51 @@ Configure shared skills on the Runner using an absolute operator-controlled dire
 roots = ["/absolute/shared/skills"]
 ```
 
-Use `skill_list` and `skill_read_file` or `context_request=["skills.catalog"]`; not every Codex skill is executable in this host. Memory reads and Python/CodeGraph helpers are provided by the optional [web-workflow plugin](../../plugins/web-workflow/README.md). Keep private roots and credentials outside this repository.
+Use `skill_list` and `skill_read_file` or `context_request=["skills.catalog"]`; not every Codex skill is executable in this host. Memory reads, Python/CodeGraph helpers, and optional public history reads are provided by the optional [web-workflow plugin](../../plugins/web-workflow/README.md). Keep private roots and credentials outside this repository.
+
+The Server's automatic repository guidance keeps the fixed candidate list by
+default. An operator who needs to omit `CLAUDE.md` from startup, coding
+startup, and `project.instructions` sidecars may set
+`WEBCODEX_EXCLUDE_CLAUDE_INSTRUCTIONS=1` in the Server environment. This only
+changes automatic instruction selection; it does not delete the file or block
+an explicit authorized `read_files`/`read_file` call. Unset (or an unrecognized
+value) preserves the existing default and still keeps `AGENTS.md` eligible.
+
+If public Codex history is needed, configure the plugin's separate
+`WEBCODEX_WEB_WORKFLOW_HISTORY_ROOT`. Use `public_history_read` with an
+explicit thread id and its returned cursor. The reader is read-only, bounded,
+public-message-only, and source-change guarded; it is not a session recorder,
+does not infer a business or recording Session, and does not search the root
+by browsing unrelated history bodies. It performs only bounded filename lookup
+for the explicitly supplied thread id.
+
+For routine Plugin discovery, use `plugin_tool(action="list", ...)` to enumerate
+available providers/tools, then `plugin_tool(action="describe", ...)` for the
+selected tool's current schema, and reuse that binding for the operation. If the
+requested item is not known, list first and describe the chosen candidate. Use
+`plugin_tool(action="check", ...)` only for operator configuration validation or
+diagnosis; it must not weaken admission, permissions, capabilities, or output
+limits. There are no automatic retries or polling loops in this workflow.
+
+`public_history_read` accepts the optional `mode` value `forward` or
+`latest`. A fresh call defaults to `forward`; when a cursor is supplied, its mode
+is inferred, and an explicit conflicting mode is rejected. Forward cursors retain
+their existing continuation meaning. In latest mode, the reader fixes an initial
+EOF snapshot, selects newest eligible public messages first, and presents each
+returned page in chronological order. `nextCursor` then moves toward older
+history (`hasMore` reports whether older snapshot bytes remain); a fresh latest
+call observes later appends. Latest responses include `mode`, `snapshotBytes`,
+`hasMore`, and `complete`. Do not interpret latest `complete` or cursor as
+forward EOF/wait-for-append state.
+
+Latest provenance uses `source.path`, `source.offset`, and `source.line: null`;
+the reader does not scan the prefix to invent an absolute line number. Both
+directions read incrementally in bounded chunks: each call scans at most 512 KiB
+and spends at most 16 KiB on source fingerprints (at most 528 KiB total source
+reads). Pages may be empty while the cursor advances through malformed,
+non-public, oversized, or otherwise ineligible records; continue with the
+returned cursor when progress is reported. No automatic retry or polling is
+implied.
 
 For normal work, select the exact registered Project in `work_on_project`, leave repository instruction injection disabled, then use current search/read/edit/validation tools. Retain the Session identifier for multi-step work. Jobs or tmux work are retrieved manually; no ChatGPT auto-wake integration is provided.
 
@@ -22,6 +66,13 @@ Use `recording_session_id` explicitly for recorded calls. `read_files` returns a
 `expected_read_revision`; callers do not translate it into a SHA. Discover current
 schemas and inspect the selected Runner's capabilities when a script language is
 unavailable. JS/TS also require a suitable Node runtime on that Runner.
+
+For a known symbol/path, use the existing scoped CodeGraph provider with the
+current resolved Project and a live project-relative `pathPrefix`; inspect its
+freshness and candidate/result completeness, then verify decision-bearing facts
+with `search_project_texts`/`read_files`. A missing or stale graph result is an
+incomplete observation, not proof that source code is absent, and no automatic
+reindex is implied.
 
 Startup/finish workspace observations distinguish pre-existing dirty paths from
 later path/status changes. These are bounded Git observations, not filesystem
@@ -58,7 +109,7 @@ The merged upstream Git review path requires Git with `check-attr --source` supp
 - Use scoped development branches and commits with repository-local OpenSpec changes. This fork uses `coordexp/*` because its inherited `codex` branch prevents a `codex/*` ref namespace. Merge upstream before accepting an update, preserving the original history and local patches.
 - Fork deployment tags use `coordexp-YYYY.MM.DD.N`. These are self-hosted Linux prereleases, not upstream npm/desktop/container releases. The upstream package version remains visible alongside the exact Git commit and dirty flag.
 - The inherited container-release workflow skips `coordexp-*` tags; creating a fork prerelease does not authorize container or npm publication.
-- Before deployment: focused changed-contract tests, optional-plugin tests, strict OpenSpec validation, and a disposable real Server/Runner smoke. Build both binaries from the same clean commit using `release`; record checksums and actual build identities.
+- Before deployment: focused changed-contract tests, optional-plugin tests, strict OpenSpec validation, and a disposable real Server/Runner smoke. Build both binaries from the same clean commit using `dogfood` for local deployments (`release` for formal published artifacts); record checksums and actual build identities. Local deployment alone does not create a tag or GitHub Release.
 - Retain old binaries, operator config and a consistent Server-state backup. Check active jobs before restarting the existing Server/Runner. A schema migration may require restoring the matching backup when rolling back.
 - Publish only reviewed source and Linux artifacts with scope/validation notes to the fork. Do not invoke upstream package publication workflows. Never publish private configuration, memory content or operational credentials.
 - After deployment, verify MCP initialization, effective guidance identity, all registered projects, shared context, and the edit/test path on a disposable project. Refresh the ChatGPT connection when tool metadata changes, then start a new conversation if it retained old schemas.
@@ -67,8 +118,8 @@ The fork's focused real-entry smoke uses only disposable state and the selected 
 
 ```bash
 python3 scripts/e2e_web_workflow.py \
-  --server-bin target/release/webcodex-server \
-  --runner-bin target/release/webcodex-runner \
+  --server-bin target/dogfood/webcodex-server \
+  --runner-bin target/dogfood/webcodex-runner \
   --artifact-dir /absolute/private/verification-output \
   --timeout-secs 300
 ```

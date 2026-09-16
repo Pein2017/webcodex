@@ -4,6 +4,7 @@
 // stdout is reserved for one-line JSON-RPC protocol messages.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -21,6 +22,16 @@ const MEMORY_SEARCH_MAX_DIRECTORIES = 1024;
 const CODEGRAPH_CANDIDATE_LIMIT = 1000;
 const CHILD_OUTPUT_BYTES = 1024 * 1024;
 const CHILD_TIMEOUT_MS = 100_000;
+const HISTORY_SCAN_BYTES = 512 * 1024;
+const HISTORY_READ_TARGET_BYTES = 32 * 1024;
+const HISTORY_RECORD_MAX_BYTES = 128 * 1024;
+const HISTORY_DISCOVERY_MAX_ENTRIES = 8192;
+const HISTORY_MESSAGE_MAX_BYTES = 4 * 1024;
+const HISTORY_MAX_OMISSIONS = 32;
+const HISTORY_MAX_MESSAGES = 20;
+const HISTORY_MESSAGES_MAX_BYTES = 48 * 1024;
+const HISTORY_SEEN_IDS_MAX = 20;
+const HISTORY_CURSOR_MAX_LENGTH = 8 * 1024;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pytestHelper = path.join(here, "pytest_report.py");
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -120,6 +131,25 @@ const codegraphTool = {
       limit: integerProperty("Maximum returned symbols; defaults to 20.", 1, 50),
     },
     required: ["project", "search"],
+    additionalProperties: false,
+  },
+  annotations: readOnlyAnnotations,
+};
+
+const publicHistoryTool = {
+  name: "public_history_read",
+  title: "Read bounded public thread history",
+  description:
+    "Read bounded public user messages and assistant final/commentary messages for one explicitly selected local thread. Filename-only bounded discovery supports native dated rollouts; no unrelated history bodies are scanned. Analysis, system/developer/configuration and tool payloads are excluded and credential-like text is redacted. Forward is the default and keeps its source-bound cursor at EOF for appends. Latest returns newest messages from a fixed snapshot; its cursor continues only toward older snapshot history.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      threadId: stringProperty("Explicit thread identity; the reader opens the configured root's matching thread file.", 128),
+      cursor: stringProperty("Opaque cursor returned by a prior read for this same thread and source.", HISTORY_CURSOR_MAX_LENGTH),
+      mode: stringProperty("Optional traversal mode: forward (the default) or latest. A continuation cursor fixes its mode.", 16),
+      maxMessages: integerProperty(`Maximum public messages to return; defaults to 10 and cannot exceed ${HISTORY_MAX_MESSAGES}.`, 1, HISTORY_MAX_MESSAGES),
+    },
+    required: ["threadId"],
     additionalProperties: false,
   },
   annotations: readOnlyAnnotations,
@@ -257,6 +287,7 @@ function loadConfiguration() {
   const memoryRaw = process.env.WEBCODEX_WEB_WORKFLOW_MEMORY_ROOT;
   const codegraphRuntimeRaw = process.env.WEBCODEX_WEB_WORKFLOW_CODEGRAPH_RUNTIME;
   const codegraphEntryRaw = process.env.WEBCODEX_WEB_WORKFLOW_CODEGRAPH_ENTRY;
+  const historyRootRaw = process.env.WEBCODEX_WEB_WORKFLOW_HISTORY_ROOT;
   const projects = new Map();
 
   if (projectsRaw !== undefined) {
@@ -310,6 +341,10 @@ function loadConfiguration() {
             runtime: configuredFile(codegraphRuntimeRaw, "WEBCODEX_WEB_WORKFLOW_CODEGRAPH_RUNTIME", true),
             entry: configuredFile(codegraphEntryRaw, "WEBCODEX_WEB_WORKFLOW_CODEGRAPH_ENTRY"),
           },
+    historyRoot:
+      historyRootRaw === undefined
+        ? undefined
+        : configuredDirectory(historyRootRaw, "WEBCODEX_WEB_WORKFLOW_HISTORY_ROOT"),
   };
 }
 
@@ -332,6 +367,7 @@ function availableTools() {
   if (config.projects.size > 0) tools.push(pytestTool);
   if (config.memoryRoot !== undefined) tools.push(memorySearchTool, memoryReadTool);
   if (config.codegraph !== undefined) tools.push(codegraphTool);
+  if (config.historyRoot !== undefined) tools.push(publicHistoryTool);
   return tools;
 }
 
@@ -763,6 +799,590 @@ function readMemory(args, config) {
   };
 }
 
+function historyThreadPath(threadId, root, cursor) {
+  const id = requiredString(threadId, "threadId", 128);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id)) {
+    throw new ApplicationError(
+      "invalid_arguments",
+      "threadId must be an ASCII identifier suitable for one configured history file.",
+    );
+  }
+  const matches = (relative) => relative === `${id}.jsonl` ||
+    new RegExp(`^(?:\\d{4}/\\d{2}/\\d{2}/)?rollout-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-${id.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\.jsonl$`, "u").test(relative);
+  if (cursor !== undefined) {
+    if (cursor.threadId !== id || !matches(cursor.path)) {
+      throw new ApplicationError("invalid_cursor", "cursor belongs to a different thread history.");
+    }
+    return { id, relative: cursor.path };
+  }
+  // Only filenames are inspected. Never read unrelated history to locate a thread.
+  const found = [];
+  let entries = 0;
+  function visit(relative, depth) {
+    const directory = fs.opendirSync(path.join(root, relative));
+    try {
+      let entry;
+      while ((entry = directory.readSync()) !== null) {
+        if (++entries > HISTORY_DISCOVERY_MAX_ENTRIES) {
+          throw new ApplicationError("history_discovery_limit", "History filename discovery exceeded its bound; configure a narrower history root.");
+        }
+        const candidate = relative ? `${relative}/${entry.name}` : entry.name;
+        if (matches(candidate)) found.push(candidate);
+        if (entry.isDirectory() && depth < 3 && (depth === 0 ? /^\d{4}$/u : /^\d{2}$/u).test(entry.name)) {
+          visit(candidate, depth + 1);
+        }
+      }
+    } finally { directory.closeSync(); }
+  }
+  visit("", 0);
+  if (found.length !== 1) {
+    throw new ApplicationError(found.length ? "history_ambiguous" : "history_not_found", "Expected exactly one matching thread history under the configured root.");
+  }
+  return { id, relative: found[0] };
+}
+
+function historyStatIdentity(stat) {
+  return {
+    device: String(stat.dev),
+    inode: String(stat.ino),
+    size: stat.size,
+    modified: String(Math.trunc(stat.mtimeMs * 1000)),
+  };
+}
+
+function hashFileRange(source, start, length) {
+  const hash = createHash("sha256");
+  const buffer = Buffer.alloc(Math.min(4096, Math.max(length, 1)));
+  let remaining = length;
+  let offset = 0;
+  while (remaining > 0) {
+    const count = fs.readSync(source.fd, buffer, 0, Math.min(buffer.length, remaining), start + offset);
+    if (count === 0) throw historySourceChanged();
+    source.bytesRead += count;
+    hash.update(buffer.subarray(0, count));
+    remaining -= count;
+    offset += count;
+  }
+  return hash.digest("hex");
+}
+
+function readHistorySource(root, relative) {
+  const { resolved } = confinedPath(root, relative, "file", "history_not_found");
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(resolved, flags);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new ApplicationError("history_not_found", "The selected thread history is not a regular file.");
+    return {
+      resolved,
+      size: stat.size,
+      stat,
+      fd,
+      bytesRead: 0,
+    };
+  } catch (error) {
+    fs.closeSync(fd);
+    throw error;
+  }
+}
+
+function readHistoryRange(source, offset, length) {
+  if (length <= 0 || offset >= source.size) return Buffer.alloc(0);
+  const wanted = Math.min(length, source.size - offset);
+  const buffer = Buffer.alloc(wanted);
+  let used = 0;
+  while (used < wanted) {
+    const count = fs.readSync(source.fd, buffer, used, wanted - used, offset + used);
+    if (count === 0) throw historySourceChanged();
+    used += count;
+  }
+  source.bytesRead += used;
+  return buffer;
+}
+
+function encodeHistoryCursor(value) {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function decodeHistoryCursor(value) {
+  if (value === undefined) return undefined;
+  const raw = requiredString(value, "cursor", HISTORY_CURSOR_MAX_LENGTH);
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new ApplicationError("invalid_cursor", "cursor is not a valid history continuation cursor.");
+  }
+  const validIdentity = (identity) => identity !== null &&
+    typeof identity === "object" &&
+    typeof identity.device === "string" &&
+    typeof identity.inode === "string" &&
+    Number.isSafeInteger(identity.size) &&
+    identity.size >= 0 &&
+    typeof identity.modified === "string" &&
+    typeof identity.headHash === "string" &&
+    typeof identity.tailHash === "string";
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    typeof parsed.threadId !== "string" ||
+    typeof parsed.path !== "string" ||
+    (parsed.seen !== undefined &&
+      (!Array.isArray(parsed.seen) ||
+        parsed.seen.length > HISTORY_SEEN_IDS_MAX ||
+        parsed.seen.some((id) => typeof id !== "string" || id.length === 0 || id.length > 256))) ||
+    !validIdentity(parsed.identity)
+  ) {
+    throw new ApplicationError("invalid_cursor", "cursor has an invalid history continuation shape.");
+  }
+  if (parsed.version === 2) {
+    if (!Number.isSafeInteger(parsed.offset) || parsed.offset < 0 ||
+        !Number.isSafeInteger(parsed.line) || parsed.line < 1 ||
+        (parsed.discarding !== undefined && typeof parsed.discarding !== "boolean")) {
+      throw new ApplicationError("invalid_cursor", "cursor has an invalid history continuation shape.");
+    }
+    return parsed;
+  }
+  if (parsed.version === 3 && parsed.mode === "latest") {
+    if (!Number.isSafeInteger(parsed.snapshotBytes) || parsed.snapshotBytes < 0 ||
+        parsed.snapshotBytes !== parsed.identity.size ||
+        !Number.isSafeInteger(parsed.boundary) || parsed.boundary < 0 || parsed.boundary > parsed.snapshotBytes ||
+        (parsed.discarding !== undefined && typeof parsed.discarding !== "boolean")) {
+      throw new ApplicationError("invalid_cursor", "cursor has an invalid latest-history continuation shape.");
+    }
+    return parsed;
+  }
+  throw new ApplicationError("invalid_cursor", "cursor has an invalid history continuation shape.");
+}
+
+function historySourceChanged() {
+  return new ApplicationError(
+    "history_source_changed",
+    "The selected thread history was truncated or replaced; restart from the beginning.",
+  );
+}
+
+function validateHistoryCursor(cursor, threadId, relative, source) {
+  if (cursor.threadId !== threadId || cursor.path !== relative) {
+    throw new ApplicationError("invalid_cursor", "cursor belongs to a different thread history.");
+  }
+  const identity = cursor.identity;
+  const current = historyStatIdentity(source.stat);
+  if (
+    identity.device !== current.device ||
+    identity.inode !== current.inode ||
+    (cursor.version === 2 && cursor.offset > identity.size) ||
+    (cursor.version === 3 && cursor.boundary > identity.size) ||
+    source.size < identity.size ||
+    source.size < cursor.offset ||
+    (source.size === identity.size && identity.modified !== current.modified)
+  ) {
+    throw historySourceChanged();
+  }
+  const length = Math.min(identity.size, 4096);
+  if (identity.headHash !== hashFileRange(source, 0, length) ||
+      identity.tailHash !== hashFileRange(source, identity.size - length, length)) {
+    throw historySourceChanged();
+  }
+}
+
+function recordThreadId(record) {
+  return record?.type === "session_meta" ? record.payload?.id : record?.thread_id;
+}
+
+function redactPublicText(value) {
+  let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, " ");
+  let redacted = false;
+  const replace = (pattern, replacement) => {
+    const next = text.replace(pattern, replacement);
+    if (next !== text) redacted = true;
+    text = next;
+  };
+  replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}\b/gu, "[REDACTED_CREDENTIAL]");
+  replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/gu, "[REDACTED_CREDENTIAL]");
+  replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu, "[REDACTED_CREDENTIAL]");
+  replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/giu, "Bearer [REDACTED_CREDENTIAL]");
+  replace(
+    /\b((?:api[_-]?key|access[_-]?token|authorization|password|secret|token)\s*[:=]\s*)[^\s,;]+/giu,
+    "$1[REDACTED_CREDENTIAL]",
+  );
+  const bounded = truncateUtf8(text, HISTORY_MESSAGE_MAX_BYTES);
+  if (bounded !== text) redacted = true;
+  return { text: bounded, redacted };
+}
+
+function publicHistoryMessage(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return undefined;
+  const payload = record.payload;
+  if (payload === null || typeof payload !== "object") return undefined;
+  let role, phase, rawText;
+  const channels = [payload.phase, payload.channel, record.channel].filter(value => value != null);
+  if (channels.some(value => value !== "final" && value !== "commentary")) return undefined;
+  if (record.type === "event_msg" && ["user_message", "agent_message"].includes(payload.type)) {
+    role = payload.type === "user_message" ? "user" : "assistant";
+    phase = role === "user" ? "user" : (channels[0] ?? "final");
+    rawText = payload.message;
+  } else if (record.type === "response_item" && payload.type === "message" && ["user", "assistant"].includes(payload.role)) {
+    role = payload.role;
+    if (role === "assistant" && channels.length === 0) return undefined;
+    phase = role === "user" ? "user" : channels[0];
+    if (!Array.isArray(payload.content)) return undefined;
+    const textType = role === "user" ? "input_text" : "output_text";
+    // Images and unrecognized content blocks are never recursively projected.
+    rawText = payload.content.filter(item => item?.type === textType && typeof item.text === "string").map(item => item.text).join("\n");
+  } else return undefined;
+  if (typeof rawText !== "string") return undefined;
+  rawText = rawText.trim();
+  if (rawText.length === 0) return undefined;
+  const safe = redactPublicText(rawText);
+  const payloadId = [payload.id, record.id].find(candidate => typeof candidate === "string" && candidate.length > 0 && candidate.length <= 256);
+  return {
+    id: payloadId,
+    role,
+    phase,
+    text: safe.text,
+    redacted: safe.redacted,
+  };
+}
+
+function addHistoryOmission(omissions, line, offset, reason) {
+  if (omissions.length < HISTORY_MAX_OMISSIONS) omissions.push({ line, offset, reason });
+}
+
+function historyCursor(threadId, relative, source, offset, line, discarding, seen) {
+  return encodeHistoryCursor({
+    version: 2,
+    threadId,
+    path: relative,
+    offset,
+    line,
+    discarding,
+    seen: Array.from(seen).slice(-HISTORY_SEEN_IDS_MAX),
+    identity: {
+      ...historyStatIdentity(source.stat),
+      headHash: hashFileRange(source, 0, Math.min(source.size, 4096)),
+      tailHash: hashFileRange(
+        source,
+        Math.max(0, source.stat.size - 4096),
+        Math.min(source.stat.size, 4096),
+      ),
+    },
+  });
+}
+
+function historyIdentity(source, snapshotBytes = source.size) {
+  return {
+    ...historyStatIdentity(source.stat),
+    size: snapshotBytes,
+    headHash: hashFileRange(source, 0, Math.min(snapshotBytes, 4096)),
+    tailHash: hashFileRange(source, Math.max(0, snapshotBytes - 4096), Math.min(snapshotBytes, 4096)),
+  };
+}
+
+function projectHistoryRecord(recordBytes, sourceLine, sourceOffset, threadId, relative, seen, omissions, latest) {
+  let normalized = recordBytes;
+  if (normalized.length > 0 && normalized[normalized.length - 1] === 0x0d) normalized = normalized.subarray(0, normalized.length - 1);
+  if (normalized.length > HISTORY_RECORD_MAX_BYTES) {
+    addHistoryOmission(omissions, sourceLine, sourceOffset, "record_too_large");
+    return undefined;
+  }
+  if (normalized.length === 0) return undefined;
+  let record;
+  try {
+    record = JSON.parse(utf8Decoder.decode(normalized));
+  } catch {
+    addHistoryOmission(omissions, sourceLine, sourceOffset, "malformed_record");
+    return undefined;
+  }
+  const recordId = recordThreadId(record);
+  if (record?.type === "session_meta" && recordId !== threadId) {
+    throw new ApplicationError("history_thread_mismatch", "The source session identity does not match the requested thread.");
+  }
+  if (recordId !== undefined && recordId !== threadId) {
+    addHistoryOmission(omissions, sourceLine, sourceOffset, "different_thread");
+    return undefined;
+  }
+  const message = publicHistoryMessage(record);
+  if (message === undefined) {
+    addHistoryOmission(omissions, sourceLine, sourceOffset, "non_public_record");
+    return undefined;
+  }
+  if (message.id !== undefined && seen.has(message.id)) {
+    addHistoryOmission(omissions, sourceLine, sourceOffset, "duplicate_representation");
+    return undefined;
+  }
+  return {
+    explicitId: message.id,
+    projected: {
+      ...message,
+      id: message.id ?? `${relative}:${sourceOffset}`,
+      source: { path: relative, line: latest ? null : sourceLine, offset: sourceOffset },
+    },
+  };
+}
+
+function rememberHistoryMessage(explicitId, seen) {
+  if (explicitId !== undefined) {
+    seen.add(explicitId);
+    if (seen.size > HISTORY_SEEN_IDS_MAX) seen.delete(seen.values().next().value);
+  }
+}
+
+function readForwardHistory(source, state) {
+  const { threadId, relative, maxMessages, offset, line, discarding: initialDiscarding, seen } = state;
+  const messages = [];
+  const omissions = [];
+  let messagesBytes = 0;
+  let current = offset;
+  let lineStart = offset;
+  let nextLine = line;
+  let discarding = initialDiscarding;
+  let parts = [];
+  let recordBytes = 0;
+  let recordsScanned = 0;
+  let scanBytesRead = 0;
+  let stopped = false;
+  while (current < source.size && scanBytesRead < HISTORY_SCAN_BYTES && !stopped) {
+    const chunk = readHistoryRange(source, current, Math.min(HISTORY_READ_TARGET_BYTES, HISTORY_SCAN_BYTES - scanBytesRead));
+    scanBytesRead += chunk.length;
+    let position = 0;
+    while (position < chunk.length) {
+      const newline = chunk.indexOf(0x0a, position);
+      const end = newline < 0 ? chunk.length : newline;
+      const piece = chunk.subarray(position, end);
+      const consumed = (newline < 0 ? chunk.length : newline + 1) - position;
+      if (!discarding) {
+        recordBytes += piece.length;
+        if (recordBytes > HISTORY_RECORD_MAX_BYTES) {
+          addHistoryOmission(omissions, nextLine, lineStart, "record_too_large");
+          parts = [];
+          discarding = true;
+        } else {
+          parts.push(piece);
+        }
+      }
+      current += consumed;
+      position += consumed;
+      if (newline < 0) continue;
+      const sourceLine = nextLine;
+      nextLine += 1;
+      recordsScanned += 1;
+      if (!discarding) {
+        const admission = projectHistoryRecord(Buffer.concat(parts, recordBytes), sourceLine, lineStart, threadId, relative, seen, omissions, false);
+        if (admission !== undefined) {
+          const projectedBytes = Buffer.byteLength(JSON.stringify(admission.projected), "utf8");
+          if (messagesBytes + projectedBytes > HISTORY_MESSAGES_MAX_BYTES) {
+            current = lineStart;
+            nextLine = sourceLine;
+            recordsScanned -= 1;
+            stopped = true;
+            break;
+          }
+          rememberHistoryMessage(admission.explicitId, seen);
+          messages.push(admission.projected);
+          messagesBytes += projectedBytes;
+        }
+      }
+      discarding = false;
+      parts = [];
+      recordBytes = 0;
+      lineStart = current;
+      if (messages.length >= maxMessages) {
+        stopped = true;
+        break;
+      }
+    }
+  }
+  const atEof = current >= source.size;
+  const partial = !discarding && lineStart < current;
+  const waitingForAppend = atEof && (partial || discarding);
+  const nextOffset = partial ? lineStart : current;
+  const complete = nextOffset >= source.size && !waitingForAppend;
+  return {
+    messages,
+    omissions,
+    recordsScanned,
+    bytesScanned: current - offset,
+    nextOffset,
+    nextLine,
+    discarding,
+    complete,
+    waitingForAppend,
+  };
+}
+
+function previousNewline(source, end, scan) {
+  let current = end;
+  while (current > 0 && scan.bytes < HISTORY_SCAN_BYTES) {
+    const size = Math.min(HISTORY_READ_TARGET_BYTES, current, HISTORY_SCAN_BYTES - scan.bytes);
+    const start = current - size;
+    const chunk = readHistoryRange(source, start, size);
+    scan.bytes += chunk.length;
+    const newline = chunk.lastIndexOf(0x0a);
+    if (newline >= 0) return { found: true, offset: start + newline };
+    current = start;
+  }
+  return { found: false, offset: current };
+}
+
+function readLatestRecord(source, start, end, scan) {
+  const parts = [];
+  let current = start;
+  while (current < end) {
+    const size = Math.min(HISTORY_READ_TARGET_BYTES, end - current, HISTORY_SCAN_BYTES - scan.bytes);
+    if (size <= 0) return undefined;
+    const chunk = readHistoryRange(source, current, size);
+    scan.bytes += chunk.length;
+    parts.push(chunk);
+    current += chunk.length;
+  }
+  return Buffer.concat(parts);
+}
+
+function latestHistoryCursor(threadId, relative, identity, boundary, seen, discarding) {
+  return encodeHistoryCursor({
+    version: 3,
+    mode: "latest",
+    threadId,
+    path: relative,
+    snapshotBytes: identity.size,
+    boundary,
+    discarding,
+    seen: Array.from(seen).slice(-HISTORY_SEEN_IDS_MAX),
+    identity,
+  });
+}
+
+function readLatestHistory(source, state) {
+  const { threadId, relative, maxMessages, identity, seen } = state;
+  let boundary = state.boundary;
+  let discarding = state.discarding;
+  const messages = [];
+  const omissions = [];
+  let messagesBytes = 0;
+  let recordsScanned = 0;
+  const scan = { bytes: 0 };
+  while (boundary > 0 && scan.bytes < HISTORY_SCAN_BYTES && messages.length < maxMessages) {
+    if (discarding) {
+      const skipped = previousNewline(source, boundary, scan);
+      if (!skipped.found) {
+        boundary = skipped.offset;
+        break;
+      }
+      boundary = skipped.offset + 1;
+      discarding = false;
+      continue;
+    }
+    const terminal = readHistoryRange(source, boundary - 1, 1);
+    scan.bytes += terminal.length;
+    if (terminal[0] !== 0x0a) {
+      const trailing = previousNewline(source, boundary, scan);
+      if (!trailing.found) {
+        // A scan-budget boundary is not evidence that this trailing record is
+        // oversized. Keep a possibly valid record at its original boundary so
+        // a fresh call can reread it with a full budget.
+        if (trailing.offset === 0 || boundary - trailing.offset > HISTORY_RECORD_MAX_BYTES) {
+          boundary = trailing.offset;
+          if (boundary > 0) discarding = true;
+        }
+        break;
+      }
+      boundary = trailing.offset + 1;
+      continue;
+    }
+    const previous = previousNewline(source, boundary - 1, scan);
+    if (!previous.found) {
+      // Do not conflate the per-call scan budget with the record bound: a
+      // short valid record can be cut by the remaining call budget after
+      // newer records consumed it. Only advance a discard continuation once
+      // the scanned suffix itself proves this record exceeds the record cap.
+      if (previous.offset > 0) {
+        if (boundary - 1 - previous.offset > HISTORY_RECORD_MAX_BYTES) {
+          boundary = previous.offset;
+          discarding = true;
+        }
+        break;
+      }
+    }
+    const start = previous.found ? previous.offset + 1 : 0;
+    const recordLength = boundary - 1 - start;
+    if (recordLength > HISTORY_RECORD_MAX_BYTES) {
+      addHistoryOmission(omissions, null, start, "record_too_large");
+      recordsScanned += 1;
+      boundary = start;
+      continue;
+    }
+    const record = readLatestRecord(source, start, boundary - 1, scan);
+    if (record === undefined) break;
+    const admission = projectHistoryRecord(record, null, start, threadId, relative, seen, omissions, true);
+    recordsScanned += 1;
+    if (admission !== undefined) {
+      const projectedBytes = Buffer.byteLength(JSON.stringify(admission.projected), "utf8");
+      if (messagesBytes + projectedBytes > HISTORY_MESSAGES_MAX_BYTES) break;
+      rememberHistoryMessage(admission.explicitId, seen);
+      messages.push(admission.projected);
+      messagesBytes += projectedBytes;
+    }
+    boundary = start;
+  }
+  const complete = boundary === 0;
+  return { messages: messages.reverse(), omissions, recordsScanned, bytesScanned: scan.bytes, boundary, discarding, complete };
+}
+
+function readPublicHistory(args, config) {
+  const values = assertObject(args);
+  rejectUnknownKeys(values, new Set(["threadId", "cursor", "mode", "maxMessages"]));
+  const cursor = decodeHistoryCursor(values.cursor);
+  const requestedMode = values.mode === undefined ? undefined : requiredString(values.mode, "mode", 16);
+  if (requestedMode !== undefined && requestedMode !== "forward" && requestedMode !== "latest") {
+    throw new ApplicationError("invalid_arguments", "mode must be forward or latest.");
+  }
+  const cursorMode = cursor?.version === 3 ? "latest" : "forward";
+  if (cursor !== undefined && requestedMode !== undefined && requestedMode !== cursorMode) {
+    throw new ApplicationError("invalid_cursor", "cursor mode conflicts with the requested history traversal mode.");
+  }
+  const mode = requestedMode ?? cursorMode;
+  const { id: threadId, relative } = historyThreadPath(values.threadId, config.historyRoot, cursor);
+  const maxMessages = integerInRange(values.maxMessages, 10, 1, HISTORY_MAX_MESSAGES, "maxMessages");
+  const source = readHistorySource(config.historyRoot, relative);
+  try {
+    if (cursor !== undefined) validateHistoryCursor(cursor, threadId, relative, source);
+    if (mode === "latest") {
+      const identity = cursor?.identity ?? historyIdentity(source);
+      const seen = new Set(cursor?.seen ?? []);
+      const result = readLatestHistory(source, {
+        threadId,
+        relative,
+        maxMessages,
+        identity,
+        boundary: cursor?.boundary ?? identity.size,
+        discarding: cursor?.discarding === true,
+        seen,
+      });
+      const nextCursor = result.complete ? null : latestHistoryCursor(threadId, relative, identity, result.boundary, seen, result.discarding);
+      const structured = {
+        source: { root: config.historyRoot, path: relative }, threadId, mode, snapshotBytes: identity.size,
+        messages: result.messages, returnedMessages: result.messages.length, hasMore: !result.complete, complete: result.complete, nextCursor,
+        progress: { bytesScanned: result.bytesScanned, bytesRead: source.bytesRead, recordsScanned: result.recordsScanned, nextBoundary: result.boundary, discarding: result.discarding },
+        omissions: result.omissions, omissionsTruncated: result.omissions.length >= HISTORY_MAX_OMISSIONS,
+        limits: { maxMessages, maxScanBytes: HISTORY_SCAN_BYTES, maxRecordBytes: HISTORY_RECORD_MAX_BYTES, maxMessageBytes: HISTORY_MESSAGE_MAX_BYTES, maxMessagesJsonBytes: HISTORY_MESSAGES_MAX_BYTES, maxReadBytes: HISTORY_SCAN_BYTES + 16 * 1024, maxDiscoveryEntries: HISTORY_DISCOVERY_MAX_ENTRIES },
+      };
+      return { text: `Read ${result.messages.length} newest public messages for thread ${threadId}; scanned ${result.recordsScanned} records and ${result.bytesScanned} bytes.${result.complete ? " Snapshot exhausted." : " Continue with nextCursor for older snapshot history."}${result.omissions.length > 0 ? " See omission receipts for skipped records." : ""}`, structured };
+    }
+    const seen = new Set(cursor?.seen ?? []);
+    const result = readForwardHistory(source, { threadId, relative, maxMessages, offset: cursor?.offset ?? 0, line: cursor?.line ?? 1, discarding: cursor?.discarding === true, seen });
+    const nextCursor = historyCursor(threadId, relative, source, result.nextOffset, result.nextLine, result.discarding, seen);
+    const structured = {
+      source: { root: config.historyRoot, path: relative }, threadId, mode, messages: result.messages, returnedMessages: result.messages.length,
+      complete: result.complete, eof: result.nextOffset >= source.size, waitingForAppend: result.waitingForAppend, nextCursor,
+      progress: { bytesScanned: result.bytesScanned, bytesRead: source.bytesRead, recordsScanned: result.recordsScanned, nextOffset: result.nextOffset, nextLine: result.nextLine, discarding: result.discarding },
+      omissions: result.omissions, omissionsTruncated: result.omissions.length >= HISTORY_MAX_OMISSIONS,
+      limits: { maxMessages, maxScanBytes: HISTORY_SCAN_BYTES, maxRecordBytes: HISTORY_RECORD_MAX_BYTES, maxMessageBytes: HISTORY_MESSAGE_MAX_BYTES, maxMessagesJsonBytes: HISTORY_MESSAGES_MAX_BYTES, maxReadBytes: HISTORY_SCAN_BYTES + 16 * 1024, maxDiscoveryEntries: HISTORY_DISCOVERY_MAX_ENTRIES },
+    };
+    return { text: `Read ${result.messages.length} public messages for thread ${threadId}; scanned ${result.recordsScanned} records and ${result.bytesScanned} bytes.${result.waitingForAppend ? " Incomplete record: retain nextCursor and wait for source growth." : result.complete ? " Current EOF: retain nextCursor for future appends." : " Continue with nextCursor for the bounded remainder."}${result.omissions.length > 0 ? " See omission receipts for skipped records." : ""}`, structured };
+  } finally { fs.closeSync(source.fd); }
+}
+
 async function runCodeGraph(config, command) {
   const { stdout } = await runChild(config.codegraph.runtime, [
     "--liftoff-only",
@@ -927,6 +1547,11 @@ async function callTool(id, name, args) {
     }
     if (name === codegraphTool.name && config.codegraph !== undefined) {
       const result = await queryCodeGraph(args, config);
+      toolResult(id, result.text, result.structured);
+      return;
+    }
+    if (name === publicHistoryTool.name && config.historyRoot !== undefined) {
+      const result = readPublicHistory(args, config);
       toolResult(id, result.text, result.structured);
       return;
     }

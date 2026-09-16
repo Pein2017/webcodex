@@ -469,8 +469,11 @@ impl ToolRuntime {
                 )
             }
         };
-        let proj = match self.resolve_project(&project).await {
-            Ok(p) => p,
+        let resolved = match self
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
+            Ok(resolved) => resolved,
             Err(e) => {
                 return Self::run_shell_tool_failure_result(
                     command_rejected_message(
@@ -482,6 +485,8 @@ impl ToolRuntime {
                 )
             }
         };
+        let project_id = resolved.resolved_id.clone();
+        let proj = resolved.config;
         let declared_purpose = purpose.unwrap_or_default();
         let command_summary = command_preview(&command);
         let client_id = proj.client_id.clone();
@@ -583,7 +588,7 @@ impl ToolRuntime {
                     },
                     "tool_runtime".to_string(),
                     ShellJobStartMetadata {
-                        project_id: Some(project.clone()),
+                        project_id: Some(project_id),
                         session_id: session_id.map(str::to_string),
                         project_cwd: Some(resolved_cwd.clone()),
                         purpose: Some(declared_purpose.as_str().to_string()),

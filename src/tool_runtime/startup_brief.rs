@@ -763,6 +763,7 @@ fn instruction_snapshots_match(
     previous: &ProjectInstructionsSummarySnapshot,
 ) -> bool {
     current.loaded == previous.loaded
+        && current.candidate_paths == previous.candidate_paths
         && current.truncated == previous.truncated
         && current.total_chars == previous.total_chars
         && current.files.len() == previous.files.len()
@@ -782,10 +783,18 @@ fn changed_instruction_sources(
     previous: Option<&ProjectInstructionsSummarySnapshot>,
 ) -> Vec<String> {
     let mut changed = Vec::new();
-    for candidate in INSTRUCTION_CANDIDATE_PATHS {
-        let current_file = current.files.iter().find(|file| file.path == *candidate);
-        let previous_file = previous
-            .and_then(|snapshot| snapshot.files.iter().find(|file| file.path == *candidate));
+    let mut candidates = current.candidate_paths.clone();
+    if let Some(previous) = previous {
+        for candidate in &previous.candidate_paths {
+            if !candidates.contains(candidate) {
+                candidates.push(candidate.clone());
+            }
+        }
+    }
+    for candidate in candidates {
+        let current_file = current.files.iter().find(|file| file.path == candidate);
+        let previous_file =
+            previous.and_then(|snapshot| snapshot.files.iter().find(|file| file.path == candidate));
         let differs = match (current_file, previous_file) {
             (Some(left), Some(right)) => {
                 left.fingerprint != right.fingerprint || left.truncated != right.truncated
@@ -794,7 +803,7 @@ fn changed_instruction_sources(
             _ => true,
         };
         if differs {
-            changed.push((*candidate).to_string());
+            changed.push(candidate);
         }
     }
     changed

@@ -8,6 +8,8 @@ use crate::runner_protocol::RunnerCapabilities;
 
 #[tokio::test]
 async fn start_session_without_project_instructions_when_no_candidate_exists() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.remove(project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV);
     // The agent is registered (so the project resolves) but no instruction
     // candidate file exists on the agent host. Every candidate file_read is
     // answered with a not-found error, the loader skips them all, and
@@ -81,6 +83,11 @@ async fn start_session_without_project_instructions_when_no_candidate_exists() {
 
 #[tokio::test]
 async fn start_session_loads_agents_md_from_agent_project() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set(
+        project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV,
+        "true",
+    );
     let runtime = runtime_with_agent_project("instr-loader");
     register_agent(
         &runtime,
@@ -112,7 +119,8 @@ async fn start_session_loads_agents_md_from_agent_project() {
                 .await
         }
     });
-    // The loader tries AGENTS.md first; drive that single file_read.
+    // With CLAUDE excluded, the loader still tries AGENTS.md first; drive that
+    // single file_read to prove an eligible source remains available.
     let req = wait_for_runner_request_for_instance(&runtime, "instr-loader", "inst").await;
     assert_eq!(req.kind, "file_read");
     assert_eq!(req.path.as_deref(), Some("AGENTS.md"));
@@ -151,6 +159,8 @@ async fn start_session_loads_agents_md_from_agent_project() {
 
 #[tokio::test]
 async fn start_session_truncates_large_instruction_file() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.remove(project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV);
     let runtime = runtime_with_agent_project("instr-trunc");
     register_agent(
         &runtime,
@@ -224,6 +234,8 @@ async fn start_session_truncates_large_instruction_file() {
 
 #[tokio::test]
 async fn session_summary_returns_project_instructions_without_content() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.remove(project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV);
     let runtime = runtime_with_agent_project("instr-summary");
     register_agent(
         &runtime,
@@ -311,6 +323,8 @@ async fn session_summary_returns_project_instructions_without_content() {
 
 #[tokio::test]
 async fn load_project_instructions_first_match_wins_from_agent_project() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.remove(project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV);
     let dir = tempfile::tempdir().unwrap();
     let runtime = test_runtime();
     register_agent(
@@ -366,7 +380,71 @@ async fn load_project_instructions_first_match_wins_from_agent_project() {
 }
 
 #[tokio::test]
+async fn claude_instruction_exclusion_is_consistent_and_keeps_unavailable_distinct() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set(
+        project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV,
+        "true",
+    );
+    let candidates = project_instructions::effective_instruction_candidate_paths();
+    assert!(candidates.iter().any(|path| path == "AGENTS.md"));
+    assert!(!candidates.iter().any(|path| path == "CLAUDE.md"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = test_runtime();
+    register_agent(
+        &runtime,
+        "instr-claude-excluded",
+        None,
+        RunnerCapabilities {
+            file_read: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let config = ProjectConfig {
+        path: dir.path().to_string_lossy().to_string(),
+        client_id: "instr-claude-excluded".to_string(),
+        allow_patch: true,
+    };
+    let load = runtime.load_project_instructions(&config);
+    let drive_agent = async {
+        for (index, expected_path) in candidates.iter().enumerate() {
+            let request =
+                wait_for_runner_request_for_instance(&runtime, "instr-claude-excluded", "inst")
+                    .await;
+            assert_eq!(request.kind, "file_read");
+            assert_eq!(request.path.as_deref(), Some(expected_path.as_str()));
+            let (code, stderr) = if index == 2 {
+                (2, "runner capability unavailable")
+            } else {
+                (1, "no such file or directory")
+            };
+            complete_patch_agent_request(
+                &runtime,
+                "instr-claude-excluded",
+                &request.request_id,
+                code,
+                "",
+                stderr,
+            )
+            .await;
+        }
+    };
+    let (snapshot, _) = tokio::join!(load, drive_agent);
+    assert!(!snapshot.scan_complete);
+    assert!(!snapshot.loaded);
+    assert_eq!(snapshot.candidate_paths, candidates);
+    assert!(snapshot
+        .candidate_paths
+        .iter()
+        .all(|path| path != "CLAUDE.md"));
+}
+
+#[tokio::test]
 async fn load_project_instructions_empty_when_no_candidates_exist() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.remove(project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV);
     let dir = tempfile::tempdir().unwrap();
     let config = local_project_config(&dir.path().to_string_lossy());
     let runtime = test_runtime();

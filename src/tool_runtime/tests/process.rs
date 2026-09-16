@@ -518,6 +518,47 @@ async fn run_process_enqueues_only_typed_argv_and_reports_completed_exit_codes()
 }
 
 #[tokio::test]
+async fn run_process_alias_binds_canonical_runtime_project_id_in_recovery_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = test_runtime();
+    let client_id = "process-alias-recovery-context";
+    let canonical = register_process_job_agent(&runtime, client_id, temp.path()).await;
+    let auth = auth_context(None, true);
+
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .dispatch_with_auth(process_call("demo".to_string(), None), Some(&auth))
+                .await
+        }
+    });
+    let request = wait_for_patch_agent_request(&runtime, client_id).await;
+    assert_eq!(
+        request
+            .job_context
+            .as_ref()
+            .and_then(|context| context.runtime_project_id.as_deref()),
+        Some(canonical.as_str()),
+        "execution recovery metadata must use the canonical runtime project id"
+    );
+    update_process_job(
+        &runtime,
+        client_id,
+        &request,
+        "completed",
+        Some(ShellCommandExecutionState::Completed),
+        Some(0),
+        Some("stdout"),
+        Some(""),
+        None,
+    )
+    .await;
+    let result = task.await.unwrap();
+    assert!(result.success, "{}", result.output);
+}
+
+#[tokio::test]
 async fn kernel_records_completed_pytest_counts_before_compacting_public_success() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = test_runtime();

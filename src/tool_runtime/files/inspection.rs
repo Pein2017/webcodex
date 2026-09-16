@@ -676,7 +676,7 @@ impl ToolRuntime {
     // -------------------------------------------------------------------------
 
     /// Best-effort load of project-local instruction files
-    /// (`project_instructions::INSTRUCTION_CANDIDATE_PATHS`) for a resolved
+    /// (the effective fixed project-instruction candidate list) for a resolved
     /// project. Candidates are tried in fixed order; the first candidate that
     /// reads successfully wins, bounding Runner round-trips. Any read failure
     /// (Runner not connected, file missing, timeout, decode error) is swallowed
@@ -689,12 +689,10 @@ impl ToolRuntime {
         &self,
         config: &ProjectConfig,
     ) -> super::project_instructions::ProjectInstructionsSnapshot {
-        use super::project_instructions::{
-            ProjectInstructionsSnapshot, INSTRUCTION_CANDIDATE_PATHS,
-        };
+        use super::project_instructions::ProjectInstructionsSnapshot;
         let mut scan_complete = true;
-        for candidate in INSTRUCTION_CANDIDATE_PATHS {
-            match self.read_instruction_candidate(config, candidate).await {
+        for candidate in super::project_instructions::effective_instruction_candidate_paths() {
+            match self.read_instruction_candidate(config, &candidate).await {
                 InstructionCandidateRead::Found(candidate) => {
                     return ProjectInstructionsSnapshot::from_candidates(
                         vec![candidate],
@@ -721,10 +719,9 @@ impl ToolRuntime {
         &self,
         config: &ProjectConfig,
     ) -> super::project_instructions::ProjectInstructionsSnapshot {
-        use super::project_instructions::{
-            ProjectInstructionsSnapshot, INSTRUCTION_CANDIDATE_PATHS,
-        };
-        let reads = INSTRUCTION_CANDIDATE_PATHS
+        use super::project_instructions::ProjectInstructionsSnapshot;
+        let candidates = super::project_instructions::effective_instruction_candidate_paths();
+        let reads = candidates
             .iter()
             .map(|candidate| self.read_instruction_candidate(config, candidate));
         let results = futures_util::future::join_all(reads).await;
@@ -747,7 +744,7 @@ impl ToolRuntime {
         let mut found = Vec::new();
         let mut scan_complete = true;
         for (index, result) in results.into_iter().enumerate() {
-            let path = INSTRUCTION_CANDIDATE_PATHS[index];
+            let path = candidates[index].as_str();
             let skip_alias = matches!(
                 (path, agents_alias),
                 (

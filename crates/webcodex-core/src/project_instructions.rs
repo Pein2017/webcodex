@@ -20,6 +20,11 @@ pub const MAX_TOTAL_CHARS: usize = 32 * 1024;
 /// Conservative per-file line cap.
 pub const MAX_LINES_PER_FILE: usize = 400;
 
+/// Operator-controlled opt-out for the `CLAUDE.md` project-guidance source.
+/// The setting is intentionally narrow: it filters this fixed candidate list
+/// only, and does not change ordinary explicit file reads.
+pub const CLAUDE_INSTRUCTIONS_EXCLUSION_ENV: &str = "WEBCODEX_EXCLUDE_CLAUDE_INSTRUCTIONS";
+
 /// Fixed, ordered candidate instruction file paths tried at session start.
 pub const INSTRUCTION_CANDIDATE_PATHS: &[&str] = &[
     "AGENTS.md",
@@ -112,11 +117,35 @@ pub struct LoadedInstructionCandidate {
     pub full_sha256: Option<String>,
 }
 
-fn candidate_paths() -> Vec<String> {
+/// Return the fixed candidate paths after applying the operator's narrow
+/// `CLAUDE.md` exclusion policy. Values `1`, `true`, `yes`, and `on` (case
+/// insensitive, with surrounding whitespace ignored) enable the exclusion;
+/// unset and all other values preserve the upstream candidate list.
+pub fn instruction_candidate_paths(exclude_claude: bool) -> Vec<String> {
     INSTRUCTION_CANDIDATE_PATHS
         .iter()
+        .filter(|path| !exclude_claude || **path != "CLAUDE.md")
         .map(|s| s.to_string())
         .collect()
+}
+
+/// Read the process-wide operator setting used by all project-guidance
+/// loaders. Invalid values are deliberately treated as unset.
+pub fn effective_instruction_candidate_paths() -> Vec<String> {
+    let exclude_claude = std::env::var(CLAUDE_INSTRUCTIONS_EXCLUSION_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    instruction_candidate_paths(exclude_claude)
+}
+
+fn candidate_paths() -> Vec<String> {
+    effective_instruction_candidate_paths()
 }
 
 impl ProjectInstructionsSnapshot {
@@ -334,6 +363,22 @@ fn is_lower_hex_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruction_candidate_policy_only_removes_claude_when_enabled() {
+        let unchanged = instruction_candidate_paths(false);
+        assert_eq!(
+            unchanged,
+            INSTRUCTION_CANDIDATE_PATHS
+                .iter()
+                .map(|path| (*path).to_string())
+                .collect::<Vec<_>>()
+        );
+        let excluded = instruction_candidate_paths(true);
+        assert!(!excluded.iter().any(|path| path == "CLAUDE.md"));
+        assert!(excluded.iter().any(|path| path == "AGENTS.md"));
+        assert_eq!(excluded.len() + 1, unchanged.len());
+    }
 
     #[test]
     fn empty_snapshot_is_not_loaded() {

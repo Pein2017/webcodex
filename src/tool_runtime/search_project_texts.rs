@@ -6,6 +6,7 @@ use super::{SearchProjectTextsQuery, SuggestedToolCall, ToolResult, ToolRuntime}
 use crate::json_measurement::serialized_json_len;
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::time::Duration;
 use tokio::time::Instant;
 use webcodex_core::runtime_contract::MODEL_INSPECTION_MAX_RESULT_BYTES as MAX_SERIALIZED_OUTPUT_BYTES;
@@ -100,10 +101,6 @@ fn serialized_batch_len(output: &Value) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn serialized_value_len(value: &Value) -> usize {
-    serialized_json_len(value).unwrap_or(usize::MAX)
-}
-
 fn projected_batch_serialized_len(output: &Value, default_timeouts: &[bool]) -> usize {
     let mut projected = ToolResult::ok(output.clone());
     super::dispatch::sparsify_search_batch_success_for_model(default_timeouts, &mut projected);
@@ -130,22 +127,6 @@ fn projected_batch_serialized_len_with_continuation(
     serialized_json_len(&projected).unwrap_or(usize::MAX)
 }
 
-fn projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
-    let mut projected = item.clone();
-    if projected["success"].as_bool() == Some(true) {
-        if let Some(output) = projected.get_mut("output").and_then(Value::as_object_mut) {
-            super::dispatch::sparsify_search_output_for_model(output, default_timeout, true);
-        }
-    }
-    serialized_value_len(&projected)
-}
-
-fn projected_batch_len(base_len: usize, item_bytes: usize, item_count: usize) -> usize {
-    base_len
-        .saturating_add(item_bytes)
-        .saturating_add(item_count.saturating_sub(1))
-}
-
 fn retryable_runner_request_failure(result: &ToolResult) -> bool {
     !result.success
         && result.output.get("code").and_then(Value::as_str) == Some("search_request_dropped")
@@ -157,6 +138,26 @@ fn apply_output_budget(
     completed: Vec<Value>,
     default_timeouts: &[bool],
     max_result_bytes: Option<usize>,
+) -> Value {
+    apply_output_budget_with_continuation(
+        project,
+        requested_count,
+        completed,
+        default_timeouts,
+        max_result_bytes,
+        &[],
+        None,
+    )
+}
+
+fn apply_output_budget_with_continuation(
+    project: &str,
+    requested_count: usize,
+    completed: Vec<Value>,
+    default_timeouts: &[bool],
+    max_result_bytes: Option<usize>,
+    original_queries: &[SearchProjectTextsQuery],
+    session_id: Option<&str>,
 ) -> Value {
     let result_budget = normalized_result_budget(max_result_bytes);
     let payload_budget = result_budget.saturating_sub(MODEL_RESULT_ENVELOPE_RESERVE_BYTES);
@@ -171,7 +172,15 @@ fn apply_output_budget(
     // First evaluate the exact sparse model projection. Canonical search
     // metadata stays intact unless that final applicable projection itself
     // exceeds the response budget.
-    if projected_batch_serialized_len(&complete, default_timeouts) <= payload_budget {
+    if projected_batch_serialized_len_with_continuation(
+        &complete,
+        default_timeouts,
+        project,
+        original_queries,
+        session_id,
+        max_result_bytes,
+    ) <= payload_budget
+    {
         return complete;
     }
 
@@ -180,44 +189,47 @@ fn apply_output_budget(
     } else {
         "batch_response_budget"
     };
-    let base_len = projected_batch_serialized_len(
-        &batch_output(
-            project,
-            requested_count,
-            Vec::new(),
-            true,
-            Some(0),
-            Some(truncation_reason),
-        ),
-        default_timeouts,
-    );
     let mut returned = Vec::with_capacity(completed.len());
-    let mut returned_item_bytes = 0usize;
-    let mut next_index = None;
+    let mut omitted_indices = BTreeSet::new();
 
     for item in completed {
         let index = item["index"].as_u64().unwrap_or(returned.len() as u64) as usize;
-        let item_len =
-            projected_search_item_len(&item, default_timeouts.get(index).copied().unwrap_or(false));
-        let candidate_item_count = returned.len() + 1;
-        if projected_batch_len(
-            base_len,
-            returned_item_bytes.saturating_add(item_len),
-            candidate_item_count,
-        ) <= payload_budget
-        {
-            returned_item_bytes = returned_item_bytes.saturating_add(item_len);
+        let mut candidate_items = returned.clone();
+        candidate_items.push(item.clone());
+        let next_index = omitted_indices
+            .iter()
+            .copied()
+            .chain(std::iter::once(index))
+            .min();
+        let candidate = batch_output(
+            project,
+            requested_count,
+            candidate_items,
+            true,
+            next_index,
+            Some(truncation_reason),
+        );
+        // Search items are whole-query units. Measure each candidate with the
+        // exact omitted-query follow-up so a later small query may be retained
+        // without losing an earlier oversized request.
+        let exact_fits = projected_batch_serialized_len_with_continuation(
+            &candidate,
+            default_timeouts,
+            project,
+            original_queries,
+            session_id,
+            max_result_bytes,
+        ) <= payload_budget;
+        let bounded_without_followup =
+            projected_batch_serialized_len(&candidate, default_timeouts) <= payload_budget;
+        if exact_fits || bounded_without_followup {
             returned.push(item);
-            continue;
+        } else {
+            omitted_indices.insert(index);
         }
-
-        // Search batch continuation is query-granular. Backend match order is
-        // intentionally unstable, so exposing a partial query and resuming by
-        // match position would permit duplicates and gaps across reruns.
-        next_index = Some(index);
-        break;
     }
 
+    let mut next_index = omitted_indices.iter().next().copied();
     let mut output = batch_output(
         project,
         requested_count,
@@ -226,14 +238,26 @@ fn apply_output_budget(
         next_index,
         Some(truncation_reason),
     );
-    while projected_batch_serialized_len(&output, default_timeouts) > payload_budget {
+    while projected_batch_serialized_len_with_continuation(
+        &output,
+        default_timeouts,
+        project,
+        original_queries,
+        session_id,
+        max_result_bytes,
+    ) > payload_budget
+        && projected_batch_serialized_len(&output, default_timeouts) > payload_budget
+    {
         let Some(items) = output.get_mut("items").and_then(Value::as_array_mut) else {
             break;
         };
         let Some(removed) = items.pop() else {
             break;
         };
-        next_index = removed["index"].as_u64().map(|index| index as usize);
+        next_index = next_index
+            .into_iter()
+            .chain(removed["index"].as_u64().map(|index| index as usize))
+            .min();
         output = batch_output(
             project,
             requested_count,
@@ -434,8 +458,9 @@ fn search_suggested_arguments(
 }
 
 /// Compile producer-only whole-query next_index bookkeeping into one directly
-/// reusable suffix rerun. Individual query match positions remain deliberately
-/// non-resumable because backend order is not a stable cursor.
+/// reusable rerun containing every omitted original query. Individual query
+/// match positions remain deliberately non-resumable because backend order is
+/// not a stable cursor.
 pub(crate) fn add_actionable_search_continuation(
     result: &mut ToolResult,
     project: &str,
@@ -461,12 +486,26 @@ pub(crate) fn add_actionable_search_continuation(
     let Some(next_index) = next_index else {
         return;
     };
-    let returned_count = output
-        .get("returned_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let Some(returned) = output.get("items").and_then(Value::as_array) else {
+        return;
+    };
+    let returned_indices = returned
+        .iter()
+        .filter_map(|item| item.get("index").and_then(Value::as_u64))
+        .map(|index| index as usize)
+        .collect::<BTreeSet<_>>();
+    let remaining = original_queries
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !returned_indices.contains(index))
+        .map(|(_, query)| query.clone())
+        .collect::<Vec<_>>();
+    if remaining.is_empty() {
+        output.remove("next_index");
+        return;
+    }
     let mut next_budget = max_result_bytes;
-    if returned_count == 0 && next_index == 0 {
+    if returned_indices.is_empty() && next_index == 0 {
         let reason = output.get("truncation_reason").and_then(Value::as_str);
         let current_budget = normalized_result_budget(max_result_bytes);
         if reason == Some("hard_result_cap") || current_budget >= MAX_SERIALIZED_OUTPUT_BYTES {
@@ -477,19 +516,14 @@ pub(crate) fn add_actionable_search_continuation(
         }
         next_budget = Some(MAX_SERIALIZED_OUTPUT_BYTES);
     }
-    if let Some(remaining) = original_queries
-        .get(next_index..)
-        .filter(|queries| !queries.is_empty())
-    {
-        output.insert(
-            "suggested_call".to_string(),
-            SuggestedToolCall::new(
-                "search_project_texts",
-                search_suggested_arguments(project, remaining, session_id, next_budget),
-            )
-            .to_value(),
-        );
-    }
+    output.insert(
+        "suggested_call".to_string(),
+        SuggestedToolCall::new(
+            "search_project_texts",
+            search_suggested_arguments(project, &remaining, session_id, next_budget),
+        )
+        .to_value(),
+    );
     output.remove("next_index");
 }
 
@@ -525,22 +559,23 @@ pub(crate) fn apply_model_facing_output_budget(
         return;
     };
 
-    let mut budgeted = apply_output_budget(
+    let mut budgeted = apply_output_budget_with_continuation(
         &output_project,
         requested_count,
         completed,
         default_timeouts,
         max_result_bytes,
+        original_queries,
+        session_id,
     );
 
     // The parser-ready suffix call is part of the primary model-facing search
     // projection. Measure it against that primary budget before reattaching
     // independently bounded Session/continuity overlays. The producer packer
-    // already chose the largest returned prefix; if even its smallest remaining
-    // suffix call cannot fit, retain the useful prefix but suppress producer-only
-    // cursor bookkeeping rather than returning an oversized/fake continuation.
-    // Removing more returned items cannot help because it only enlarges the
-    // original-query suffix carried by the exact follow-up.
+    // already accounted for every omitted original query. If an outer caller
+    // added enough metadata to exceed the primary budget, retain useful
+    // returned items but suppress the producer-only cursor bookkeeping rather
+    // than returning an oversized/fake continuation.
     let payload_budget = normalized_result_budget(max_result_bytes)
         .saturating_sub(MODEL_RESULT_ENVELOPE_RESERVE_BYTES);
     if projected_batch_serialized_len_with_continuation(
@@ -1003,6 +1038,65 @@ mod tests {
         );
         assert_eq!(expanded["returned_count"], 3);
         assert_eq!(expanded["output_truncated"], false);
+    }
+
+    #[test]
+    fn oversized_query_does_not_suppress_later_small_queries_or_their_followup() {
+        let queries = (0..3)
+            .map(|index| SearchProjectTextsQuery {
+                pattern: format!("needle-{index}"),
+                pattern_mode: None,
+                path: None,
+                limit: None,
+                context_before: None,
+                context_after: None,
+                include_globs: None,
+                exclude_globs: None,
+                result_mode: None,
+                timeout_secs: None,
+            })
+            .collect::<Vec<_>>();
+        let output = apply_output_budget_with_continuation(
+            "agent:oe:demo",
+            queries.len(),
+            vec![
+                matches_item(0, 199, 3_000),
+                default_matches_item(1, 1, 100),
+                default_matches_item(2, 1, 100),
+            ],
+            &[true; 3],
+            Some(256 * 1024),
+            &queries,
+            Some("wc_sess_demo"),
+        );
+        assert_eq!(output["output_truncated"], true);
+        assert_eq!(
+            output["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["index"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(output["next_index"], 0);
+
+        let mut result = ToolResult::ok(output);
+        super::super::dispatch::sparsify_search_batch_success_for_model(&[true; 3], &mut result);
+        add_actionable_search_continuation(
+            &mut result,
+            "agent:oe:demo",
+            &queries,
+            Some("wc_sess_demo"),
+            Some(256 * 1024),
+        );
+        let suggested = &result.output["suggested_call"];
+        assert_eq!(
+            suggested["arguments"]["queries"],
+            json!([{
+                "pattern": "needle-0"
+            }])
+        );
     }
 
     #[test]

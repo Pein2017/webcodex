@@ -114,8 +114,11 @@ impl ToolRuntime {
             }
             identity
         });
-        let proj = match self.resolve_project(&project).await {
-            Ok(project) => project,
+        let resolved = match self
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
+            Ok(resolved) => resolved,
             Err(error) => {
                 return process_tool_failure_result(
                     command_rejected_message(
@@ -127,6 +130,8 @@ impl ToolRuntime {
                 )
             }
         };
+        let project_id = resolved.resolved_id.clone();
+        let proj = resolved.config;
         let client_id = proj.client_id.clone();
         let effective_cwd = match resolve_runner_cwd(&proj, cwd.as_deref()) {
                 Ok(cwd) => cwd,
@@ -165,7 +170,7 @@ impl ToolRuntime {
                     },
                     "tool_runtime".to_string(),
                     ShellJobStartMetadata {
-                        project_id: Some(project.clone()),
+                        project_id: Some(project_id),
                         session_id,
                         project_cwd: Some(resolved_cwd.clone()),
                         purpose: Some(declared_purpose.as_str().to_string()),

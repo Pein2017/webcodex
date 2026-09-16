@@ -400,8 +400,8 @@ impl ToolRuntime {
                     ))
                 }
             };
-            let config = match self.resolve_project(&project).await {
-                Ok(config) => config,
+            let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+                Ok(resolved) => resolved,
                 Err(e) => {
                     return ToolResult::err(command_rejected_message(
                         e.to_message(),
@@ -409,6 +409,8 @@ impl ToolRuntime {
                     ))
                 }
             };
+            let project_id = resolved.resolved_id.clone();
+            let config = resolved.config;
             let adapter = validation_adapter_for_tool("cargo_fmt")
                 .expect("Rust validation profile must register cargo_fmt");
             let check_command = adapter
@@ -419,7 +421,12 @@ impl ToolRuntime {
                 .expect("cargo_fmt check command builder is infallible");
             let started = Instant::now();
             let check_output = match self
-                .run_project_command_capture(&project, check_command.clone(), timeout, cwd.clone())
+                .run_project_command_capture(
+                    &project_id,
+                    check_command.clone(),
+                    timeout,
+                    cwd.clone(),
+                )
                 .await
             {
                 Ok(output) => output,
@@ -436,7 +443,7 @@ impl ToolRuntime {
             if already_formatted {
                 let mut result = self
                     .build_cargo_result(
-                        &project,
+                        &project_id,
                         &check_command,
                         cwd.as_deref(),
                         &config,
@@ -458,7 +465,7 @@ impl ToolRuntime {
             if !cargo_fmt_check_is_stable_diff(adapter, &check_output) {
                 let mut result = self
                     .build_cargo_result(
-                        &project,
+                        &project_id,
                         &check_command,
                         cwd.as_deref(),
                         &config,
@@ -489,7 +496,7 @@ impl ToolRuntime {
             if remaining_budget < Duration::from_secs(1) {
                 let mut result = self
                     .build_cargo_result(
-                        &project,
+                        &project_id,
                         &check_command,
                         cwd.as_deref(),
                         &config,
@@ -521,7 +528,7 @@ impl ToolRuntime {
                 })
                 .expect("cargo_fmt command builder is infallible");
             let mutation_output = match self
-                .run_project_command_capture(&project, command.clone(), remaining, cwd.clone())
+                .run_project_command_capture(&project_id, command.clone(), remaining, cwd.clone())
                 .await
             {
                 Ok(output) => output,
@@ -536,7 +543,7 @@ impl ToolRuntime {
             let mutation_exit_code = mutation_output.exit_code;
             let mut result = self
                 .build_cargo_result(
-                    &project,
+                    &project_id,
                     &command,
                     cwd.as_deref(),
                     &config,
@@ -966,10 +973,10 @@ impl ToolRuntime {
         // Pre-execution validation happens before any execution is created, so
         // a rejection never leaves a Job or a running process behind.
         let resolved = match self
-            .resolve_project_for_auth(&request.project, request.auth)
+            .resolve_project_input_for_auth(&request.project, request.auth)
             .await
         {
-            Ok(config) => config,
+            Ok(resolved) => resolved,
             Err(e) => return ToolResult::err(command_rejected_message(
                 e.to_message(),
                 "verify the project id with list_projects, then retry with a registered project.",
@@ -995,8 +1002,8 @@ impl ToolRuntime {
             // hands off if it is still running.
             self.run_readonly_validation_agent(
                 tool_name,
-                &request.project,
-                &resolved,
+                &resolved.resolved_id,
+                &resolved.config,
                 cwd.as_deref(),
                 &command,
                 adapter,
@@ -1021,7 +1028,7 @@ impl ToolRuntime {
             // boundary. The command still starts exactly once.
             let output = match self
                     .run_project_command_capture(
-                        &request.project,
+                        &resolved.resolved_id,
                         command.clone(),
                         timeout_secs,
                         cwd.clone(),
@@ -1037,10 +1044,10 @@ impl ToolRuntime {
                     }
                 };
             self.build_cargo_result(
-                &request.project,
+                &resolved.resolved_id,
                 &command,
                 cwd.as_deref(),
-                &resolved,
+                &resolved.config,
                 adapter,
                 output,
                 timeout_secs,

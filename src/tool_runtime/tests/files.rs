@@ -5066,12 +5066,22 @@ async fn artifact_upload_finish_and_abort_reject_invalid_upload_id_before_resolv
 
 #[tokio::test]
 async fn read_file_routes_safe_and_bulk_skipped_explicit_paths_to_agent() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set(
+        crate::tool_runtime::project_instructions::CLAUDE_INSTRUCTIONS_EXCLUSION_ENV,
+        "1",
+    );
     for (client_id, path, content) in [
         ("relative-read", "src/main.rs", "fn main() {}\n"),
         (
             "bulk-explicit-read",
             "node_modules/foo/package.json",
             "{}\n",
+        ),
+        (
+            "claude-explicit-read",
+            "CLAUDE.md",
+            "explicit CLAUDE content\n",
         ),
     ] {
         let runtime = runtime_with_agent_project(client_id);
