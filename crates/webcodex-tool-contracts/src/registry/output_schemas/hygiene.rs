@@ -36,7 +36,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
             (
                 "truncated",
-                schema_type("boolean", "Present as true when findings were truncated to max_findings or Runner diagnostic output was truncated; omitted otherwise."),
+                schema_type("boolean", "Present as true when findings exceed max_findings, Runner diagnostic output is truncated, or the bounded diagnostic scan is incomplete; omitted otherwise."),
             ),
             (
                 "warnings",

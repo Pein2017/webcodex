@@ -22,6 +22,10 @@ const HYGIENE_SCRIPT_TIMEOUT_SECS: u64 = 30;
 const HYGIENE_MAX_SCRIPT_ENTRIES: usize = 500;
 const HYGIENE_DIAGNOSTIC_SENTINEL: &str = "@@WEBCODEX_HYGIENE_STATUS@@";
 const HYGIENE_TRACKED_PATH_SENTINEL: &str = "@@WEBCODEX_HYGIENE_TRACKED@@";
+// A deliberately broad superset of is_strong_tracked_secret_path's path-only
+// criteria. Rust still makes the exact classification; ordinary tracked files
+// never need to fill the Runner's retained stdout tail.
+const HYGIENE_TRACKED_CANDIDATE_PATTERN: &str = r"(\.env|id_rsa|id_dsa|id_ed25519|passwd|password|\.pem|\.key|\.p12|\.pfx|secret|credential|token)";
 const HYGIENE_MAX_SIZE_PROBE_COMMAND_LEN: usize = 7_000;
 
 /// Kind of hygiene risk identified for a path or the worktree.
@@ -378,6 +382,7 @@ pub(crate) fn build_hygiene_summary(
     findings: &[HygieneFinding],
     findings_truncated: bool,
     diagnostic_output_truncated: bool,
+    diagnostic_scan_incomplete: bool,
     warnings: &[String],
 ) -> Value {
     let mut critical = 0u64;
@@ -411,7 +416,7 @@ pub(crate) fn build_hygiene_summary(
         }
     }
 
-    let truncated = findings_truncated || diagnostic_output_truncated;
+    let truncated = findings_truncated || diagnostic_output_truncated || diagnostic_scan_incomplete;
     let clean = git_available && findings.is_empty() && !truncated;
 
     let findings_json: Vec<Value> = findings
@@ -434,6 +439,7 @@ pub(crate) fn build_hygiene_summary(
         findings,
         findings_truncated,
         diagnostic_output_truncated,
+        diagnostic_scan_incomplete,
         &suggested_next_actions,
     );
     let counts = [
@@ -483,6 +489,7 @@ fn hygiene_verdict(
     findings: &[HygieneFinding],
     findings_truncated: bool,
     diagnostic_output_truncated: bool,
+    diagnostic_scan_incomplete: bool,
     suggested_next_actions: &[Value],
 ) -> Value {
     let mut blocking_reasons: Vec<&'static str> = Vec::new();
@@ -529,6 +536,14 @@ fn hygiene_verdict(
         );
     }
 
+    if diagnostic_scan_incomplete {
+        push_unique_reason(&mut warning_reasons, "diagnostic_scan_incomplete");
+        push_unique_action(
+            &mut actions,
+            "treat this hygiene result as incomplete and inspect tracked paths and git status before relying on it",
+        );
+    }
+
     let status = if blocking_reasons.is_empty() {
         if warning_reasons.is_empty() {
             "pass"
@@ -566,7 +581,11 @@ fn push_unique_action(actions: &mut Vec<String>, action: &str) {
 
 pub(crate) fn hygiene_diagnostic_command(include_tracked: bool) -> String {
     let tracked_files = if include_tracked {
-        format!("git ls-files 2>/dev/null | sed 's|^|{HYGIENE_TRACKED_PATH_SENTINEL}|'; ")
+        format!(
+            "git ls-files 2>/dev/null \
+             | sed -nE '/{HYGIENE_TRACKED_CANDIDATE_PATTERN}/I \
+               s|^|{HYGIENE_TRACKED_PATH_SENTINEL}|p'; "
+        )
     } else {
         String::new()
     };
@@ -598,9 +617,12 @@ fn hygiene_path_is_metadata_safe(path: &str) -> bool {
         && !trimmed.split('/').any(|part| part.is_empty())
 }
 
-fn parse_hygiene_diagnostic_stdout(stdout: &str, stdout_truncated: bool) -> (bool, Vec<Value>) {
+fn parse_hygiene_diagnostic_stdout(
+    stdout: &str,
+    stdout_truncated: bool,
+) -> (bool, Vec<Value>, bool) {
     let Some((diagnostic_stdout, rest)) = stdout.rsplit_once(HYGIENE_DIAGNOSTIC_SENTINEL) else {
-        return (false, Vec::new());
+        return (false, Vec::new(), false);
     };
     let git_available = rest
         .lines()
@@ -608,15 +630,20 @@ fn parse_hygiene_diagnostic_stdout(stdout: &str, stdout_truncated: bool) -> (boo
         .and_then(|line| line.trim().parse::<i32>().ok())
         == Some(0);
     if !git_available {
-        return (false, Vec::new());
+        return (false, Vec::new(), false);
     }
 
     let mut status_entries = Vec::new();
     let mut tracked_paths = Vec::new();
+    let mut scan_incomplete = false;
+    let has_runner_truncation_marker = diagnostic_stdout.starts_with("[output truncated]\n")
+        || diagnostic_stdout.starts_with("[...]\n");
     for (index, line) in diagnostic_stdout.lines().enumerate() {
-        // Runner stdout is a retained tail. Its first line may therefore be a
-        // fragment of a long tracked path and must not be parsed as porcelain.
-        if stdout_truncated && index == 0 {
+        // Runner stdout is a retained tail prefixed by its truncation marker.
+        // The line after that marker can be a tracked-path fragment. It is not
+        // a Git status record, even when its first characters look like XY.
+        // An unmarked retained tail instead starts with the fragment itself.
+        if stdout_truncated && (index == 0 || (has_runner_truncation_marker && index == 1)) {
             continue;
         }
         if let Some(path) = line.strip_prefix(HYGIENE_TRACKED_PATH_SENTINEL) {
@@ -625,10 +652,13 @@ fn parse_hygiene_diagnostic_stdout(stdout: &str, stdout_truncated: bool) -> (boo
                 if !path.is_empty() {
                     tracked_paths.push(path);
                 }
+            } else {
+                scan_incomplete = true;
             }
             continue;
         }
         if status_entries.len() >= HYGIENE_MAX_SCRIPT_ENTRIES {
+            scan_incomplete = true;
             continue;
         }
         if line.len() < 4 {
@@ -680,7 +710,10 @@ fn parse_hygiene_diagnostic_stdout(stdout: &str, stdout_truncated: bool) -> (boo
         }));
     }
 
-    (true, entries)
+    // Size probes and classification consume only the first bounded set.
+    // Even a complete Runner stdout is not a complete scan past this limit.
+    scan_incomplete |= entries.len() > HYGIENE_MAX_SCRIPT_ENTRIES;
+    (true, entries, scan_incomplete)
 }
 
 fn hygiene_size_probe_command(paths: &[String]) -> String {
@@ -788,7 +821,7 @@ impl ToolRuntime {
             Err(e) => return ToolResult::err(e),
         };
 
-        let (git_available, entries) =
+        let (git_available, entries, diagnostic_scan_incomplete) =
             parse_hygiene_diagnostic_stdout(&output.stdout, output.stdout_truncated);
         let size_bytes_by_path = if git_available {
             let mut sizes = HashMap::new();
@@ -900,6 +933,7 @@ impl ToolRuntime {
             &findings,
             findings_truncated,
             output.stdout_truncated,
+            diagnostic_scan_incomplete,
             &warnings,
         );
 
@@ -1090,6 +1124,7 @@ mod tests {
             &[],
             false,
             false,
+            false,
             &[],
         );
         assert_eq!(summary["git_available"], true);
@@ -1121,6 +1156,7 @@ mod tests {
             Some("agent:oe:demo"),
             false,
             &[],
+            false,
             false,
             false,
             &["non_git_project".to_string()],
@@ -1161,6 +1197,7 @@ mod tests {
             Some("agent:oe:demo"),
             true,
             &findings,
+            false,
             false,
             false,
             &[],

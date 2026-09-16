@@ -561,6 +561,97 @@ fn skill_runtime_tools_are_stateless_full_operator_only_and_schema_static() {
         )));
 }
 
+#[tokio::test]
+async fn stateless_skill_manifest_matches_direct_business_schema_and_rejects_missing_id_compactly()
+{
+    let runtime = test_runtime_with_surface(ModelSurface::FullOperatorRuntime);
+    let listed = handle_mcp_request(
+        &runtime,
+        rpc("tools/list", Some(json!(401)), mcp_2026_params(json!({}))),
+        None,
+    )
+    .await;
+    let McpOutcome::Ok(listed) = listed else {
+        panic!("stateless operator tools/list must succeed");
+    };
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let direct = tools
+        .iter()
+        .find(|tool| tool["name"] == "skill_read_file")
+        .expect("skill_read_file must be directly callable");
+    assert!(!tools.iter().any(|tool| {
+        matches!(
+            tool["name"].as_str(),
+            Some("git_diff_summary" | "call_runtime_tool")
+        )
+    }));
+
+    let manifest = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(json!(402)),
+            mcp_2026_params(json!({
+                "name": "tool_manifest",
+                "arguments": {"tool_name": "skill_read_file"}
+            })),
+        ),
+        None,
+    )
+    .await;
+    let McpOutcome::Ok(manifest) = manifest else {
+        panic!("stateless skill_read_file manifest must succeed");
+    };
+    let output = &manifest["result"]["structuredContent"]["output"];
+    assert_eq!(output["route"], json!({"mode": "direct"}));
+    let mut direct_business_schema = direct["inputSchema"].clone();
+    let properties = direct_business_schema["properties"]
+        .as_object_mut()
+        .unwrap();
+    for wrapper_field in [
+        "recording_session_id",
+        "ack_session_context_revision",
+        "ack_session_message_ids",
+        "context_request",
+        "session_message_resolution",
+    ] {
+        assert!(
+            properties.remove(wrapper_field).is_some(),
+            "stateless direct Skill contract omitted {wrapper_field}"
+        );
+    }
+    assert_eq!(direct_business_schema, output["input_schema"]);
+    assert_eq!(
+        output["input_schema"]["properties"]["skill_id"]["pattern"],
+        "^wc_skill_[A-Za-z0-9_-]{21}[AQgw]$"
+    );
+
+    let invalid = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(json!(403)),
+            mcp_2026_params(json!({
+                "name": "skill_read_file",
+                "arguments": {"project": "probe-nonexistent"}
+            })),
+        ),
+        None,
+    )
+    .await;
+    let McpOutcome::BadRequest(invalid) = invalid else {
+        panic!("missing skill_id must fail before runtime project resolution");
+    };
+    assert_eq!(invalid["error"]["code"], -32602);
+    assert!(invalid["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("missing field `skill_id`")));
+    assert!(
+        serde_json::to_vec(&invalid).unwrap().len() <= 512,
+        "Skill argument errors must not return the whole JSON Schema"
+    );
+}
+
 #[test]
 fn skill_management_tools_require_admin_and_remain_fixed_schema() {
     let render = |auth: Option<&crate::auth::AuthContext>| {

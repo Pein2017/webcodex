@@ -1,6 +1,6 @@
 # Acceptance receipt
 
-Status: lead-accepted; fork publication and local activation passed.
+Status: initial release lead-accepted and activated; 2026-09-16 source follow-up lead-accepted, publication and local activation authorized and pending.
 
 ## Source and scope
 
@@ -41,3 +41,82 @@ Status: lead-accepted; fork publication and local activation passed.
 
 Path/status comparison is not content auditing or Session authorship; no browser
 automatic wake or ChatGPT UI acceptance is claimed.
+
+## 2026-09-16 real Git-task feedback follow-up
+
+Scope: reproduce the reported protocol symptoms, repair proven Server defects,
+and strengthen the existing Web guidance and real MCP checks. Do not modify,
+merge, or commit either research worktree based on the feedback's Git inventory.
+The earlier release evidence above remains historical, not proof of this delta.
+
+### Reproduced and distinguished
+
+- Deployed `69f0273dcf80` stateless MCP advertises 152 tools. Live
+  `tools/list` and `tool_manifest(skill_read_file)` agree on the compact opaque
+  Skill ID pattern; the direct surface adds only its legitimate wrapper metadata.
+  `git_diff_summary` and `call_runtime_tool` are not advertised on this Full
+  Operator surface. The reported old hexadecimal-only host wrapper does not
+  match current Server discovery. No compatibility alias or second schema
+  registry is justified by that stale host declaration.
+- Actual disposable Server/Runner Skill discovery followed by direct
+  `skill_read_file` succeeds with the returned ID and definition revision.
+  Missing required `skill_id` produces a compact server-side JSON-RPC error,
+  not a complete JSON Schema. This does not claim control of ChatGPT's own
+  pre-dispatch wrapper validation or prove the browser has refreshed its cache.
+- Explicit recorder, complete handoff recovery, and two successive process calls
+  echoing the retained revision succeed without missing-recorder or unacknowledged
+  hints on those calls. Business `session_id` alone is not recorder identity;
+  neither identity proves retained model context. Preserve independent authority
+  checks and do not implement inferred binding or automatic ACK.
+- Real MCP RED: a clean disposable Git repository with 1,100 long ordinary
+  tracked filenames returns a fabricated `(worktree) dirty_worktree` finding
+  with `diagnostic_output_truncated`. The Runner's retained-tail marker and
+  truncated tracked-path fragment were interpreted as unframed porcelain status.
+  This is a Server defect, not browser cache.
+
+Operator-local raw evidence is retained under
+`/var/lib/webcodex/coordexp-full/verification/coordexp-2026.09.16.1/`:
+`e2e-current-contract/receipt.json` (27 checks passed before adding the large
+inventory counterexample) and `e2e-skill-required-and-hygiene-red/receipt.json`
+(Skill error check passes, then the hygiene counterexample fails).
+
+### Final candidate acceptance
+
+- Fixed the tracked-path scan using an early broad candidate filter in the
+  existing `sed` stage; Rust remains the exact secret-path classifier. No new
+  executable dependency or hidden file-content reads were introduced.
+- Parse the Runner's truncation marker and following partial line correctly;
+  neither is Git porcelain. Preserve real dirty findings and tracked secret
+  candidates that previously fell outside the retained output tail.
+- The existing 500-entry internal cap now marks an incomplete scan explicitly
+  (`diagnostic_scan_incomplete`, `truncated=true`, `clean=false`), including a
+  late secret behind many weak candidates. The output-schema description
+  reflects that existing Boolean's additional completeness cause.
+- Caller-facing pre-fix RED: exit 101. Final `hygiene::` tests: 36 passed;
+  the included `workspace_hygiene_check` subset: 22 passed. Direct MCP
+  Skill/manifest schema parity and compact missing-ID error test: 1 passed.
+  Raw logs are retained in the same operator-local verification directory.
+- Lead replay: real stateless MCP Server/Runner smoke passed all 29 checks in
+  7.40 seconds, including the exact large-inventory counterexample, Skill read,
+  recorder/ACK sequence, existing guarded edits, pytest recovery and Job evidence.
+  Receipt: `e2e-final/receipt.json`. Disposable process groups and fixture were
+  cleaned up by the harness; no production repository was a mutation target.
+- Verification build: Rust 1.95.0, `dogfood`, both binaries identify base
+  `bc74dd334a88`, `dirty=true`. This is an uncommitted development candidate,
+  not a clean release. Exact Rust source/test diff SHA-256:
+  `e38cbdc7ff11c6586f6dbc54f6672ed734481aa206fd501ccb8dcd2ed79203e7`.
+  Binary paths and SHA-256 are in the smoke receipt.
+- Formatting, Python syntax, Git whitespace, strict OpenSpec validation and
+  Markdown local-link validation passed. Web guidance is 6,710 UTF-8 bytes and
+  now gives the exact recorder and retained-ACK recovery sequence while warning
+  against stale wrappers, guessed aliases and unadvertised gateways.
+
+The user subsequently authorized publication to the existing fork and replacement
+of the named local Server/Runner. Activation evidence will be recorded below;
+until then the active `.2` runtime remains unchanged. ChatGPT's cached direct callable schema still needs host-side refresh
+and browser acceptance; a Server-side pass cannot certify that refresh.
+
+Adjacent pre-existing behavior, outside this fix: failed/truncated untracked-file
+size probes are not fully reflected in hygiene completeness. This patch does not
+claim to make the entire hygiene scanner a security audit, and does not alter
+that separate path. No research Git history or dirty work was changed.

@@ -38,6 +38,10 @@ REQUIRED_TOOLS = {
     "observe_jobs",
     "show_changes",
     "finish_coding_task",
+    "skill_list",
+    "skill_read_file",
+    "session_handoff_summary",
+    "workspace_hygiene_check",
 }
 
 
@@ -207,6 +211,19 @@ def main() -> int:
             (project / "AGENTS.md").write_text(repository_guidance, encoding="utf-8")
             (project / "existing.txt").write_text("existing original\n", encoding="utf-8")
             (project / "new.txt").write_text("new original\n", encoding="utf-8")
+            skill_dir = project / ".agents/skills/workflow-smoke"
+            skill_dir.mkdir(parents=True)
+            skill_body = (
+                "---\nname: workflow-smoke\ndescription: Isolated MCP Skill read fixture\n"
+                "---\nSKILL_READ_SENTINEL: preserve unrelated work.\n"
+            )
+            (skill_dir / "SKILL.md").write_text(skill_body, encoding="utf-8")
+            # Cross the production Runner's 256 KiB retained-output boundary
+            # without exceeding its per-path bounds. No real checkout is used.
+            tracked_dir = project / "tracked-fixture"
+            tracked_dir.mkdir()
+            for index in range(1100):
+                (tracked_dir / (f"{index:04d}-" + "x" * 211 + ".txt")).touch()
             (project / "tests").mkdir()
             (project / "tests/test_workflow.py").write_text(
                 "from pathlib import Path\n\n"
@@ -232,11 +249,12 @@ def main() -> int:
                     "git", "add", "README.md", "AGENTS.md", "existing.txt",
                     "new.txt", "tests/test_workflow.py",
                     "tests/test_async_workflow.py",
+                    ".agents/skills/workflow-smoke/SKILL.md",
+                    "tracked-fixture",
                 ],
                 project,
             )
             setup(["git", "commit", "-m", "isolated fixture"], project)
-            (project / "existing.txt").write_text("already dirty at startup\n", encoding="utf-8")
 
             (registry / "isolated.toml").write_text(
                 'id = "isolated"\n'
@@ -481,6 +499,21 @@ def main() -> int:
                 f"invalid arguments leaked a schema: {bounded(compact_error)}",
             )
             ok("a server-side invalid argument returns a compact MCP error")
+            skill_error = rpc("tools/call", {
+                "name": "skill_read_file",
+                "arguments": {
+                    "project": RUNTIME_PROJECT,
+                },
+            }, expect_error=True)
+            require(
+                skill_error.get("code") == -32602
+                and len(json.dumps(skill_error)) < 800
+                and "skill_id" in skill_error.get("message", "")
+                and "additionalProperties" not in json.dumps(skill_error)
+                and '"properties"' not in json.dumps(skill_error),
+                f"Skill argument error leaked its schema: {bounded(skill_error)}",
+            )
+            ok("Skill argument rejection is compact and never dumps the complete schema")
 
             registered = None
             while registered is None:
@@ -510,6 +543,22 @@ def main() -> int:
                 f"registered Runner lacks the advertised JavaScript protocol capability: {bounded(runner_view)}",
             )
             ok("the actual Runner advertises JavaScript typed-script semantics")
+
+            hygiene = call("workspace_hygiene_check", {
+                "project": RUNTIME_PROJECT, "include_tracked": True,
+            })
+            require(
+                hygiene.get("git_available") is True
+                and hygiene.get("clean") is True
+                and hygiene.get("truncated", False) is False
+                and not any(
+                    finding.get("kind") == "dirty_worktree"
+                    for finding in hygiene.get("findings", [])
+                ),
+                f"large clean tracked listing fabricated dirty Git status: {bounded(hygiene)}",
+            )
+            ok("large clean tracked inventory cannot fabricate a dirty-worktree finding")
+            (project / "existing.txt").write_text("already dirty at startup\n", encoding="utf-8")
 
             bootstrap = call(
                 "work_on_project",
@@ -549,6 +598,49 @@ def main() -> int:
                 f"startup did not retain the already-dirty path: {bounded(bootstrap)}",
             )
             ok("Session startup observed one pre-existing dirty Git path")
+
+            catalog = call("skill_list", {"project": RUNTIME_PROJECT, "query": "workflow-smoke"})
+            skills = catalog.get("skills", [])
+            require(len(skills) == 1, f"Skill fixture was not discovered: {bounded(catalog)}")
+            skill = skills[0]
+            skill_text = call("skill_read_file", {
+                "project": RUNTIME_PROJECT,
+                "skill_id": skill["skill_id"],
+                "expected_definition_revision": skill["definition_revision"],
+            })
+            require(
+                "SKILL_READ_SENTINEL" in skill_text.get("text", ""),
+                f"discovered opaque Skill ID cannot be read: {bounded(skill_text)}",
+            )
+            ok("actual Skill discovery returns an opaque ID usable by direct skill_read_file")
+
+            handoff = call("session_handoff_summary", {"session_id": recording_session_id})
+            retained_revision = handoff.get("session_context_revision")
+            require(
+                retained_revision is not None
+                and handoff.get("session_continuity", {}).get("status") == "recovered",
+                f"complete explicit handoff did not recover context: {bounded(handoff)}",
+            )
+            for _ in range(2):
+                checkpoint = call("run_process", {
+                    "project": RUNTIME_PROJECT,
+                    "session_id": recording_session_id,
+                    "ack_session_context_revision": retained_revision,
+                    "executable": "python3",
+                    "args": ["-c", "print('explicit-recorder-ack-ok')"],
+                    "purpose": "diagnostic",
+                    "sync_wait_secs": 20,
+                    "timeout_secs": 20,
+                })
+                require(
+                    "explicit-recorder-ack-ok" in checkpoint.get("stdout_tail", "")
+                    and checkpoint.get("session_context_revision") is not None
+                    and "session_continuity" not in checkpoint
+                    and "workflow_recording_attention" not in checkpoint,
+                    f"explicit recorder/retained ACK was lost: {bounded(checkpoint)}",
+                )
+                retained_revision = checkpoint["session_context_revision"]
+            ok("explicit recorder plus recovered retained ACK stays continuous across two effects")
 
             js = call(
                 "run_script",

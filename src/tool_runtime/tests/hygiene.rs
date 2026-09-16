@@ -4,6 +4,7 @@ use super::super::*;
 use super::support::*;
 use serde_json::json;
 use std::fs;
+use std::path::Path;
 use tempfile::TempDir;
 
 // =========================================================================
@@ -90,20 +91,30 @@ async fn dispatch_hygiene_with_agent_output_cap(
                 let (exit_code, stdout, stderr) = run_runner_shell_request_locally(&req);
                 let stdout_truncated = stdout.len() > output_cap;
                 let stdout = if stdout_truncated {
-                    let mut start = stdout.len() - output_cap;
+                    // The real Runner prepends a truncation marker to its
+                    // retained tail. A bare tail misses the second-line
+                    // fragment that previously looked like Git porcelain.
+                    let marker = if output_cap >= "[output truncated]\n".len() {
+                        "[output truncated]\n"
+                    } else if output_cap >= "[...]\n".len() {
+                        "[...]\n"
+                    } else {
+                        ""
+                    };
+                    let mut start = stdout.len() - (output_cap - marker.len());
                     while !stdout.is_char_boundary(start) {
                         start += 1;
                     }
-                    &stdout[start..]
+                    format!("{marker}{}", &stdout[start..])
                 } else {
-                    &stdout
+                    stdout
                 };
                 complete_patch_agent_request_with_truncation(
                     runtime,
                     client_id,
                     &req.request_id,
                     exit_code,
-                    stdout,
+                    &stdout,
                     &stderr,
                     stdout_truncated,
                     false,
@@ -131,6 +142,29 @@ async fn setup_clean_git_repo(
     commit_file(tmp.path(), "README.md", "hello\n", "initial commit");
     let project = register_runner_project_at_path(runtime, client_id, project_id, tmp.path()).await;
     (tmp, project)
+}
+
+fn commit_bulk_tracked_fixture(root: &Path, paths: impl IntoIterator<Item = String>) {
+    for path in paths {
+        let full = root.join(path);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, "ordinary fixture\n").unwrap();
+    }
+    for args in [
+        &["add", "-A"][..],
+        &["commit", "-m", "add tracked fixture"][..],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run Git fixture command");
+        assert!(
+            output.status.success(),
+            "Git fixture command {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 // =========================================================================
@@ -248,6 +282,261 @@ async fn workspace_hygiene_check_clean_git_repo() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn workspace_hygiene_check_large_clean_tracked_listing_is_not_dirty_or_incomplete() {
+    let runtime = test_runtime();
+    let (tmp, project) = setup_clean_git_repo(&runtime, "hyc-clean-many", "demo").await;
+    commit_bulk_tracked_fixture(
+        tmp.path(),
+        (0..32).map(|i| format!("tracked-{i:03}-{}.txt", "x".repeat(150))),
+    );
+
+    for include_tracked in [false, true] {
+        let result = dispatch_hygiene_with_agent_output_cap(
+            &runtime,
+            "hyc-clean-many",
+            project.clone(),
+            None,
+            Some(include_tracked),
+            None,
+            Some(1024),
+        )
+        .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.output["git_available"], true, "{}", result.output);
+        assert_eq!(result.output["clean"], true, "{}", result.output);
+        assert!(result.output.get("findings").is_none(), "{}", result.output);
+        assert!(
+            result.output.get("truncated").is_none(),
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            result.output["verdict"]["status"], "pass",
+            "{}",
+            result.output
+        );
+    }
+}
+
+#[tokio::test]
+async fn workspace_hygiene_check_keeps_tracked_secret_before_a_large_benign_listing() {
+    let runtime = test_runtime();
+    let (tmp, project) = setup_clean_git_repo(&runtime, "hyc-early-secret", "demo").await;
+    commit_bulk_tracked_fixture(
+        tmp.path(),
+        std::iter::once("a/.env".to_string())
+            .chain((0..32).map(|i| format!("tracked-{i:03}-{}.txt", "x".repeat(150)))),
+    );
+
+    let result = dispatch_hygiene_with_agent_output_cap(
+        &runtime,
+        "hyc-early-secret",
+        project,
+        None,
+        Some(true),
+        None,
+        Some(1024),
+    )
+    .await;
+    assert!(result.success, "{:?}", result.error);
+    let findings = result.output["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().any(|finding| finding["path"] == "a/.env"
+            && finding["kind"] == "secret_like_path"
+            && finding["tracked_status"] == "tracked"),
+        "tracked secret outside the old retained tail must survive: {}",
+        result.output
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding["kind"] != "dirty_worktree"),
+        "clean Git status must not fabricate dirty tracked changes: {}",
+        result.output
+    );
+    assert!(
+        result.output.get("truncated").is_none(),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn workspace_hygiene_check_real_dirty_after_a_large_benign_listing_remains_visible() {
+    let runtime = test_runtime();
+    let (tmp, project) = setup_clean_git_repo(&runtime, "hyc-dirty-many", "demo").await;
+    commit_bulk_tracked_fixture(
+        tmp.path(),
+        (0..32).map(|i| format!("tracked-{i:03}-{}.txt", "x".repeat(150))),
+    );
+    fs::write(tmp.path().join("README.md"), "a real tracked edit\n").unwrap();
+
+    let result = dispatch_hygiene_with_agent_output_cap(
+        &runtime,
+        "hyc-dirty-many",
+        project,
+        None,
+        Some(true),
+        None,
+        Some(1024),
+    )
+    .await;
+    assert!(result.success, "{:?}", result.error);
+    let findings = result.output["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding["kind"] == "dirty_worktree"),
+        "a real tracked edit must be reported: {}",
+        result.output
+    );
+    assert!(
+        result.output.get("truncated").is_none(),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn workspace_hygiene_check_tracked_secret_candidate_scan_is_a_superset() {
+    let runtime = test_runtime();
+    let (tmp, project) = setup_clean_git_repo(&runtime, "hyc-secret-superset", "demo").await;
+    let strong_paths = [
+        "a/.env",
+        "b/.ENV.production",
+        "keys/id_rsa",
+        "keys/ID_DSA",
+        "keys/id_ed25519",
+        "keys/passwd",
+        "keys/.password",
+        "keys/site.pem",
+        "keys/site.KEY",
+        "keys/site.p12",
+        "keys/site.pfx",
+        "secrets/ordinary.txt",
+        "credentials/ordinary.txt",
+        ".tokens/ordinary.txt",
+        "config/token.json",
+        "config/passwords.yaml",
+    ];
+    assert!(strong_paths
+        .iter()
+        .all(|path| crate::tool_runtime::hygiene::is_strong_tracked_secret_path(path)));
+    commit_bulk_tracked_fixture(
+        tmp.path(),
+        strong_paths
+            .iter()
+            .map(|path| (*path).to_string())
+            .chain(std::iter::once("src/auth/tokens.rs".to_string())),
+    );
+
+    let result = dispatch_hygiene_with_agent(
+        &runtime,
+        "hyc-secret-superset",
+        project,
+        None,
+        Some(true),
+        None,
+    )
+    .await;
+    assert!(result.success, "{:?}", result.error);
+    let findings = result.output["findings"].as_array().unwrap();
+    for path in strong_paths {
+        assert!(
+            findings.iter().any(|finding| finding["path"] == path
+                && finding["tracked_status"] == "tracked"
+                && finding["kind"] == "secret_like_path"),
+            "tracked secret class {path} must not be filtered out: {}",
+            result.output
+        );
+    }
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding["path"] != "src/auth/tokens.rs"),
+        "auth source name alone is weak evidence: {}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn workspace_hygiene_check_truly_incomplete_tracked_scan_stays_nonclean() {
+    let runtime = test_runtime();
+    let (tmp, project) = setup_clean_git_repo(&runtime, "hyc-secret-overflow", "demo").await;
+    commit_bulk_tracked_fixture(
+        tmp.path(),
+        (0..28).map(|i| format!("secrets/{i:03}-{}.txt", "x".repeat(100))),
+    );
+
+    let result = dispatch_hygiene_with_agent_output_cap(
+        &runtime,
+        "hyc-secret-overflow",
+        project,
+        None,
+        Some(true),
+        None,
+        Some(512),
+    )
+    .await;
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.output["git_available"], true, "{}", result.output);
+    assert_eq!(result.output["clean"], false, "{}", result.output);
+    assert_eq!(result.output["truncated"], true, "{}", result.output);
+    assert_reason_list_contains(
+        &result.output["verdict"],
+        "warning_reasons",
+        "diagnostic_output_truncated",
+    );
+    assert!(
+        result
+            .output
+            .get("findings")
+            .and_then(|findings| findings.as_array())
+            .is_none_or(|findings| findings
+                .iter()
+                .all(|finding| finding["kind"] != "dirty_worktree")),
+        "a clean Git status must not gain a fabricated dirty finding: {}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn workspace_hygiene_check_entry_limit_cannot_hide_a_late_tracked_secret_as_clean() {
+    let runtime = test_runtime();
+    let (tmp, project) = setup_clean_git_repo(&runtime, "hyc-entry-limit", "demo").await;
+    commit_bulk_tracked_fixture(
+        tmp.path(),
+        (0..520)
+            .map(|i| format!("src/token_source_{i:03}.rs"))
+            .chain(std::iter::once("z/.env".to_string())),
+    );
+
+    let result =
+        dispatch_hygiene_with_agent(&runtime, "hyc-entry-limit", project, None, Some(true), None)
+            .await;
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.output["git_available"], true, "{}", result.output);
+    assert_eq!(result.output["clean"], false, "{}", result.output);
+    assert_eq!(result.output["truncated"], true, "{}", result.output);
+    assert_reason_list_contains(
+        &result.output["verdict"],
+        "warning_reasons",
+        "diagnostic_scan_incomplete",
+    );
+    assert!(
+        result
+            .output
+            .get("findings")
+            .and_then(|findings| findings.as_array())
+            .is_none_or(|findings| findings
+                .iter()
+                .all(|finding| finding["kind"] != "dirty_worktree")),
+        "clean Git status must not gain a fabricated dirty finding: {}",
+        result.output
+    );
 }
 
 #[tokio::test]
