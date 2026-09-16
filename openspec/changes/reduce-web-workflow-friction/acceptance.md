@@ -1,6 +1,6 @@
 # Acceptance receipt
 
-Status: initial release lead-accepted and activated; 2026-09-16 source follow-up lead-accepted, publication and local activation authorized and pending.
+Status: 2026-09-16 source follow-up lead-accepted, fork publication and local activation passed; separate tracked-token-path classifier warning remains.
 
 ## Source and scope
 
@@ -112,11 +112,46 @@ inventory counterexample) and `e2e-skill-required-and-hygiene-red/receipt.json`
   against stale wrappers, guessed aliases and unadvertised gateways.
 
 The user subsequently authorized publication to the existing fork and replacement
-of the named local Server/Runner. Activation evidence will be recorded below;
-until then the active `.2` runtime remains unchanged. ChatGPT's cached direct callable schema still needs host-side refresh
+of the named local Server/Runner. Activation evidence is recorded below.
+ChatGPT's cached direct callable schema still needs host-side refresh
 and browser acceptance; a Server-side pass cannot certify that refresh.
 
 Adjacent pre-existing behavior, outside this fix: failed/truncated untracked-file
 size probes are not fully reflected in hygiene completeness. This patch does not
 claim to make the entire hygiene scanner a security audit, and does not alter
 that separate path. No research Git history or dirty work was changed.
+
+### Authorized publication and activation
+
+- Fetched `origin`; both target branches still equaled `bc74dd33`, so no merge
+  or history rewrite was needed. Committed the eight scoped files as
+  `81d82121f2e2597d319f9b7b06fe25dc0c00ad72` and atomically fast-forward pushed
+  to `Pein2017/webcodex` branches `main` and `coordexp/web-workflow`.
+  This receipt update is a subsequent documentation-only commit.
+- Clean `dogfood` Server and Runner build passed; both report `81d82121f2e2`,
+  `dirty=false`, `built_at=1789523100`. The expanded disposable real MCP smoke
+  passed all 29 checks again in 7.26 seconds (`e2e-clean/receipt.json`).
+- Activated `coordexp-2026.09.16.1` at the existing local deployment. Prior
+  `.2` binaries remain intact. No npm, tag, GitHub binary release or container
+  publication was performed; this is a local reviewed development build.
+- Immediately before shutdown, the Job inventory had zero matched Jobs and
+  was not truncated. Only the verified old Server/Runner and retry wrappers
+  were stopped. Consistent stopped Server data and prior private configuration
+  are retained at `rollback/coordexp-2026.09.16.1`; SQLite `quick_check=ok`.
+- Existing tmux Server/Runner windows were recreated with the same working
+  directory. Tunnel wrapper PID `1930425` was untouched and its health endpoint
+  returned HTTP 200. Research processes and repositories were not modified.
+- Live receipt `live-acceptance.json`: matching clean Server/Runner, source
+  aligned, four registered Projects online, CodeGraph and all three workflow
+  plugins ready, updated 6,710-byte guidance served by initialize/discover,
+  actual Runner-scoped `git-hygiene` Skill read successful. The acceptance
+  Session was closed afterward.
+- Live main Project Git state is clean and hygiene returns no `dirty_worktree`
+  finding and no truncation. Its overall hygiene verdict is still non-clean:
+  the existing path-only classifier flags 16 tracked source/test files below
+  `reference/legacy_src/tokens/` and `tests/tokens/` as sensitive paths. This is
+  a separate classifier limitation, not a recurrence of the truncated-output
+  dirty bug; no file contents were inspected or classifier rules changed.
+- Deployment checksums, clean source identity, verification and rollback paths
+  are recorded in the installed `RELEASE.json`. Browser-side cached callable
+  declaration refresh remains outside this server-side acceptance claim.
