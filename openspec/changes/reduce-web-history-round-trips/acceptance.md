@@ -70,3 +70,42 @@ cache, deployment, service restart, configuration activation, Git commit/push,
 GPU task or research-worktree mutation occurred. The new mode is not yet exposed
 by the deployed service/browser. Publishing and deployment require separate
 authorization.
+
+## Authorized local deployment — 2026-09-16
+
+The user subsequently authorized commit/push and local Server/Runner update.
+This section supersedes the preceding not-yet-deployed boundary only; it does
+not claim ChatGPT browser acceptance or a public package release.
+
+- Preserved concurrent completed OpenSpec archives byte-for-byte in `e919d19`;
+  accepted implementation, tests, guidance and plans are in `8961669c`.
+  Both commits were fast-forward pushed atomically to the fork's `main` and
+  `coordexp/web-workflow` branches. The separate shared team-skill change was
+  committed/pushed in CoordExp as `493f6a910`.
+- Built both binaries from clean `8961669cc697b260a8750771c89bf05698ad589e`
+  with Rust 1.95.0, `dogfood` profile. Native plugin tests: 29/29; strict
+  OpenSpec validation: 4/4; independent bounded-history diagnostics passed.
+  Disposable real Server/Runner MCP smoke: 29/29 in 7.47 seconds.
+- Installed `coordexp-2026.09.16.2`, retaining `.1` binaries and guidance.
+  Wrapper/config and stopped-state SQLite backup are under the private
+  operator rollback directory for `.2`; backup `quick_check` returned `ok`.
+  Pre-restart Job inventory was complete, with zero Jobs. Only the exact old
+  Server/Runner and their retry wrappers received SIGTERM. Original Tunnel
+  PID 1930428 was preserved; research processes/worktrees were not modified.
+- Activated automatic CLAUDE instruction exclusion on both components and
+  the optional public-history root in the existing Web workflow profile.
+  This does not prevent explicit authorized CLAUDE reads.
+- Live MCP verified matching clean build identities and aligned source,
+  initialization/discovery guidance byte identity, four online Projects,
+  four ready Plugin providers, shared Skill read, and hygiene observation.
+  Its own acceptance Session was closed. The public-history tool's latest
+  mode was discovered and called through its opaque binding on one explicit
+  real thread: one public message, 132973 bytes scanned, 141165 bytes read,
+  older continuation available. No message body or credential was recorded.
+- Detailed private receipts live under
+  `/var/lib/webcodex/coordexp-full/verification/coordexp-2026.09.16.2`;
+  immutable installation checksums are in its release directory's
+  `RELEASE.json`. No tag, GitHub Release, npm publication, reindex, or GPU
+  experiment was performed. Browser-side cached metadata remains outside
+  this server-side acceptance; callers should describe the selected Plugin
+  tool again to obtain its current schema and binding.
