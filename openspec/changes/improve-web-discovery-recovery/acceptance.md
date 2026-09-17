@@ -1,6 +1,6 @@
 # Acceptance record
 
-Status: implementation in progress; no deployment acceptance yet.
+Status: lead-accepted implementation and persistent local deployment; clean build source pushed atomically to Pein2017/webcodex main and coordexp/web-workflow.
 
 ## Trace assessment
 
@@ -40,3 +40,14 @@ No nested delegation, new controller, timeout waiver, auto-ACK or automatic inde
 The user explicitly added /data-only persistence while verification was underway. Read-only process/dependency audit preserved all services. Existing binaries, native Node/CodeGraph and Tunnel client are already persistent; operator config, credentials, SQLite/Session state and receipts are not. System Git 2.34.1 rejects `check-attr --source=HEAD`; existing ms Git 2.55.0 passes. System Python 3.10 can run the stdlib JUnit helper.
 
 The preceding `.09.16.2` installation omitted `pytest_report.py` despite source retaining it unchanged. The new bundle must include it and verify actual parsing. A separately named rollback bundle may retain the old binaries with that exact unchanged helper; the original release remains untouched.
+
+## Final deployment evidence
+
+- Clean source `b3baff24db1858309c1d42a802d7e595ea5b13e3`, dogfood release `coordexp-2026.09.17.1`; Server/Runner aligned, four projects/four providers online.
+- Disposable real MCP: 31 checks passed. Final live MCP verifies guarded Skill/Plugin suggestions, complete recovery, Skill read, scoped CodeGraph (five results including expected symbol), actual JUnit parsing (one each pass/fail/error/skip; no test execution). Own Sessions closed.
+- Independent deployment falsification verified invalid/incomplete releases, live-switch refusal, dependency admission, duplicate-start prevention and child shutdown. Lead fixed stopped-status reporting and replayed it.
+- Persistent root `/data/CoordExp/.local/webcodex-custom`: current/release split, private config/credentials, independent state, logs/verification/rollback, native dependencies, standalone Git 2.55.0 and recovery entrypoint. Source location unchanged; image prerequisites documented.
+- Quiesced backup and exact 42-Session copy verified; SQLite quick_check passed. Original IDs/non-title records survive rollback. One overlong title is bounded by existing restore sanitization; original remains in backup. No old data removed.
+- New -> old -> new rollback and clean-environment startup without /root configuration passed. Active Tunnel /readyz=200; clipboard-dependent ready_for_chatgpt is not the connectivity assertion.
+- Private receipts: persistent `verification/coordexp-2026.09.17.1/{migration.md,live-final.json,e2e/receipt.json,artifacts.sha256}`. Research processes/proxy/unrelated dirty work preserved. Canonical hygiene findings remain user-owned, not a clean-project claim.
+- Publication scope: user's fork and local dogfood, no npm/GitHub Release. Browser wrapper cache/selection and browser invocation remain separate user verification.
