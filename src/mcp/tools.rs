@@ -1672,6 +1672,28 @@ pub(super) async fn handle_call(
                 return McpOutcome::BadRequest(rpc_error(id, -32602, message));
             }
         };
+        let ack_session_message_ids = if stateless_2026 {
+            match strip_stateless_ack_session_message_ids(&mut params.arguments) {
+                Ok(ids) => ids,
+                Err(message) => {
+                    if let Some(lc) = lifecycle.as_deref() {
+                        lc.dispatch_failed("invalid_arguments");
+                        lc.dispatch_finished(false, Some(false), "invalid_arguments");
+                    }
+                    return McpOutcome::BadRequest(rpc_error(id, -32602, message));
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        // Plugin operations do not consume Context ACK.  Strip this known
+        // wrapper before strict Plugin parsing, but do not invent a revision,
+        // recovery, or context effect for the specialized gateway.
+        let context_revision = stateless_2026
+            .then(|| strip_stateless_ack_session_context_revision(&mut params.arguments))
+            .flatten();
+        let ignored_invocation_metadata =
+            ignored_invocation_metadata(&params.name, context_revision.as_ref());
         let call = match ToolCall::from_tool_name(&params.name, params.arguments.clone()) {
             Ok(call) => call,
             Err(message) => {
@@ -1696,6 +1718,7 @@ pub(super) async fn handle_call(
             recording_session_id.as_deref(),
             auth,
             crate::tool_runtime::sessions::SessionTransport::Mcp,
+            &ack_session_message_ids,
         )
         .await
         {
@@ -1747,7 +1770,7 @@ pub(super) async fn handle_call(
             });
             lc.dispatch_finished(true, Some(ok), if ok { "success" } else { "tool_error" });
         }
-        let result = invocation.to_mcp_result();
+        let result = invocation.to_mcp_result(runtime, &ignored_invocation_metadata);
         return McpOutcome::Ok(rpc_result(
             id,
             if stateless_2026 {

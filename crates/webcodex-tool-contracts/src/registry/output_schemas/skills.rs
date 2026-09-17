@@ -120,6 +120,29 @@ mod tests {
     }
 
     #[test]
+    fn skill_read_schema_declares_guarded_parser_ready_continuation() {
+        let schema = output_schema_for_tool("skill_read_file").unwrap();
+        let call = &schema["properties"]["output"]["properties"]["suggested_call"];
+        assert_eq!(call["properties"]["tool"]["const"], "skill_read_file");
+        assert_eq!(call["required"], json!(["tool", "arguments"]));
+        assert_eq!(
+            call["properties"]["arguments"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            call["properties"]["arguments"]["required"],
+            json!([
+                "project",
+                "skill_id",
+                "path",
+                "start_line",
+                "limit",
+                "expected_definition_revision"
+            ])
+        );
+    }
+
+    #[test]
     fn skill_recovery_schemas_use_exact_call_or_family_only_without_legacy_alias() {
         for tool in [
             "skill_list",
@@ -220,7 +243,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 "diagnostics",
                 array_schema(
                     json!({"type":"object","additionalProperties":true}),
-                    "Bounded reason-code-only invalid package or rejected-source diagnostics.",
+                    "Bounded invalid package or rejected-source reason codes with safe candidate_name and source_scope where available; no native paths or callable Skill identity.",
                 ),
             ),
             (
@@ -240,6 +263,22 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ),
         ])),
         "skill_read_file" => Some(wrapped_output_schema(vec![
+            (
+                "suggested_call",
+                suggested_tool_call_schema("skill_read_file", json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "project": {"type": "string", "minLength": 1},
+                        "skill_id": {"type": "string", "pattern": "^wc_skill_[A-Za-z0-9_-]{21}[AQgw]$"},
+                        "path": {"type": "string", "minLength": 1},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "limit": {"type": "integer", "minimum": 1},
+                        "expected_definition_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    },
+                    "required": ["project", "skill_id", "path", "start_line", "limit", "expected_definition_revision"]
+                }), "Parser-ready advisory next page, guarded by the observed Skill definition revision. Absent at EOF; does not execute automatically or grant authority."),
+            ),
             ("project", schema_type("string", "Resolved Project id.")),
             (
                 "skill_id",

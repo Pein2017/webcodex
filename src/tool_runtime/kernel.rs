@@ -329,6 +329,8 @@ impl ToolRuntime {
             && super::tool_definition::runtime_tool_accepts_context_ack(&request.tool_name);
         let ack_session_context_revision =
             invocation_metadata.effective_context_ack(context_continuity_capable);
+        let specialized_ack_session_message_ids =
+            invocation_metadata.ack_session_message_ids.clone();
         let mut recorder_metadata =
             ToolCallRecorderMetadata::from_business_arguments(&request.arguments);
         recorder_metadata.ack_session_message_ids = invocation_metadata.ack_session_message_ids;
@@ -490,8 +492,13 @@ impl ToolRuntime {
         }
         // Action-dependent gateways resolve exact policy before the generic
         // static Session/permission lifecycle and own one specialized ledger.
-        if let Some(outcome) =
-            super::specialized::try_dispatch_specialized_gateway(self, &request, context).await
+        if let Some(outcome) = super::specialized::try_dispatch_specialized_gateway(
+            self,
+            &request,
+            context,
+            &specialized_ack_session_message_ids,
+        )
+        .await
         {
             return outcome;
         }
@@ -1472,10 +1479,7 @@ mod tests {
             "Task ownership and CodingAgent authority must not imply Project write authority"
         );
         assert_eq!(
-            check_runtime_tool_scope(
-                Some(&task_and_run),
-                "reconcile_agent_task_coding_run"
-            ),
+            check_runtime_tool_scope(Some(&task_and_run), "reconcile_agent_task_coding_run"),
             Ok(()),
             "reconciliation observes exact bound execution and must not require a new Project write grant"
         );

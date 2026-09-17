@@ -6,8 +6,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use webcodex_core::runner_skill::{
-    normalize_runner_skill_resource_path, RunnerSkillDescriptor, RunnerSkillReadResponse,
-    RunnerSkillSource, MAX_RUNNER_SKILL_READ_TEXT_BYTES, RUNNER_SKILL_RESPONSE_FORMAT,
+    normalize_runner_skill_resource_path, RunnerSkillDescriptor, RunnerSkillDiagnostic,
+    RunnerSkillReadResponse, RunnerSkillSource, MAX_RUNNER_SKILL_READ_TEXT_BYTES,
+    RUNNER_SKILL_RESPONSE_FORMAT,
 };
 use webcodex_core::skill_metadata::{parse_skill_metadata, MAX_SKILL_DEFINITION_BYTES};
 use webcodex_workspace::file_read_range;
@@ -29,7 +30,7 @@ pub(super) struct LiveSkill {
 pub(super) struct LiveDiscovery {
     pub(super) skills: Vec<LiveSkill>,
     pub(super) invalid_count: usize,
-    pub(super) diagnostics: Vec<String>,
+    pub(super) diagnostics: Vec<RunnerSkillDiagnostic>,
     pub(super) discovery_truncated: bool,
 }
 
@@ -107,6 +108,7 @@ fn discover_with_trigger(
                 push_diagnostic(
                     &mut discovery.diagnostics,
                     "configured_skill_root_not_found",
+                    None,
                 );
                 continue;
             }
@@ -114,6 +116,7 @@ fn discover_with_trigger(
                 push_diagnostic(
                     &mut discovery.diagnostics,
                     "configured_skill_root_unavailable",
+                    None,
                 );
                 continue;
             }
@@ -122,6 +125,7 @@ fn discover_with_trigger(
             push_diagnostic(
                 &mut discovery.diagnostics,
                 "configured_skill_root_link_not_allowed",
+                None,
             );
             continue;
         }
@@ -129,6 +133,7 @@ fn discover_with_trigger(
             push_diagnostic(
                 &mut discovery.diagnostics,
                 "configured_skill_root_not_directory",
+                None,
             );
             continue;
         }
@@ -138,6 +143,7 @@ fn discover_with_trigger(
                 push_diagnostic(
                     &mut discovery.diagnostics,
                     "configured_skill_root_unavailable",
+                    None,
                 );
                 continue;
             }
@@ -148,7 +154,7 @@ fn discover_with_trigger(
                 if code == "configured_skill_root_scan_limit_exceeded" {
                     discovery.discovery_truncated = true;
                 }
-                push_diagnostic(&mut discovery.diagnostics, code);
+                push_diagnostic(&mut discovery.diagnostics, code, None);
                 continue;
             }
         };
@@ -169,7 +175,7 @@ fn discover_with_trigger(
                 }
                 Err(code) => {
                     discovery.invalid_count = discovery.invalid_count.saturating_add(1);
-                    push_diagnostic(&mut discovery.diagnostics, code);
+                    push_diagnostic(&mut discovery.diagnostics, code, Some(&package_name));
                 }
             }
         }
@@ -196,6 +202,7 @@ fn resolve_live_skill_by_id(
                 push_diagnostic(
                     &mut discovery.diagnostics,
                     "configured_skill_root_not_found",
+                    None,
                 );
                 continue;
             }
@@ -203,6 +210,7 @@ fn resolve_live_skill_by_id(
                 push_diagnostic(
                     &mut discovery.diagnostics,
                     "configured_skill_root_unavailable",
+                    None,
                 );
                 continue;
             }
@@ -211,6 +219,7 @@ fn resolve_live_skill_by_id(
             push_diagnostic(
                 &mut discovery.diagnostics,
                 "configured_skill_root_link_not_allowed",
+                None,
             );
             continue;
         }
@@ -218,6 +227,7 @@ fn resolve_live_skill_by_id(
             push_diagnostic(
                 &mut discovery.diagnostics,
                 "configured_skill_root_not_directory",
+                None,
             );
             continue;
         }
@@ -227,6 +237,7 @@ fn resolve_live_skill_by_id(
                 push_diagnostic(
                     &mut discovery.diagnostics,
                     "configured_skill_root_unavailable",
+                    None,
                 );
                 continue;
             }
@@ -237,7 +248,7 @@ fn resolve_live_skill_by_id(
                 if code == "configured_skill_root_scan_limit_exceeded" {
                     discovery.discovery_truncated = true;
                 }
-                push_diagnostic(&mut discovery.diagnostics, code);
+                push_diagnostic(&mut discovery.diagnostics, code, None);
                 continue;
             }
         };
@@ -269,7 +280,7 @@ fn resolve_live_skill_by_id(
                 }
                 Err(code) => {
                     discovery.invalid_count = discovery.invalid_count.saturating_add(1);
-                    push_diagnostic(&mut discovery.diagnostics, code);
+                    push_diagnostic(&mut discovery.diagnostics, code, Some(&package_name));
                 }
             }
         }
@@ -571,9 +582,17 @@ fn valid_package_name(name: &str) -> bool {
         && !name.chars().any(char::is_control)
 }
 
-fn push_diagnostic(diagnostics: &mut Vec<String>, code: &str) {
+fn push_diagnostic(
+    diagnostics: &mut Vec<RunnerSkillDiagnostic>,
+    code: &str,
+    candidate_name: Option<&str>,
+) {
     if diagnostics.len() < MAX_CONFIGURED_SKILL_DIAGNOSTICS {
-        diagnostics.push(code.to_string());
+        diagnostics.push(RunnerSkillDiagnostic {
+            reason_code: code.to_string(),
+            candidate_name: candidate_name.map(str::to_string),
+            source_scope: Some("runner".to_string()),
+        });
     }
 }
 

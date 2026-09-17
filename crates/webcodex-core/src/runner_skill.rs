@@ -9,7 +9,7 @@ use crate::skill_metadata::{MAX_SKILL_DESCRIPTION_CHARS, MAX_SKILL_NAME_CHARS};
 use crate::skill_store::{
     valid_lower_sha256, valid_package_revision, valid_skill_key, MAX_SKILL_STORE_VERSIONS_LIMIT,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Component, Path};
 
 pub const RUNNER_SKILL_REQUEST_KIND: &str = "skill";
@@ -267,8 +267,77 @@ pub struct RunnerSkillListResponse {
     pub format: String,
     pub skills: Vec<RunnerSkillDescriptor>,
     pub invalid_count: usize,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<RunnerSkillDiagnostic>,
     pub discovery_truncated: bool,
+}
+
+/// Bounded, path-free diagnostic for a Runner-local Skill discovery candidate.
+///
+/// Older Runners sent reason-only entries, so the identity fields remain
+/// optional on the wire. A candidate name is descriptive only; it never
+/// creates a callable Skill identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunnerSkillDiagnostic {
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunnerSkillDiagnosticStructured {
+    reason_code: String,
+    #[serde(default)]
+    candidate_name: Option<String>,
+    #[serde(default)]
+    source_scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RunnerSkillDiagnosticWire {
+    Structured(RunnerSkillDiagnosticStructured),
+    Legacy(String),
+}
+
+impl<'de> Deserialize<'de> for RunnerSkillDiagnostic {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match RunnerSkillDiagnosticWire::deserialize(deserializer)? {
+            RunnerSkillDiagnosticWire::Structured(diagnostic) => Ok(Self {
+                reason_code: diagnostic.reason_code,
+                candidate_name: diagnostic.candidate_name,
+                source_scope: diagnostic.source_scope,
+            }),
+            RunnerSkillDiagnosticWire::Legacy(reason_code) => Ok(Self {
+                reason_code,
+                candidate_name: None,
+                source_scope: None,
+            }),
+        }
+    }
+}
+
+impl RunnerSkillDiagnostic {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !valid_diagnostic_reason(&self.reason_code)
+            || self
+                .candidate_name
+                .as_deref()
+                .is_some_and(|name| !valid_diagnostic_candidate_name(name))
+            || self
+                .source_scope
+                .as_deref()
+                .is_some_and(|scope| scope != "runner")
+        {
+            return Err("invalid Runner Skill diagnostic");
+        }
+        Ok(())
+    }
 }
 
 impl RunnerSkillListResponse {
@@ -279,7 +348,7 @@ impl RunnerSkillListResponse {
             || self
                 .diagnostics
                 .iter()
-                .any(|reason| !valid_diagnostic_reason(reason))
+                .any(|diagnostic| diagnostic.validate().is_err())
         {
             return Err("invalid Runner Skill list response");
         }
@@ -402,6 +471,15 @@ fn valid_diagnostic_reason(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_diagnostic_candidate_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && !value.contains(['/', '\\'])
+        && value != "."
+        && value != ".."
+        && !value.chars().any(char::is_control)
 }
 
 #[cfg(test)]
@@ -561,6 +639,38 @@ mod tests {
         assert!(resolve
             .validate_for_request(configured().skill_id())
             .is_err());
+    }
+
+    #[test]
+    fn list_diagnostics_accept_legacy_reason_only_entries_and_bound_structured_identity() {
+        let response: RunnerSkillListResponse = serde_json::from_value(serde_json::json!({
+            "format": RUNNER_SKILL_RESPONSE_FORMAT,
+            "skills": [],
+            "invalid_count": 1,
+            "diagnostics": ["missing_skill_definition"],
+            "discovery_truncated": false,
+        }))
+        .unwrap();
+        assert!(response.validate().is_ok());
+        assert_eq!(
+            response.diagnostics[0].reason_code,
+            "missing_skill_definition"
+        );
+        assert!(response.diagnostics[0].candidate_name.is_none());
+
+        let invalid: RunnerSkillListResponse = serde_json::from_value(serde_json::json!({
+            "format": RUNNER_SKILL_RESPONSE_FORMAT,
+            "skills": [],
+            "invalid_count": 1,
+            "diagnostics": [{
+                "reason_code": "missing_skill_definition",
+                "candidate_name": "/private/path",
+                "source_scope": "runner",
+            }],
+            "discovery_truncated": false,
+        }))
+        .unwrap();
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

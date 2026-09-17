@@ -403,6 +403,7 @@ pub(crate) async fn invoke(
             recording_session_id,
             auth,
             &audit,
+            &[],
         )
         .await?;
     let result = execute_business(runtime, operation, request, auth).await;
@@ -440,7 +441,7 @@ pub(crate) async fn call(
             return error_result(GatewayError::new(
                 "ssh_resource_invalid",
                 "ssh_resource arguments are invalid",
-            ))
+            ));
         }
     };
     let Some(operation) = SshResourceOperation::parse(&parsed.action) else {

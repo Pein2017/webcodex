@@ -5,7 +5,7 @@
 - 多步骤工作用 work_on_project 进入既有 checkout，保留同一个 session_id；需要记入该 Session 的调用显式传 recording_session_id。默认 include_project_instructions=false、include_workflow_guidance=false；不要创建替代 clone/worktree。一次性读取可以直接使用只读工具。
 - 使用当前连接宣告的工具和参数。启动结果中的能力状态是观察，不是权限；不要把未探测、超时或未配置称为永久不可用，也不要因工具数量不同就断言 schema 不匹配。
 - 优先沿用启动目录的 suggested_call 读取所选 Skill 或 describe 插件；目录截断不等于其余能力不存在，按需用 skill_list / plugin_tool list 补充发现。Skill 读取保留 expected_definition_revision，has_more 时读完所需正文再使用。若网页 wrapper 与 tool_manifest 不一致，区分调用前拒绝与服务器返回；不转换 opaque ID、猜旧别名或调用未宣告的 gateway。仅确认声明不一致时刷新连接；新建对话不等于刷新声明。
-- 字面搜索、路径定位、非代码材料用 search_project_texts / read_files。定位实现 owner、调用方/被调用方、跨文件数据流或修改影响时，优先试 CodeGraph：用 codegraph_explore / callers / callees / impact 查询关系；已知符号且只需目录内定位时用 codegraph_scoped_query。两种入口都要先核对精确 checkout 和索引新鲜度，并用原始代码与 Git 状态核实结论。图谱未命中不证明不存在；索引未初始化、失配或结果不完整时说明限制，再用字面搜索核实；只读任务不擅自重建索引。
+- 字面搜索、路径定位、非代码材料用 search_project_texts / read_files。定位实现 owner、调用方/被调用方、跨文件数据流或修改影响时，按任务选后端：有合适语言服务时用 LSP 的 goto_definition / find_references / call_hierarchy；需要图关系时，先确认可用且新鲜的 CodeGraph，再用窄 callers / callees（不是为简单关系取完整源码）。已知符号且只需目录内定位时用 codegraph_scoped_query。两种入口都要先核对精确 checkout 和索引新鲜度，并用原始代码与 Git 状态核实结论。图谱未命中不证明不存在；索引未初始化、失配或结果不完整时说明限制，再用有界 rg / search_project_texts 和 read_files 核实；只读任务不擅自重建索引或假定重试。
 - CodeGraph 经 plugin_tool 调用，不是独立顶层工具。describe/list 的 Runner 参数叫 runner，不是 client_id；call 只用 describe 返回的 binding 和 arguments。启动目录可能只列项目专属 web-workflow-* 的 scoped query；需要关系查询时，对已确认的 runner 做 plugin_tool list，寻找 codegraph provider 并 describe 当前实际工具，不凭空猜工具名。其 projectPath 用当前 checkout 绝对根；scoped query 用配置的 project id 与相对目录 pathPrefix。复用有效 binding；check 仅用于配置诊断，不为普通文件/Git 读取强制走图。LSP probe_timeout 不代表 CodeGraph 不可用。
 - 审查先用 Git 限定变更范围，再用图谱/低上下文搜索定位，最后读相关源码。结果 success 不代表完整：检查 has_more、output_truncated、stdout_truncated；需要遗漏证据时沿 suggested_call 续读并保留 revision，已读片段不要整文件重读。避免一次拉取上万行或全目录长 AST 两两相似度比较；先精确哈希/结构筛选，再对少量候选做有界分析。
 - 小范围修改用 read_files 返回的 read_revision，原样传给 apply_text_edits 的 expected_read_revision；不必手抄或转换 SHA。guard 失效时重新读取目标，不能去掉 guard 重试。修改后检查精确 diff，并验证最终源码。
@@ -16,6 +16,7 @@
 
 ## 按需上下文
 
+- Skill 分页优先执行返回的 suggested_call，保留其 Project、Skill ID、资源路径和 definition revision；EOF 不再续读。Plugin 的 ack_session_message_ids 仅确认已读的消息，需绑定明确的 recording_session_id，不等于解决消息或确认上下文；ack_session_context_revision 是另一套协议，工具声明不支持时不要强行携带。
 - 需要补充规则或方法时，在先行只读调用中请求 context_request；材料在该次调用结束后返回，不能追溯约束已经发生的操作。
 - session_id 是业务目标/Job 归属，recording_session_id 是本次调用的记录目标，两者不互相代填。工具支持业务 session_id 且希望记录同一 Session 时显式传两者；recording_session_missing 表示漏传 recorder，不代表执行失败，不要因此重跑有副作用的命令。
 - ACK 只回传确实保留的 session_context_revision，参数名 ack_session_context_revision。收到 unacknowledged 时保留已完成的业务结果，沿 suggested_call 做完整 handoff：summary_only=false、include_* 全开、limit 至少 20，不为精简输出删掉恢复字段。若要记录该调用，显式用同一个 recording_session_id；不要混入另一个 Session。只有阅读 recovered 结果后，才在支持 ACK 的后续调用回传其 revision；仍未恢复则不猜值、不重跑原操作。普通读写的业务 session_id 与 recorder 按各自契约填写，不复制残缺 ID。

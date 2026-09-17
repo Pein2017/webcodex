@@ -282,6 +282,7 @@ fn audit_arguments_with_resolved_binding(mut audit: Value, binding: &PluginBindi
 pub(crate) struct PluginInvocationResult {
     operation: PluginOperation,
     result: Result<GatewaySuccess, GatewayError>,
+    session_attention: Option<crate::tool_runtime::specialized::SpecializedSessionAttention>,
 }
 
 impl PluginInvocationResult {
@@ -316,12 +317,40 @@ impl PluginInvocationResult {
         }
     }
 
-    pub(crate) fn to_mcp_result(&self) -> Value {
-        render_gateway_result(self.result.clone())
+    pub(crate) fn to_mcp_result(&self, runtime: &ToolRuntime, ignored_metadata: &[&str]) -> Value {
+        let mut result = render_gateway_result(self.result.clone());
+        let mut projection = ToolResult::ok(json!({}));
+        if let Some(attention) = &self.session_attention {
+            attention.add_to_result(runtime, &mut projection);
+        }
+        if !ignored_metadata.is_empty() {
+            projection.output["ignored_invocation_metadata"] = json!(ignored_metadata);
+        }
+        if let Some(metadata) = projection
+            .output
+            .as_object()
+            .filter(|value| !value.is_empty())
+        {
+            if matches!(&self.result, Ok(GatewaySuccess::ToolResult(_))) {
+                // Provider structuredContent belongs to its own schema and can
+                // be absent or use these same field names. Do not overwrite it.
+                if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+                    content.push(json!({"type": "text", "text": format!(
+                        "WebCodex invocation metadata: {}", projection.output
+                    )}));
+                }
+            } else if let Some(structured) = result
+                .get_mut("structuredContent")
+                .and_then(Value::as_object_mut)
+            {
+                structured.extend(metadata.clone());
+            }
+        }
+        result
     }
 
-    pub(crate) fn to_tool_result(&self) -> ToolResult {
-        match &self.result {
+    pub(crate) fn to_tool_result(&self, runtime: &ToolRuntime) -> ToolResult {
+        let mut result = match &self.result {
             Ok(GatewaySuccess::Metadata(value)) => ToolResult::ok(value.clone()),
             Ok(GatewaySuccess::ToolResult(result)) => {
                 let mut output = serde_json::to_value(result).unwrap_or_else(|_| json!({}));
@@ -344,7 +373,11 @@ impl PluginInvocationResult {
                 }
             }
             Err(error) => gateway_error_tool_result(error),
+        };
+        if let Some(attention) = &self.session_attention {
+            attention.add_to_result(runtime, &mut result);
         }
+        result
     }
 }
 
@@ -356,6 +389,7 @@ pub(crate) async fn invoke(
     recording_session_id: Option<&str>,
     auth: Option<&AuthContext>,
     transport: SessionTransport,
+    ack_session_message_ids: &[String],
 ) -> Result<PluginInvocationResult, SpecializedGovernanceDenial> {
     let operation = PluginOperation::parse(&request.action)
         .expect("PluginToolCall parser admits only the closed action vocabulary");
@@ -369,11 +403,17 @@ pub(crate) async fn invoke(
             recording_session_id,
             auth,
             &audit,
+            ack_session_message_ids,
         )
         .await?;
 
     let result = execute_business(runtime, operation, request, auth).await;
-    let invocation = PluginInvocationResult { operation, result };
+    let session_attention = runtime.specialized_session_attention(&permit);
+    let invocation = PluginInvocationResult {
+        operation,
+        result,
+        session_attention,
+    };
     runtime.finish_specialized_invocation(
         permit,
         invocation.success(),
@@ -1230,6 +1270,38 @@ fn dispatch_state_name(state: PluginDispatchState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invocation_metadata_preserves_provider_content_and_optional_structured_result() {
+        let runtime = ToolRuntime::new_for_tests();
+        for structured_content in [
+            None,
+            Some(json!({"ignored_invocation_metadata": "provider-owned"})),
+        ] {
+            let invocation = PluginInvocationResult {
+                operation: PluginOperation::Call,
+                result: Ok(GatewaySuccess::ToolResult(PluginToolResult {
+                    content: vec![webcodex_core::plugin::PluginContent::Text {
+                        text: "provider text".into(),
+                    }],
+                    structured_content: structured_content.clone(),
+                    is_error: false,
+                })),
+                session_attention: None,
+            };
+            let result = invocation.to_mcp_result(&runtime, &["ack_session_context_revision"]);
+            assert_eq!(
+                result["structuredContent"],
+                structured_content.unwrap_or(Value::Null)
+            );
+            assert_eq!(result["content"][0]["text"], "provider text");
+            assert!(result["content"][1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("ack_session_context_revision"));
+            assert_eq!(result["isError"], false);
+        }
+    }
 
     fn test_binding(provider: &str, tool: &str) -> PluginBinding {
         PluginBinding {

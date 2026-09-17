@@ -154,6 +154,61 @@ fn tool_recommended_flows_reference_visible_defined_tools() {
 }
 
 #[test]
+fn inspect_flow_selects_bounded_relationship_backends_without_claiming_graph_completeness() {
+    let exploration = TOOL_MANIFEST_INTENTS
+        .iter()
+        .find(|intent| intent.name == "exploration")
+        .unwrap();
+    for tool in [
+        "lsp_status",
+        "goto_definition",
+        "find_references",
+        "call_hierarchy",
+        "plugin_tool",
+    ] {
+        assert!(
+            exploration.tools.contains(&tool),
+            "exploration omits {tool}"
+        );
+    }
+    let flow = TOOL_RECOMMENDED_FLOWS
+        .iter()
+        .find(|flow| flow.name == "inspect")
+        .expect("inspect recommended flow");
+    assert_eq!(
+        flow.tools,
+        &[
+            "search_project_texts",
+            "read_files",
+            "lsp_status",
+            "goto_definition",
+            "find_references",
+            "call_hierarchy",
+            "plugin_tool",
+            "run_process",
+            "run_script",
+            "run_shell",
+            "show_changes",
+        ]
+    );
+    let guidance = format!("{}\n{}", flow.summary, flow.manifest_purpose).to_ascii_lowercase();
+    for phrase in [
+        "task-appropriate lsp",
+        "goto_definition/find_references/call_hierarchy",
+        "narrow callers/callees",
+        "index freshness",
+        "does not prove source absent",
+        "bounded rg",
+    ] {
+        assert!(
+            guidance.contains(phrase),
+            "inspect flow should mention {phrase}: {guidance}"
+        );
+    }
+    assert!(!guidance.contains("automatic reindex"));
+}
+
+#[test]
 fn edit_recommended_flow_selects_mutation_by_shape_without_weakening_guards() {
     let flow = TOOL_RECOMMENDED_FLOWS
         .iter()

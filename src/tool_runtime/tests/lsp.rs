@@ -1510,6 +1510,100 @@ fn malformed_agent_envelope_is_rejected() {
     assert!(parsed.success);
 }
 
+#[tokio::test]
+async fn lsp_failure_code_survives_session_handoff() {
+    let runtime = test_runtime();
+    let tmp = tempfile::tempdir().unwrap();
+    let project =
+        register_lsp_agent(&runtime, "lsp-failure-ledger", "demo", tmp.path(), true).await;
+    let auth = auth_context(None, true);
+    let session = runtime
+        .dispatch_with_auth(
+            ToolCall::StartSession {
+                project: Some(project.clone()),
+                title: None,
+                mode: crate::tool_runtime::SessionMode::ReadOnly,
+                deny_write_tools: true,
+                deny_shell_tools: true,
+                execution_context: None,
+            },
+            Some(&auth),
+        )
+        .await;
+    assert!(session.success, "{session:?}");
+    let sid = session.output["session_id"].as_str().unwrap().to_string();
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        let sid = sid.clone();
+        async move {
+            runtime
+                .dispatch_with_auth(
+                    ToolCall::FindReferences {
+                        project,
+                        path: "src/main.rs".into(),
+                        line: 1,
+                        column: 1,
+                        include_declaration: false,
+                        limit: Some(5),
+                        session_id: Some(sid),
+                    },
+                    Some(&auth_context(None, true)),
+                )
+                .await
+        }
+    });
+    let request = wait_for_patch_agent_request(&runtime, "lsp-failure-ledger").await;
+    let envelope = RunnerLspResultEnvelope::err(
+        error_codes::LSP_SERVER_UNAVAILABLE,
+        "language service is unavailable",
+    );
+    complete_patch_agent_request(
+        &runtime,
+        "lsp-failure-ledger",
+        &request.request_id,
+        0,
+        &envelope.to_stdout_json(),
+        "",
+    )
+    .await;
+    let result = task.await.unwrap();
+    assert!(!result.success);
+    assert_eq!(result.output["code"], error_codes::LSP_SERVER_UNAVAILABLE);
+    let summary = runtime.sessions.summary(&sid, Some(20)).unwrap();
+    let failure = summary
+        .events
+        .iter()
+        .find(|event| event.kind == "tool_call_finished" && event.tool_name == "find_references")
+        .unwrap();
+    assert_eq!(
+        failure.error_kind.as_deref(),
+        Some(error_codes::LSP_SERVER_UNAVAILABLE)
+    );
+    let handoff = runtime
+        .dispatch_with_auth(
+            ToolCall::SessionHandoffSummary {
+                session_id: sid,
+                project: None,
+                include_workspace: Some(false),
+                include_checkpoints: Some(false),
+                include_validation: Some(false),
+                summary_only: false,
+                limit: Some(20),
+            },
+            Some(&auth),
+        )
+        .await;
+    assert!(handoff.success, "{handoff:?}");
+    assert!(
+        handoff.output["tool_failures"]["recent_unexpected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["actual_failure_kind"] == error_codes::LSP_SERVER_UNAVAILABLE),
+        "{handoff:?}"
+    );
+}
+
 #[test]
 fn typed_payload_rejects_arbitrary_operation() {
     let bad = r#"{"project_id":"p","request":{"operation":"arbitrary_passthrough","method":"workspace/symbol"}}"#;

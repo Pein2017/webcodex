@@ -371,12 +371,16 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
     ToolRecommendedFlow {
         name: "inspect",
-        summary: "Inspect: choose the simplest sufficient primitive. Native commands are first-class for small bounded observations; use search_project_texts/read_files when batching, path policy, bounded structured results, snapshot/continuation, or portable Runtime semantics help.",
-        manifest_purpose:
-            "For small bounded observations, native commands are first-class: run_process for one literal-argv executable, run_shell for shell grammar or a short related chain, and run_script for program-like supported scripts. Use search_project_texts/read_files when their batching, path policy, bounded structured result, read_revision, snapshot continuation, or portable Runtime semantics materially help.",
+        summary: "Inspect: choose the simplest sufficient primitive. Native commands are first-class for small bounded observations; use search_project_texts/read_files when batching; task-appropriate LSP for symbols or fresh CodeGraph narrow callers/callees for relationships.",
+        manifest_purpose: "Native commands: run_process for literal argv, run_shell for shell grammar or a short related chain, run_script for supported scripts. Structured search/read provide batching, read_revision and snapshot continuation. For task-appropriate LSP relationships use goto_definition/find_references/call_hierarchy. If plugin discovery exposes CodeGraph, use narrow callers/callees for simple relationships, not full sources. Verify exact checkout and index freshness. A stale, unavailable, or incomplete graph does not prove source absent: use bounded rg through run_process or search_project_texts, then read_files.",
         tools: &[
             "search_project_texts",
             "read_files",
+            "lsp_status",
+            "goto_definition",
+            "find_references",
+            "call_hierarchy",
+            "plugin_tool",
             "run_process",
             "run_script",
             "run_shell",
@@ -631,7 +635,7 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
     },
     ToolManifestIntent {
         name: "exploration",
-        purpose: "Light repository exploration without shell/jobs or default write paths.",
+        purpose: "Read-only repository exploration: file search/read or symbol-to-reference/call-hierarchy-to-source. Check LSP readiness; for an available fresh CodeGraph use plugin_tool list/describe and narrow relationship queries, not management/reload. Stale or missing graph evidence requires bounded text search, not an absence claim.",
         tools: &[
             "list_projects",
             "runtime_status",
@@ -642,6 +646,11 @@ pub const TOOL_MANIFEST_INTENTS: &[ToolManifestIntent] = &[
             "read_files",
             "git_status",
             "git_log",
+            "lsp_status",
+            "goto_definition",
+            "find_references",
+            "call_hierarchy",
+            "plugin_tool",
             "tool_manifest",
         ],
     },

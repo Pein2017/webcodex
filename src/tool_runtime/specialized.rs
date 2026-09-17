@@ -24,11 +24,13 @@ use crate::auth::AuthContext;
 ///
 /// Reuse the canonical typed ToolCall parser; action policy and native result
 /// conversion remain gateway-owned. Only trusted recorder/auth/transport context
-/// crosses this boundary: generic InvocationMetadata has no specialized meaning.
+/// crosses this boundary, along with validated message ACKs. Other generic
+/// invocation metadata does not acquire specialized semantics here.
 pub(crate) async fn try_dispatch_specialized_gateway(
     runtime: &ToolRuntime,
     request: &super::kernel::ToolCallRequest,
     context: super::kernel::ToolCallContext<'_>,
+    ack_session_message_ids: &[String],
 ) -> Option<super::kernel::ToolCallOutcome> {
     use super::kernel::{ToolCallErrorStatus, ToolCallOutcome};
     use super::sessions::strip_tool_call_expectation_metadata;
@@ -63,9 +65,10 @@ pub(crate) async fn try_dispatch_specialized_gateway(
             context.session_id,
             context.auth,
             context.transport.into(),
+            ack_session_message_ids,
         )
         .await
-        .map(|invocation| invocation.to_tool_result()),
+        .map(|invocation| invocation.to_tool_result(runtime)),
         ToolCall::SshResource(call) => crate::ssh_resource_gateway::invoke(
             runtime,
             call,
@@ -266,6 +269,26 @@ pub(crate) struct SpecializedInvocationPermit {
     policy: SpecializedOperationPolicy,
     session_start: Option<ToolCallStart>,
     permission: Option<PermissionDecision>,
+    session_attention: Option<SpecializedSessionAttention>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SpecializedSessionAttention {
+    session_id: String,
+    ack: crate::tool_runtime::sessions::SessionAckObservation,
+    ack_requested: bool,
+}
+
+impl SpecializedSessionAttention {
+    pub(crate) fn add_to_result(&self, runtime: &ToolRuntime, result: &mut ToolResult) {
+        super::session_context::add_session_attention_projection(
+            &mut *result,
+            &runtime.sessions,
+            &self.session_id,
+            &self.ack,
+            self.ack_requested,
+        );
+    }
 }
 
 fn bounded_ledger_arguments(policy: SpecializedOperationPolicy, identity: &Value) -> Value {
@@ -296,6 +319,7 @@ impl ToolRuntime {
         recording_session_id: Option<&str>,
         auth: Option<&AuthContext>,
         identity: &Value,
+        ack_session_message_ids: &[String],
     ) -> Result<SpecializedInvocationPermit, SpecializedGovernanceDenial> {
         if !auth.is_some_and(|auth| auth.has_scope(policy.required_scope)) {
             return Err(SpecializedGovernanceDenial::Scope {
@@ -374,6 +398,17 @@ impl ToolRuntime {
             }
         }
 
+        let session_attention =
+            recording_session_id.map(|session_id| SpecializedSessionAttention {
+                session_id: session_id.to_string(),
+                ack: super::session_context::observe_session_attention_acks(
+                    &self.sessions,
+                    session_id,
+                    ack_session_message_ids,
+                ),
+                ack_requested: !ack_session_message_ids.is_empty(),
+            });
+
         let permission = if policy.effect.consequential() {
             let decision = self.permission_evaluator.evaluate_resolved_required(
                 external_tool_name,
@@ -406,7 +441,15 @@ impl ToolRuntime {
             policy,
             session_start,
             permission,
+            session_attention,
         })
+    }
+
+    pub(crate) fn specialized_session_attention(
+        &self,
+        permit: &SpecializedInvocationPermit,
+    ) -> Option<SpecializedSessionAttention> {
+        permit.session_attention.clone()
     }
 
     /// Close the authoritative specialized ledger lifecycle with only bounded
@@ -495,6 +538,7 @@ mod tests {
                 Some(&session.session_id),
                 Some(&auth),
                 &json!({"plugin": "repo-tools"}),
+                &[],
             )
             .await
             .expect("read-like Plugin inspection remains allowed");
@@ -512,6 +556,7 @@ mod tests {
                 Some(&session.session_id),
                 Some(&auth),
                 &json!({"plugin": "repo-tools"}),
+                &[],
             )
             .await
             .expect_err("read-only Session must deny local Plugin execution");
@@ -543,6 +588,7 @@ mod tests {
                 None,
                 Some(&auth),
                 &json!({}),
+                &[],
             )
             .await
             .expect("read-like operation skips permission approval");
@@ -561,6 +607,7 @@ mod tests {
                 None,
                 Some(&auth),
                 &json!({}),
+                &[],
             )
             .await
             .expect_err("restricted authority must deny specialized local execution");
@@ -591,6 +638,7 @@ mod tests {
                 Some(&session.session_id),
                 Some(&foreign),
                 &json!({}),
+                &[],
             )
             .await
             .expect_err("foreign authority must not attach to exact recording Session");

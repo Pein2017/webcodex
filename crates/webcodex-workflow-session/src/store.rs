@@ -1539,6 +1539,32 @@ impl SessionStore {
             .map(str::to_string);
         let error_kind = error_kind
             .or_else(|| error.and_then(|_| output.get("failure_kind").and_then(Value::as_str)))
+            .or_else(|| {
+                error.and_then(|_| {
+                    output
+                        .get("error_kind")
+                        .and_then(Value::as_str)
+                        .filter(|kind| {
+                            !kind.is_empty()
+                                && kind.len() <= 64
+                                && kind.bytes().all(|byte| {
+                                    byte.is_ascii_lowercase()
+                                        || byte.is_ascii_digit()
+                                        || byte == b'_'
+                                })
+                        })
+                })
+            })
+            // The typed LSP bridge already validates this closed vocabulary.
+            // Do not promote arbitrary provider `code` values or error prose.
+            .or_else(|| {
+                error.and_then(|_| {
+                    output
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .filter(|code| webcodex_core::lsp_bridge::is_known_error_code(code))
+                })
+            })
             .or_else(|| error.map(|_| "runtime_error"));
         let actual_failure_kind = actual_failure_kind_for_tool_result(output, error, error_kind);
         let failure_expectation_result = classify_failure_expectation(

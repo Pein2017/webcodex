@@ -680,7 +680,7 @@ impl ToolRuntime {
                 "operator_installed_guidance",
             ),
         };
-        let output = json!({
+        let mut output = json!({
             "project": project.resolved_id,
             "skill_id": skill_id,
             "name": name,
@@ -697,6 +697,16 @@ impl ToolRuntime {
             "has_more": read.has_more,
             "next_start_line": read.next_start_line,
         });
+        if let Some(next_start_line) = read.next_start_line {
+            output["suggested_call"] = skill_read_continuation(
+                &project.resolved_id,
+                skill_id,
+                &read.path,
+                next_start_line,
+                limit,
+                &definition_revision,
+            );
+        }
         if serialized_json_len(&output)
             .map(|bytes| bytes > MAX_SKILL_READ_RESULT_BYTES)
             .unwrap_or(true)
@@ -728,8 +738,13 @@ impl ToolRuntime {
         if let Some(runner) = runner {
             catalog.invalid_count = catalog.invalid_count.saturating_add(runner.invalid_count);
             catalog.discovery_truncated |= runner.discovery_truncated;
-            for reason_code in runner.diagnostics {
-                push_diagnostic(&mut catalog.diagnostics, &reason_code);
+            for diagnostic in runner.diagnostics {
+                push_diagnostic(
+                    &mut catalog.diagnostics,
+                    &diagnostic.reason_code,
+                    diagnostic.candidate_name.as_deref(),
+                    diagnostic.source_scope.as_deref(),
+                )
             }
             for skill in runner.skills {
                 if !seen_ids.insert(skill.skill_id().to_string()) {
@@ -1102,7 +1117,7 @@ impl ToolRuntime {
                         "skill_definition_changed",
                         &project.resolved_id,
                         Some(json!({"skill_id": skill_id})),
-                    )
+                    );
                 }
             };
             if current_definition.sha256 != definition_revision {
@@ -1116,7 +1131,7 @@ impl ToolRuntime {
                 );
             }
         }
-        let output = json!({
+        let mut output = json!({
             "project": project.resolved_id,
             "skill_id": skill_id,
             "name": name,
@@ -1133,6 +1148,16 @@ impl ToolRuntime {
             "has_more": read.has_more,
             "next_start_line": read.next_start_line,
         });
+        if let Some(next_start_line) = read.next_start_line {
+            output["suggested_call"] = skill_read_continuation(
+                &project.resolved_id,
+                &skill_id,
+                &resource_path,
+                next_start_line,
+                limit,
+                &definition_revision,
+            );
+        }
         if serialized_json_len(&output)
             .map(|bytes| bytes > MAX_SKILL_READ_RESULT_BYTES)
             .unwrap_or(true)
@@ -1182,7 +1207,7 @@ impl ToolRuntime {
                     "skill_store_capability_unavailable",
                     &project.resolved_id,
                     None,
-                )
+                );
             }
             Err(kind) => return skill_error_dynamic(&kind, &project.resolved_id, None, false),
         };
@@ -1543,9 +1568,11 @@ impl ToolRuntime {
             Ok(packages) => packages,
             Err(ProjectSkillSourceError::Rejected) => {
                 let skills = Vec::new();
-                let diagnostics = vec![json!({
-                    "reason_code": "project_skill_source_rejected"
-                })];
+                let diagnostics = vec![skill_diagnostic(
+                    "project_skill_source_rejected",
+                    None,
+                    Some("project"),
+                )];
                 return Ok(SkillCatalog {
                     catalog_revision: catalog_revision(&skills, 1, &diagnostics, false),
                     skills,
@@ -1563,7 +1590,12 @@ impl ToolRuntime {
         for package in packages.entries {
             if !valid_package_name(&package.name) || package.kind != "dir" {
                 invalid_count += 1;
-                push_diagnostic(&mut diagnostics, "invalid_skill_package");
+                push_diagnostic(
+                    &mut diagnostics,
+                    "invalid_skill_package",
+                    None,
+                    Some("project"),
+                );
                 continue;
             }
             let package_root = format!("{}/{}", SKILL_ROOT, package.name);
@@ -1590,6 +1622,8 @@ impl ToolRuntime {
                     push_diagnostic(
                         &mut diagnostics,
                         error.invalid_reason().unwrap_or("invalid_skill_definition"),
+                        Some(&package.name),
+                        Some("project"),
                     );
                     continue;
                 }
@@ -1598,7 +1632,12 @@ impl ToolRuntime {
                 Ok(metadata) => metadata,
                 Err(reason) => {
                     invalid_count += 1;
-                    push_diagnostic(&mut diagnostics, reason);
+                    push_diagnostic(
+                        &mut diagnostics,
+                        reason,
+                        Some(&package.name),
+                        Some("project"),
+                    );
                     continue;
                 }
             };
@@ -2274,9 +2313,14 @@ fn catalog_revision(
     }
     hasher.update((invalid_count as u64).to_be_bytes());
     for diagnostic in diagnostics {
-        if let Some(reason_code) = diagnostic.get("reason_code").and_then(Value::as_str) {
-            hasher.update((reason_code.len() as u64).to_be_bytes());
-            hasher.update(reason_code.as_bytes());
+        for value in [
+            diagnostic.get("reason_code").and_then(Value::as_str),
+            diagnostic.get("candidate_name").and_then(Value::as_str),
+            diagnostic.get("source_scope").and_then(Value::as_str),
+        ] {
+            let value = value.unwrap_or_default();
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
         }
     }
     hasher.update([u8::from(discovery_truncated)]);
@@ -2286,10 +2330,56 @@ fn catalog_revision(
     )
 }
 
-fn push_diagnostic(diagnostics: &mut Vec<Value>, reason_code: &str) {
-    if diagnostics.len() < MAX_SKILL_INVALID_DIAGNOSTICS {
-        diagnostics.push(json!({"reason_code": reason_code}));
+fn skill_diagnostic(
+    reason_code: &str,
+    candidate_name: Option<&str>,
+    source_scope: Option<&str>,
+) -> Value {
+    let mut diagnostic = json!({"reason_code": reason_code});
+    let target = diagnostic
+        .as_object_mut()
+        .expect("Skill diagnostics are object values");
+    if let Some(candidate_name) = candidate_name.filter(|name| valid_package_name(name)) {
+        target.insert("candidate_name".to_string(), json!(candidate_name));
     }
+    if let Some(source_scope) = source_scope.filter(|scope| matches!(*scope, "project" | "runner"))
+    {
+        target.insert("source_scope".to_string(), json!(source_scope));
+    }
+    diagnostic
+}
+
+fn push_diagnostic(
+    diagnostics: &mut Vec<Value>,
+    reason_code: &str,
+    candidate_name: Option<&str>,
+    source_scope: Option<&str>,
+) {
+    if diagnostics.len() < MAX_SKILL_INVALID_DIAGNOSTICS {
+        diagnostics.push(skill_diagnostic(reason_code, candidate_name, source_scope));
+    }
+}
+
+fn skill_read_continuation(
+    project: &str,
+    skill_id: &str,
+    path: &str,
+    start_line: usize,
+    limit: usize,
+    definition_revision: &str,
+) -> Value {
+    SuggestedToolCall::new(
+        "skill_read_file",
+        json!({
+            "project": project,
+            "skill_id": skill_id,
+            "path": path,
+            "start_line": start_line,
+            "limit": limit,
+            "expected_definition_revision": definition_revision,
+        }),
+    )
+    .to_value()
 }
 
 fn classify_skill_io_error(error: Option<&str>) -> SkillIoError {

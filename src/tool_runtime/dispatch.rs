@@ -1272,10 +1272,11 @@ impl ToolRuntime {
                 recorder_metadata.recording_session_id.as_deref(),
                 auth,
                 transport,
+                &recorder_metadata.ack_session_message_ids,
             )
             .await
             {
-                Ok(invocation) => invocation.to_tool_result(),
+                Ok(invocation) => invocation.to_tool_result(self),
                 Err(crate::tool_runtime::specialized::SpecializedGovernanceDenial::Scope {
                     required_scope,
                     description,
@@ -2041,7 +2042,9 @@ impl ToolRuntime {
                     Some(Ok(project)) => project,
                     Some(Err(error)) => return error.into_tool_result(),
                     None => {
-                        return ToolResult::err("skill_remove_revision requires a resolved Project")
+                        return ToolResult::err(
+                            "skill_remove_revision requires a resolved Project",
+                        );
                     }
                 };
                 self.skill_remove_revision(

@@ -447,6 +447,78 @@ fn persistent_shell_evidence_survives_restore_without_command_or_output() {
 }
 
 #[test]
+fn structured_failure_codes_survive_restore_without_promoting_error_prose() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = tmp.path().join("sessions.json");
+    let store = persistent_store(ledger.clone());
+    let session = store.start_session(None, None);
+    for (output, explicit, expected) in [
+        (
+            json!({"code": "lsp_server_unavailable"}),
+            None,
+            "lsp_server_unavailable",
+        ),
+        (
+            json!({"error_kind": "session_guard_denied"}),
+            None,
+            "session_guard_denied",
+        ),
+        (
+            json!({"code": "lsp_server_unavailable"}),
+            Some("insufficient_scope"),
+            "insufficient_scope",
+        ),
+        (
+            json!({"code": "PRIVATE_UNKNOWN_PAYLOAD"}),
+            None,
+            "runtime_error",
+        ),
+        (json!({}), None, "runtime_error"),
+    ] {
+        let start = store.record_tool_call_started(
+            Some(&session.session_id),
+            SessionTransport::Api,
+            "find_references",
+            &json!({}),
+            session_tool_contract("find_references"),
+        );
+        store.record_tool_call_finished(
+            start,
+            false,
+            &output,
+            Some("unavailable backend; arbitrary prose is not a reason code"),
+            explicit,
+        );
+        let summary = store.summary(&session.session_id, Some(20)).unwrap();
+        assert_eq!(
+            summary.events.last().unwrap().error_kind.as_deref(),
+            Some(expected)
+        );
+    }
+    store.flush_persistence();
+    let restored = SessionStore::with_persistence(ledger.clone(), 10, 20);
+    let summary = restored.summary(&session.session_id, Some(20)).unwrap();
+    let kinds: Vec<_> = summary
+        .events
+        .iter()
+        .filter_map(|event| event.error_kind.as_deref())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "lsp_server_unavailable",
+            "session_guard_denied",
+            "insufficient_scope",
+            "runtime_error",
+            "runtime_error"
+        ]
+    );
+    assert!(!std::fs::read_to_string(ledger)
+        .unwrap()
+        .contains("PRIVATE_UNKNOWN_PAYLOAD"));
+}
+
+#[test]
 fn validation_output_summary_survives_restore_sanitized() {
     let tmp = tempfile::tempdir().unwrap();
     let ledger = tmp.path().join("sessions.json");

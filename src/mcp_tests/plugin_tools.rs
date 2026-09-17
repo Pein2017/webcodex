@@ -85,6 +85,27 @@ fn plugin_auth_with_scopes(scopes: &[&str]) -> crate::auth::AuthContext {
     auth
 }
 
+async fn plugin_mcp_call(
+    runtime: &ToolRuntime,
+    id: u64,
+    arguments: Value,
+    auth: &crate::auth::AuthContext,
+) -> McpOutcome {
+    handle_mcp_request(
+        runtime,
+        rpc(
+            "tools/call",
+            Some(json!(id)),
+            mcp_2026_params(json!({
+                "name": crate::plugin_gateway::PLUGIN_TOOL_NAME,
+                "arguments": arguments
+            })),
+        ),
+        Some(auth),
+    )
+    .await
+}
+
 fn plugin_tool(name: &str) -> PluginTool {
     PluginTool {
         name: name.to_string(),
@@ -724,80 +745,240 @@ async fn specialized_recording_session_authority_fails_closed_at_mcp_boundary() 
 }
 
 #[tokio::test]
-async fn plugin_tool_does_not_accept_stateless_continuity_wrappers() {
+async fn plugin_tool_applies_stateless_message_ack_without_forwarding_wrapper_metadata() {
     let runtime = test_runtime_with_surface(ModelSurface::FullOperatorRuntime);
     let auth = plugin_auth_with_scopes(&[crate::auth::SCOPE_PLUGIN_INSPECT]);
-    register_plugin_runner(
+    let session =
+        start_authorized_test_session(&runtime, &auth, crate::tool_runtime::SessionMode::Normal);
+    let guidance = runtime
+        .sessions
+        .post_message_with_ack(
+            crate::tool_runtime::sessions::PostSessionMessageInput {
+                session_id: session.session_id.clone(),
+                kind: crate::tool_runtime::sessions::SessionMessageKind::Guidance,
+                message: "Use the checked Plugin binding.".to_string(),
+                tags: Vec::new(),
+                reply_to: None,
+                priority: crate::tool_runtime::sessions::SessionMessagePriority::High,
+            },
+            true,
+        )
+        .unwrap();
+
+    let acknowledged = plugin_mcp_call(
         &runtime,
-        "runner-a",
-        "runner-instance-a",
-        "repo-tools",
-        "provider-instance-a",
-        vec![],
+        694,
+        json!({
+            "action":"list",
+            "recording_session_id": session.session_id,
+            crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_MESSAGE_IDS_FIELD: [guidance.message_id]
+        }),
+        &auth,
     )
     .await;
-
-    for (id, arguments) in [
-        (
-            694,
-            json!({
-                "action":"list",
-                crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_MESSAGE_IDS_FIELD: ["wc_msg_cached"]
-            }),
-        ),
-        (
-            695,
-            json!({
-                "action":"list",
-                crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_CONTEXT_REVISION_FIELD: 7
-            }),
-        ),
-        (
-            696,
-            json!({
-                "action":"list",
-                crate::tool_runtime::context_projection::TOOL_CALL_CONTEXT_REQUEST_FIELD: ["webcodex.workflow"]
-            }),
-        ),
-        (
-            697,
-            json!({
-                "action":"list",
-                crate::tool_runtime::sessions::TOOL_CALL_SESSION_MESSAGE_RESOLUTION_FIELD: {
-                    "message_id": "wc_msg_cached",
-                    "resolution": "handled"
-                }
-            }),
-        ),
-    ] {
-        let outcome = handle_mcp_request(
-            &runtime,
-            rpc(
-                "tools/call",
-                Some(json!(id)),
-                mcp_2026_params(json!({
-                    "name": crate::plugin_gateway::PLUGIN_TOOL_NAME,
-                    "arguments": arguments
-                })),
-            ),
-            Some(&auth),
+    let McpOutcome::Ok(acknowledged) = acknowledged else {
+        panic!("valid Plugin message ACK must execute");
+    };
+    assert_eq!(
+        acknowledged["result"]["structuredContent"]["session_attention"]["ack"]["accepted_count"],
+        1
+    );
+    assert!(acknowledged["result"]["structuredContent"]
+        .get("session_context_revision")
+        .is_none());
+    assert!(acknowledged["result"]["structuredContent"]
+        .get("session_recovery")
+        .is_none());
+    let stored = runtime
+        .sessions
+        .list_messages(
+            &session.session_id,
+            crate::tool_runtime::sessions::ListSessionMessagesFilter {
+                message_id: Some(guidance.message_id.clone()),
+                ..Default::default()
+            },
         )
-        .await;
-        let McpOutcome::BadRequest(value) = outcome else {
-            panic!("specialized plugin_tool must reject generic continuity wrappers");
-        };
-        let encoded = serde_json::to_string(&value).unwrap();
-        assert!(encoded.contains("unknown field"), "{encoded}");
-        assert!(runtime
-            .runner_registry
-            .poll(RunnerPollRequest {
-                client_id: "runner-a".to_string(),
-                runner_instance_id: "runner-instance-a".to_string(),
-            })
-            .await
-            .unwrap()
-            .is_none());
-    }
+        .unwrap();
+    let first_ack_observed_at = stored[0]
+        .first_ack_observed_at
+        .expect("Plugin ACK must record the existing first-observation timestamp");
+    assert_eq!(
+        stored[0].status,
+        crate::tool_runtime::sessions::SessionMessageStatus::Open
+    );
+    let after_first_ack = runtime
+        .sessions
+        .observe_messages(&session.session_id, None, None, None)
+        .await
+        .unwrap();
+
+    let repeated = plugin_mcp_call(
+        &runtime,
+        695,
+        json!({
+            "action":"list",
+            "recording_session_id": session.session_id,
+            crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_MESSAGE_IDS_FIELD: [guidance.message_id]
+        }),
+        &auth,
+    )
+    .await;
+    assert!(matches!(repeated, McpOutcome::Ok(_)));
+    let after_repeat = runtime
+        .sessions
+        .observe_messages(
+            &session.session_id,
+            Some(&after_first_ack.observation_token),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !after_repeat.changed,
+        "repeated ACK must not churn revisions"
+    );
+    let stored_after_repeat = runtime
+        .sessions
+        .list_messages(
+            &session.session_id,
+            crate::tool_runtime::sessions::ListSessionMessagesFilter {
+                message_id: Some(guidance.message_id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        stored_after_repeat[0].first_ack_observed_at,
+        Some(first_ack_observed_at)
+    );
+
+    let omitted = plugin_mcp_call(
+        &runtime,
+        696,
+        json!({"action":"list", "recording_session_id": session.session_id}),
+        &auth,
+    )
+    .await;
+    let McpOutcome::Ok(omitted) = omitted else {
+        panic!("omitted ACK must not block the Plugin business call");
+    };
+    assert_eq!(
+        omitted["result"]["structuredContent"]["session_attention"]["messages"][0]["message_id"],
+        guidance.message_id
+    );
+
+    let malformed = plugin_mcp_call(
+        &runtime,
+        697,
+        json!({
+            "action":"list",
+            "recording_session_id": session.session_id,
+            crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_MESSAGE_IDS_FIELD: ["not-a-message-id"]
+        }),
+        &auth,
+    )
+    .await;
+    assert!(matches!(malformed, McpOutcome::BadRequest(_)));
+
+    let foreign = plugin_auth_for("bob", true);
+    let unauthorized = plugin_mcp_call(
+        &runtime,
+        698,
+        json!({
+            "action":"list",
+            "recording_session_id": session.session_id,
+            crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_MESSAGE_IDS_FIELD: [guidance.message_id]
+        }),
+        &foreign,
+    )
+    .await;
+    let McpOutcome::Ok(unauthorized) = unauthorized else {
+        panic!("wrong Session authority must be a structured Plugin denial");
+    };
+    assert_eq!(
+        unauthorized["result"]["structuredContent"]["output"]["failure_kind"],
+        "session_authority_denied"
+    );
+    let stored_after_denials = runtime
+        .sessions
+        .list_messages(
+            &session.session_id,
+            crate::tool_runtime::sessions::ListSessionMessagesFilter {
+                message_id: Some(guidance.message_id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        stored_after_denials[0].first_ack_observed_at,
+        Some(first_ack_observed_at),
+        "malformed and unauthorized wrappers must not affect the target Session"
+    );
+
+    let ignored_context_ack = plugin_mcp_call(
+        &runtime,
+        699,
+        json!({
+            "action":"list",
+            "recording_session_id": session.session_id,
+            crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_CONTEXT_REVISION_FIELD: 7
+        }),
+        &auth,
+    )
+    .await;
+    let McpOutcome::Ok(ignored_context_ack) = ignored_context_ack else {
+        panic!("known inapplicable Context ACK must not break Plugin invocation");
+    };
+    assert_eq!(
+        ignored_context_ack["result"]["structuredContent"]["ignored_invocation_metadata"],
+        json!([crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_CONTEXT_REVISION_FIELD])
+    );
+    assert!(ignored_context_ack["result"]["structuredContent"]
+        .get("session_context_revision")
+        .is_none());
+
+    let other =
+        start_authorized_test_session(&runtime, &auth, crate::tool_runtime::SessionMode::Normal);
+    let other_guidance = runtime
+        .sessions
+        .post_message_with_ack(
+            crate::tool_runtime::sessions::PostSessionMessageInput {
+                session_id: other.session_id.clone(),
+                kind: crate::tool_runtime::sessions::SessionMessageKind::Guidance,
+                message: "Other Session guidance".into(),
+                tags: vec![],
+                reply_to: None,
+                priority: crate::tool_runtime::sessions::SessionMessagePriority::High,
+            },
+            true,
+        )
+        .unwrap();
+    let cross_session = plugin_mcp_call(
+        &runtime,
+        700,
+        json!({
+            "action": "list", "recording_session_id": session.session_id,
+            "ack_session_message_ids": [other_guidance.message_id]
+        }),
+        &auth,
+    )
+    .await;
+    let McpOutcome::Ok(cross_session) = cross_session else {
+        panic!("ACK is nonblocking")
+    };
+    assert_eq!(
+        cross_session["result"]["structuredContent"]["session_attention"]["ack"]["accepted_count"],
+        0
+    );
+    let untouched = runtime
+        .sessions
+        .list_messages(
+            &other.session_id,
+            crate::tool_runtime::sessions::ListSessionMessagesFilter::default(),
+        )
+        .unwrap();
+    assert!(untouched[0].first_ack_observed_at.is_none());
 }
 
 #[tokio::test]
@@ -2146,8 +2327,9 @@ async fn same_tool_name_is_legal_across_runners_and_providers_and_bindings_dispa
 
 #[tokio::test]
 async fn plugin_tool_reload_describe_call_binds_exact_dynamic_provider_and_forgets_replacement() {
-    let runtime = Arc::new(test_runtime());
-    let auth = plugin_auth(true);
+    let runtime = Arc::new(test_runtime_with_surface(ModelSurface::FullOperatorRuntime));
+    let mut auth = plugin_auth(true);
+    auth.user_id = Some("plugin-test-user-alice".to_string());
     register_plugin_runner(
         &runtime,
         "runner-a",
@@ -2280,13 +2462,28 @@ async fn plugin_tool_reload_describe_call_binds_exact_dynamic_provider_and_forge
         .to_string();
     assert!(binding.starts_with("wc_pbind_"));
 
-    let call_task = spawn_binding_call(
-        &runtime,
-        &auth,
-        binding.clone(),
-        json!({"query":"PluginManager"}),
-        722,
-    );
+    let session =
+        start_authorized_test_session(&runtime, &auth, crate::tool_runtime::SessionMode::Normal);
+    let call_task = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let auth = auth.clone();
+        let binding = binding.clone();
+        async move {
+            plugin_mcp_call(
+                &runtime,
+                722,
+                json!({
+                    "action": "call", "binding": binding,
+                    "arguments": {"query": "PluginManager"},
+                    "recording_session_id": session.session_id,
+                    "ack_session_message_ids": [],
+                    "ack_session_context_revision": 0
+                }),
+                &auth,
+            )
+            .await
+        }
+    });
     let call_request =
         wait_for_plugin_request(&runtime.runner_registry, "runner-a", "runner-instance-a").await;
     let Some(PluginGatewayRequest::ToolsCall {
@@ -2328,6 +2525,14 @@ async fn plugin_tool_reload_describe_call_binds_exact_dynamic_provider_and_forge
         call_result["result"]["content"][0]["text"],
         "found PluginManager"
     );
+    assert_eq!(
+        call_result["result"]["structuredContent"],
+        json!({"matches":["PluginManager"]})
+    );
+    assert!(call_result["result"]["content"][1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("ignored_invocation_metadata"));
 
     let replacement_task = spawn_binding_call(
         &runtime,
