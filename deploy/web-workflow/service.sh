@@ -28,6 +28,12 @@ case "$service" in
     command=("$root/current/bin/webcodex-server")
     ;;
   runner)
+    # This deployment's execution environment; do not change Server/Tunnel PATH.
+    for executable in /root/miniconda3/envs/ms/bin/python /root/miniconda3/envs/ms/bin/python3; do
+      test -x "$executable" || { echo "Missing ms interpreter: $executable; restore the Conda environment before starting Runner." >&2; exit 1; }
+    done
+    # Keep persistent operator tools (notably Git) ahead of Conda tools.
+    export PATH="$root/runtime/bin:$root/runtime/git/bin:/root/miniconda3/envs/ms/bin:/usr/bin:/bin"
     command=("$root/current/bin/webcodex-runner" --config "$root/config/runner.toml")
     ;;
   tunnel)

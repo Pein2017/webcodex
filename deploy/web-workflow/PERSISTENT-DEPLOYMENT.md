@@ -23,8 +23,13 @@ Bash, coreutils, tmux, Python >=3.10, system CA certificates and ordinary local
 networking, and GitHub CLI (`gh`) for the existing Git credential helper.
 Selected Git configuration and GitHub credentials are copied privately into
 `config/`; service environment overrides keep them independent of `/root`.
-Training environments/GPU drivers are independent prerequisites, not recreated by WebCodex startup. Runtime services
-do not put `/root` Conda/NVM on PATH. Git must support `check-attr --source=HEAD`;
+Training environments/GPU drivers are independent prerequisites, not recreated by WebCodex startup.
+The CoordExp Runner requires `/root/miniconda3/envs/ms/bin/python` and `python3`;
+its children default to that environment without activation. Persistent operator
+tools remain ahead of Conda on PATH; Server/Tunnel PATH is unchanged. The `ms`
+environment is an explicit non-persistent container prerequisite: restore it after
+container recreation before starting Runner. Missing interpreters stop Runner
+startup rather than silently choosing system Python. Git must support `check-attr --source=HEAD`;
 system Git 2.34 is insufficient. The Plugin JUnit parser needs only Python stdlib.
 
 Restore the user-owned SSH/proxy forward at `127.0.0.1:9090` for external access.
@@ -48,6 +53,13 @@ then check the Tunnel ready event as well as authenticated Server/Runner status.
 Credentials remain the existing private files; do not paste them into commands.
 
 ## Controlled update and rollback
+
+New deployment bundles include executable `service.sh` at their release root.
+`bin/control.sh` uses that versioned launcher when present; older releases use
+the retained `bin/service.sh`. Thus switching back also restores the former
+execution environment. A configuration-only release may reuse unchanged native
+binaries: record the deployment source commit separately from their actual build
+commit, and verify hashes instead of claiming the binaries were rebuilt.
 
 First inspect live Jobs and in-flight work through the authenticated runtime.
 Do not stop active research or execution just to switch a release. Save a

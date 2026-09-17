@@ -2,6 +2,8 @@
 
 ## 常用路径
 
+- 当前 CoordExp Runner 默认 Python 环境为 Conda `ms`，解释器 `/root/miniconda3/envs/ms/bin/python`；默认 `python` / `python3` 使用该环境。测试推荐 `run_process` 的 `executable="python"`、`args=["-m","pytest", ...]`，不需要 conda activate。此为本部署配置，不是每个项目依赖齐全的保证；显式选择其他环境时先验证。容器重建后需恢复该 Conda 环境，缺失时 Runner 启动会明确报错，不静默切换解释器。
+
 - 多步骤工作用 work_on_project 进入既有 checkout，保留同一个 session_id；需要记入该 Session 的调用显式传 recording_session_id。默认 include_project_instructions=false、include_workflow_guidance=false；不要创建替代 clone/worktree。一次性读取可以直接使用只读工具。
 - 使用当前连接宣告的工具和参数。启动结果中的能力状态是观察，不是权限；不要把未探测、超时或未配置称为永久不可用，也不要因工具数量不同就断言 schema 不匹配。
 - 优先沿用启动目录的 suggested_call 读取所选 Skill 或 describe 插件；目录截断不等于其余能力不存在，按需用 skill_list / plugin_tool list 补充发现。Skill 读取保留 expected_definition_revision，has_more 时读完所需正文再使用。若网页 wrapper 与 tool_manifest 不一致，区分调用前拒绝与服务器返回；不转换 opaque ID、猜旧别名或调用未宣告的 gateway。仅确认声明不一致时刷新连接；新建对话不等于刷新声明。

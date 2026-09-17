@@ -26,7 +26,10 @@ case "$action" in
       echo "WebCodex session already exists; inspect status, do not duplicate it."
       exit 0
     fi
-    printf -v launcher '%q' "$root/bin/service.sh"
+    # New releases own their environment; old releases retain the legacy launcher.
+    service_script="$root/current/service.sh"
+    if [[ ! -x "$service_script" ]]; then service_script="$root/bin/service.sh"; fi
+    printf -v launcher '%q' "$service_script"
     tmux -S "$socket" new-session -d -s "$session" -n server -c /data/CoordExp "$launcher server"
     tmux -S "$socket" new-window -d -t "$session" -n runner -c /data/CoordExp "$launcher runner"
     tmux -S "$socket" new-window -d -t "$session" -n tunnel -c /data/CoordExp "$launcher tunnel"
