@@ -599,6 +599,21 @@ def main() -> int:
             )
             ok("Session startup observed one pre-existing dirty Git path")
 
+            startup_skills = bootstrap.get("extensions", {}).get("skills", {}).get("entries", [])
+            startup_skill = next((s for s in startup_skills if s.get("name") == "workflow-smoke"), None)
+            require(startup_skill is not None, "startup omitted fixture Skill")
+            skill_suggestion = startup_skill.get("suggested_call", {})
+            require(
+                skill_suggestion.get("tool") == "skill_read_file"
+                and skill_suggestion.get("arguments", {}).get("project") == RUNTIME_PROJECT
+                and bool(skill_suggestion.get("arguments", {}).get("expected_definition_revision")),
+                "startup Skill follow-up omitted exact project/revision",
+            )
+            startup_skill_text = call(skill_suggestion["tool"], skill_suggestion["arguments"])
+            require("SKILL_READ_SENTINEL" in startup_skill_text.get("text", ""),
+                    "startup Skill follow-up could not read the selected definition")
+            ok("startup Skill suggested_call executes with its exact definition revision")
+
             catalog = call("skill_list", {"project": RUNTIME_PROJECT, "query": "workflow-smoke"})
             skills = catalog.get("skills", [])
             require(len(skills) == 1, f"Skill fixture was not discovered: {bounded(catalog)}")
@@ -614,13 +629,37 @@ def main() -> int:
             )
             ok("actual Skill discovery returns an opaque ID usable by direct skill_read_file")
 
-            handoff = call("session_handoff_summary", {"session_id": recording_session_id})
+            unacknowledged = call("run_process", {
+                "project": RUNTIME_PROJECT,
+                "session_id": recording_session_id,
+                "executable": "python3",
+                "args": ["-c", "print('recovery-hint-source')"],
+                "purpose": "diagnostic", "sync_wait_secs": 20, "timeout_secs": 20,
+            })
+            recovery = unacknowledged.get("session_continuity", {}).get("suggested_call", {})
+            recovery_args = recovery.get("arguments", {})
+            require(
+                recovery.get("tool") == "session_handoff_summary"
+                and recovery_args.get("session_id") == recording_session_id
+                and all(recovery_args.get(k) is True for k in
+                        ("include_workspace", "include_checkpoints", "include_validation"))
+                and recovery_args.get("summary_only") is False
+                and recovery_args.get("limit", 0) >= 20
+                and "ack_session_context_revision" not in recovery_args
+                and "recording_session_id" not in recovery_args,
+                "context recovery hint must explicitly request the complete view without inferred ACK/recorder",
+            )
+            partial = call(recovery["tool"], {**recovery_args, "include_validation": False})
+            require("session_context_revision" not in partial,
+                    "partial handoff falsely certified a recovered baseline")
+            handoff = call(recovery["tool"], recovery_args)
             retained_revision = handoff.get("session_context_revision")
             require(
                 retained_revision is not None
                 and handoff.get("session_continuity", {}).get("status") == "recovered",
                 f"complete explicit handoff did not recover context: {bounded(handoff)}",
             )
+            ok("emitted recovery call establishes a baseline while partial handoff cannot")
             for _ in range(2):
                 checkpoint = call("run_process", {
                     "project": RUNTIME_PROJECT,

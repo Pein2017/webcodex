@@ -813,6 +813,18 @@ impl ToolRuntime {
                 source_scope: skill.descriptor.source_scope.to_string(),
                 trust: skill.descriptor.trust.to_string(),
                 name_conflict: skill.descriptor.name_conflict,
+                suggested_call: SuggestedToolCall::new(
+                    "skill_read_file",
+                    json!({
+                        "project": project.resolved_id,
+                        "skill_id": skill.descriptor.skill_id,
+                        "path": SKILL_DEFINITION_FILE,
+                        "start_line": 1,
+                        "limit": DEFAULT_SKILL_READ_LINES,
+                        "expected_definition_revision": skill.descriptor.definition_revision,
+                    }),
+                )
+                .to_value(),
             })
             .collect();
         StartupSkillsCatalog::available(

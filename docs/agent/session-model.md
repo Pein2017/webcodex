@@ -185,13 +185,20 @@ Missing, malformed or future ACKs no longer replay history or attach automatic `
     "status": "unacknowledged",
     "suggested_call": {
       "tool": "session_handoff_summary",
-      "arguments": {"session_id": "wc_sess_example"}
+      "arguments": {
+        "session_id": "wc_sess_example",
+        "include_workspace": true,
+        "include_checkpoints": true,
+        "include_validation": true,
+        "summary_only": false,
+        "limit": 20
+      }
     }
   }
 }
 ```
 
-No newest `session_context_revision` accompanies that hint: the current command/edit result alone does not prove knowledge of earlier consequences. `session_continuity.status` reports the observed continuity state only; it is not authority or retry permission. `suggested_call` presence is the sole machine representation that explicit handoff recovery is actionable, and the call itself is the parser-ready minimum recovery invocation; no separate Boolean, tool name, or recovery Session identity duplicates that decision. A caller therefore does not need the complete `session_handoff_summary` schema already loaded; an Adaptive host may invoke the direct callable when available or use the admitted `call_runtime_tool` fallback with the same arguments. Invalid input uses `status=invalid`. Known-behind retention loss or event/byte truncation preserves `status=behind`, `events_after_ack`, bounded retained events and the loss/truncation flags, adds the same recovery guidance, and withholds the newest revision. A partial delta never certifies a complete prefix.
+No newest `session_context_revision` accompanies that hint: the current command/edit result alone does not prove knowledge of earlier consequences. `session_continuity.status` reports the observed continuity state only; it is not authority or retry permission. `suggested_call` presence is the sole machine representation that explicit handoff recovery is actionable. Its parser-ready arguments explicitly preserve the complete view needed for recovery; no separate Boolean, tool name, or recovery Session identity duplicates that decision. It does not infer a recorder or carry an ACK. A caller therefore does not need the complete `session_handoff_summary` schema already loaded; an Adaptive host may invoke the direct callable when available or use the admitted `call_runtime_tool` fallback with the same arguments. Invalid input uses `status=invalid`. Known-behind retention loss or event/byte truncation preserves `status=behind`, `events_after_ack`, bounded retained events and the loss/truncation flags, adds the same recovery guidance, and withholds the newest revision. A partial delta never certifies a complete prefix.
 
 Explicitly call `session_handoff_summary(session_id=...)` with its default complete view (`summary_only=false`, all `include_*` components enabled). Its bounded current Session state establishes a baseline with `session_continuity.status=recovered` and `session_context_revision`; there is no nested second handoff. `recovered` denotes current-state rebaselining, not exact ACK or complete historical replay. The watermark is captured before reading state and checked again after observation and recording. A concurrent checkpoint completion withholds the baseline and requests another handoff. A partial/summary-only view, a display limit below the default 20, or a failed handoff cannot establish a new baseline. A handoff of business Session C cannot certify recorder Session W: omit the outer recorder or use the same Session when recovering. Project/bootstrap identity never selects a recovery Session.
 
@@ -474,6 +481,14 @@ Plugins are limited to ready committed providers whose configured `cwd` matches
 the authoritative Project root. Skill bodies, Plugin schemas, bindings, native
 paths, commands, environments, and provider identities are not projected; using
 a selected Plugin still requires `plugin_tool describe` before `call`.
+
+Each retained startup extension entry includes one bounded `suggested_call`.
+Skills use `skill_read_file` with the canonical project, selected opaque id and
+observed definition revision; Plugins use `plugin_tool describe` with the exact
+authorized Runner/provider/tool. These calls remain inside the existing catalog
+byte budgets, grant no authority, select no Workflow Session or recorder, and
+contain no Plugin schema or binding. Execution rechecks ordinary authorization
+and revision/selection validity; the selection metadata does not freeze access.
 
 Startup selection is strict and ordered:
 

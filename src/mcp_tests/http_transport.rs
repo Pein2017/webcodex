@@ -1542,7 +1542,11 @@ async fn http_mcp_2026_session_context_revision_recovers_missing_stale_and_inval
         .is_none());
     assert_eq!(
         future["session_continuity"]["suggested_call"],
-        json!({"tool": "session_handoff_summary", "arguments": {"session_id": session_id}})
+        json!({"tool": "session_handoff_summary", "arguments": {
+            "session_id": session_id, "include_workspace": true,
+            "include_checkpoints": true, "include_validation": true,
+            "summary_only": false, "limit": 20,
+        }})
     );
 
     let missing_args =
@@ -1565,7 +1569,11 @@ async fn http_mcp_2026_session_context_revision_recovers_missing_stale_and_inval
         missing["session_continuity"]["suggested_call"],
         json!({
             "tool": "session_handoff_summary",
-            "arguments": {"session_id": session_id},
+            "arguments": {
+                "session_id": session_id, "include_workspace": true,
+                "include_checkpoints": true, "include_validation": true,
+                "summary_only": false, "limit": 20,
+            },
         })
     );
     assert_eq!(runtime.sessions.context_revision(&session_id), Some(4));
@@ -1576,7 +1584,7 @@ async fn http_mcp_2026_session_context_revision_recovers_missing_stale_and_inval
         "secret",
         2331,
         "session_handoff_summary",
-        json!({"session_id": session_id}),
+        missing["session_continuity"]["suggested_call"]["arguments"].clone(),
         None,
     )
     .await;
@@ -1696,7 +1704,11 @@ async fn http_mcp_2026_session_context_revision_recovers_missing_stale_and_inval
         .is_none());
     assert_eq!(
         malformed["session_continuity"]["suggested_call"],
-        json!({"tool": "session_handoff_summary", "arguments": {"session_id": session_id}})
+        json!({"tool": "session_handoff_summary", "arguments": {
+            "session_id": session_id, "include_workspace": true,
+            "include_checkpoints": true, "include_validation": true,
+            "summary_only": false, "limit": 20,
+        }})
     );
     assert_eq!(runtime.sessions.context_revision(&session_id), Some(6));
 

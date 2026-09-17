@@ -115,6 +115,7 @@ pub(crate) struct StartupSkillEntry {
     pub(crate) source_scope: String,
     pub(crate) trust: String,
     pub(crate) name_conflict: bool,
+    pub(crate) suggested_call: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -128,6 +129,7 @@ pub(crate) struct StartupPluginEntry {
     pub(crate) description: Option<String>,
     #[serde(skip_serializing_if = "webcodex_core::plugin::PluginSelectionAnnotations::is_empty")]
     pub(crate) annotations: webcodex_core::plugin::PluginSelectionAnnotations,
+    pub(crate) suggested_call: Value,
 }
 
 /// Shared startup metadata projection, not a resource store or authority.
@@ -2132,6 +2134,20 @@ mod tests {
                         source_scope: "project".to_string(),
                         trust: "project_content".to_string(),
                         name_conflict: index < 2,
+                        suggested_call: json!({
+                            "tool": "skill_read_file",
+                            "arguments": {
+                                "project": "agent:size:demo",
+                                "skill_id": format!(
+                                    "wc_skill_{}",
+                                    webcodex_core::compact::encode(&(index as u128).to_be_bytes()[0..])
+                                ),
+                                "path": "SKILL.md",
+                                "start_line": 1,
+                                "limit": 200,
+                                "expected_definition_revision": format!("{index:064x}"),
+                            },
+                        }),
                     })
                     .collect(),
             ),
@@ -2151,6 +2167,15 @@ mod tests {
                             idempotent_hint: Some(true),
                             open_world_hint: Some(false),
                         },
+                        suggested_call: json!({
+                            "tool": "plugin_tool",
+                            "arguments": {
+                                "action": "describe",
+                                "runner": "size",
+                                "plugin": format!("plugin-{index:02}"),
+                                "tool": format!("tool_{index:02}"),
+                            },
+                        }),
                     })
                     .collect(),
             ),

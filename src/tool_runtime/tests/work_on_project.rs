@@ -1251,6 +1251,77 @@ async fn work_on_project_extension_catalog_is_defaulted_bounded_and_skips_all_ex
     assert_eq!(entries[0]["trust"], "project_content");
     assert_eq!(entries[1]["name"], "duplicate-skill");
     assert_eq!(entries[1]["name_conflict"], true);
+    let suggested_skill = &entries[0]["suggested_call"];
+    let expected_definition_revision = format!(
+        "{:x}",
+        Sha256::digest(
+            fs::read(root.path().join(".agents/skills/00-alpha/SKILL.md"))
+                .expect("startup Skill fixture definition"),
+        )
+    );
+    assert_eq!(suggested_skill["tool"], "skill_read_file");
+    assert_eq!(
+        suggested_skill["arguments"],
+        json!({
+            "project": project,
+            "skill_id": entries[0]["skill_id"],
+            "path": "SKILL.md",
+            "start_line": 1,
+            "limit": 200,
+            "expected_definition_revision": expected_definition_revision,
+        })
+    );
+    assert!(entries[0].get("definition_revision").is_none());
+    let suggested_skill_call = ToolCall::from_tool_name(
+        suggested_skill["tool"].as_str().unwrap(),
+        suggested_skill["arguments"].clone(),
+    )
+    .expect("startup Skill suggested_call must be executable by the tool parser");
+    assert!(suggested_skill_call.session_id().is_none());
+
+    let read_before_change = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        async move {
+            runtime
+                .dispatch_with_auth(suggested_skill_call, Some(&auth))
+                .await
+        }
+    });
+    let (read_before_change, _) =
+        record_startup_requests(&runtime, "wop-ext-skills", read_before_change).await;
+    assert!(
+        read_before_change.success,
+        "startup Skill suggestion must execute before its definition changes: {:?}",
+        read_before_change.error
+    );
+    assert_eq!(read_before_change.output["path"], "SKILL.md");
+
+    write_project_skill(
+        root.path(),
+        "00-alpha",
+        "duplicate-skill",
+        "Alpha selection metadata changed",
+        "ALPHA_CHANGED_BODY_MUST_NOT_LEAK",
+    );
+    let stale_skill_call = ToolCall::from_tool_name(
+        suggested_skill["tool"].as_str().unwrap(),
+        suggested_skill["arguments"].clone(),
+    )
+    .expect("stale startup Skill suggested_call must remain parser-ready");
+    let stale_read = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        async move {
+            runtime
+                .dispatch_with_auth(stale_skill_call, Some(&auth))
+                .await
+        }
+    });
+    let (stale_read, _) = record_startup_requests(&runtime, "wop-ext-skills", stale_read).await;
+    assert!(!stale_read.success);
+    assert_eq!(stale_read.output["error_kind"], "skill_definition_changed");
+    assert!(stale_read.output.get("content").is_none());
 
     let plugins = &with_extensions.output["extensions"]["plugins"];
     assert_eq!(plugins["status"], "unavailable");
@@ -1260,7 +1331,7 @@ async fn work_on_project_extension_catalog_is_defaulted_bounded_and_skips_all_ex
         "ALPHA_PRIVATE_BODY_MUST_NOT_LEAK",
         "BETA_PRIVATE_BODY_MUST_NOT_LEAK",
         "BULK_PRIVATE_BODY_MUST_NOT_LEAK",
-        "SKILL.md",
+        "ALPHA_CHANGED_BODY_MUST_NOT_LEAK",
     ] {
         assert!(
             !serialized.contains(secret),
@@ -1336,7 +1407,26 @@ async fn work_on_project_extension_catalog_includes_runner_local_configured_skil
     assert_eq!(entry["source_scope"], "runner");
     assert_eq!(entry["trust"], "operator_configured_guidance");
     assert_eq!(entry["name_conflict"], false);
-    assert!(!result.output.to_string().contains(configured_revision));
+    assert_eq!(
+        entry["suggested_call"],
+        json!({
+            "tool": "skill_read_file",
+            "arguments": {
+                "project": project,
+                "skill_id": configured_id,
+                "path": "SKILL.md",
+                "start_line": 1,
+                "limit": 200,
+                "expected_definition_revision": configured_revision,
+            },
+        })
+    );
+    let suggested_call = ToolCall::from_tool_name(
+        entry["suggested_call"]["tool"].as_str().unwrap(),
+        entry["suggested_call"]["arguments"].clone(),
+    )
+    .expect("configured Skill startup suggested_call must parse");
+    assert!(suggested_call.session_id().is_none());
 }
 
 #[tokio::test]
@@ -1387,6 +1477,24 @@ async fn work_on_project_plugin_extension_uses_project_catalog_without_binding_o
     assert_eq!(entry["tool"], "repo_context");
     assert_eq!(entry["annotations"]["readOnlyHint"], true);
     assert_eq!(entry["annotations"]["destructiveHint"], false);
+    assert_eq!(
+        entry["suggested_call"],
+        json!({
+            "tool": "plugin_tool",
+            "arguments": {
+                "action": "describe",
+                "runner": "wop-ext-plugin",
+                "plugin": "repo-context",
+                "tool": "repo_context",
+            },
+        })
+    );
+    let suggested_call = ToolCall::from_tool_name(
+        entry["suggested_call"]["tool"].as_str().unwrap(),
+        entry["suggested_call"]["arguments"].clone(),
+    )
+    .expect("Plugin startup suggested_call must parse through the exact describe contract");
+    assert!(suggested_call.session_id().is_none());
     let serialized = result.output["extensions"].to_string();
     for forbidden in [
         root.path().to_string_lossy().as_ref(),

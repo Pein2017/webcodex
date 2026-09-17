@@ -44,7 +44,7 @@ use super::validation_events::skipped_validation_summary;
 use super::window_activity::{
     ToolCallCorrelation, WorkflowSessionCorrelation, WorkflowSessionCorrelationRelation,
 };
-use super::{ToolCall, ToolRuntime};
+use super::{SuggestedToolCall, ToolCall, ToolRuntime};
 use crate::auth::AuthContext;
 use crate::runner_protocol::{
     ShellFileOpRequest, RUNNER_CAPABILITY_FILE_READ, RUNNER_CAPABILITY_GIT, RUNNER_CAPABILITY_SHELL,
@@ -1268,10 +1268,21 @@ impl ToolRuntime {
             }
             match self.project_plugin_catalog(project, auth).await {
                 Ok(catalog) => {
+                    let runner = project.config.client_id.clone();
                     let entries = catalog
                         .entries
                         .into_iter()
                         .map(|entry| StartupPluginEntry {
+                            suggested_call: SuggestedToolCall::new(
+                                "plugin_tool",
+                                json!({
+                                    "action": "describe",
+                                    "runner": runner,
+                                    "plugin": entry.plugin,
+                                    "tool": entry.tool,
+                                }),
+                            )
+                            .to_value(),
                             plugin: entry.plugin,
                             name: entry.name,
                             tool: entry.tool,

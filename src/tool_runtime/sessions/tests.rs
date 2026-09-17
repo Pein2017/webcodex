@@ -3585,7 +3585,14 @@ fn session_context_unknown_ack_is_compact_and_never_certifies_latest() {
                 "status": status,
                 "suggested_call": {
                     "tool": "session_handoff_summary",
-                    "arguments": {"session_id": session.session_id},
+                    "arguments": {
+                        "session_id": session.session_id,
+                        "include_workspace": true,
+                        "include_checkpoints": true,
+                        "include_validation": true,
+                        "summary_only": false,
+                        "limit": 20,
+                    },
                 },
             })
         );

@@ -321,6 +321,21 @@ fn context_recovery_suggested_call_remains_parser_ready_and_non_authoritative() 
     assert_eq!(suggested["tool"], "session_handoff_summary");
     assert_eq!(suggested.as_object().unwrap().len(), 2);
     assert!(suggested.get("authority").is_none());
+    assert_eq!(
+        suggested["arguments"],
+        json!({
+            "session_id": "wc_sess_test",
+            "include_workspace": true,
+            "include_checkpoints": true,
+            "include_validation": true,
+            "summary_only": false,
+            "limit": super::handoff::DEFAULT_HANDOFF_LIMIT,
+        })
+    );
+    assert!(suggested["arguments"].get("recording_session_id").is_none());
+    assert!(suggested["arguments"]
+        .get("ack_session_context_revision")
+        .is_none());
     let call = crate::tool_runtime::ToolCall::from_tool_name(
         suggested["tool"].as_str().unwrap(),
         suggested["arguments"].clone(),
@@ -423,8 +438,18 @@ fn bounded_model_facing_recovery_events(
 }
 
 fn context_recovery_suggested_call(session_id: &str) -> Value {
-    super::SuggestedToolCall::new("session_handoff_summary", json!({"session_id": session_id}))
-        .to_value()
+    super::SuggestedToolCall::new(
+        "session_handoff_summary",
+        json!({
+            "session_id": session_id,
+            "include_workspace": true,
+            "include_checkpoints": true,
+            "include_validation": true,
+            "summary_only": false,
+            "limit": super::handoff::DEFAULT_HANDOFF_LIMIT,
+        }),
+    )
+    .to_value()
 }
 
 /// A hint is sufficient to request recovery, never to certify model knowledge.
