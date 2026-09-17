@@ -46,3 +46,41 @@ Fresh GREEN receipts (Cargo +1.95.0):
 Total: 423 passing tests across these non-overlapping selections; no full-workspace or browser acceptance claim. Formatting (`cargo +1.95.0 fmt --all -- --check`), `git diff --check`, and strict OpenSpec validation passed. Temporary mutations are absent. Baseline HEAD remains unchanged; changes are uncommitted.
 
 No push, release, Server/Runner restart, tunnel modification, production indexing or research mutation was performed. Local acceptance does not establish deployed browser acceptance. Publication remains a separate boundary; use the paired Server/Runner release and existing persistent `/data` lifecycle on deployment.
+
+## Subsequent authorized publication and local deployment — 2026-09-17
+
+The user subsequently requested commit, push and deploy, with separate Git batches.
+The implementation batch is `98d9301cba2243c22b8e6006e6972b5608e5d2fd`, pushed to
+`Pein2017/webcodex`, branch `coordexp/web-workflow`, after fetching and confirming
+no upstream divergence. This acceptance update is a separate documentation batch.
+The independent CoordExp Skill change is `598aaefaa`; the user also authorized
+pushing its three existing predecessor commits. Unrelated dirty work was excluded.
+
+- Local dogfood deployment: `coordexp-2026.09.17.2`, built from clean `98d9301c`
+  with Cargo +1.95.0, `--profile dogfood`, packages `webcodex` and
+  `webcodex-runner`, feature `webcodex/workspace-checkpoints`, both binaries.
+  The initial command omitted the Runner package selection and exited without
+  building; the corrected single build completed successfully.
+- Persistent root remains `/data/CoordExp/.local/webcodex-custom/`; immutable
+  release package includes both binaries, guidance and the unchanged complete
+  workflow Plugin bundle. No npm publication, tag or GitHub Release was created.
+- Before stopping the dedicated WebCodex tmux session, authenticated runtime
+  reported zero active/running/queued Jobs. Old service PIDs were confirmed exited.
+  Default research tmux and the 9090 network forward were not touched.
+- Stopped-state private backup: `rollback/pre-coordexp-2026.09.17.2/`, containing
+  Server state, configuration and project registry with preserved permissions.
+  Backup SQLite quick_check passed. All 45 pre-existing Session records compare
+  equal after restart; the one new acceptance Session was closed.
+- Live authenticated MCP acceptance passed: Server/Runner `98d9301cba22`, both
+  `git_dirty=false`, source aligned; four canonical projects and four providers
+  online; exact initialization guidance; startup Skill/Plugin discovery; guarded
+  Skill continuation replay; Plugin message ACK observed without resolution,
+  inapplicable context ACK explicitly ignored; complete handoff recovery;
+  CodeGraph scoped query and JUnit report parsing. Tunnel `/readyz` returned 200.
+- Private evidence: `verification/coordexp-2026.09.17.2/` (build and selected
+  regression logs, `accept-live.py`, `live.json`, `live-error.log`). Live checks
+  do not prove a particular ChatGPT conversation refreshed its tool declarations.
+- Rollback package `coordexp-2026.09.17.1` remains untouched. After reconciling
+  active work, use `bin/control.sh stop`, `switch coordexp-2026.09.17.1`, `start`.
+  No database restore or old-data deletion was performed; this update preserves
+  the previously tested rollback mechanism rather than claiming a new rollback drill.
