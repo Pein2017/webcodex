@@ -1,0 +1,75 @@
+# CoordExp container recovery
+
+The operator root is `/data/CoordExp/.local/webcodex-custom/`. Source remains at
+`/data/CoordExp/.local/src/webcodex-mcp-instructions`. Only `/data` is assumed durable.
+This is a named Linux dogfood deployment, not an npm or GitHub release.
+
+## Layout and prerequisites
+
+- `releases/<id>/`: immutable Server/Runner binaries, guidance, and the **complete**
+  workflow Plugin bundle (`plugin.mjs`, `pytest_report.py`, package metadata).
+- `current`: symlink selecting one release; state is never stored beneath it.
+- `config/`: private Server env, Runner TOML and Tunnel control-plane credentials.
+- `state/server/`: existing Server database, Workflow Sessions and private state;
+  `state/project-registry/`: registered canonical worktrees.
+- `bin/control.sh`, `bin/service.sh`: persistent startup/recovery entrypoints.
+- `logs/`, `verification/`, `rollback/`: private operational records and backups.
+- `runtime/bin/`: persistent native CLI/Tunnel and links to persistent Node/rg;
+  `runtime/git/`: a self-contained newer Git prefix. Existing CodeGraph package,
+  adapter, projects, Skills and memories already live under `/data` and remain there.
+
+The container image must provide Linux x86-64 with compatible glibc/libstdc++,
+Bash, coreutils, tmux, Python >=3.10, system CA certificates and ordinary local
+networking, and GitHub CLI (`gh`) for the existing Git credential helper.
+Selected Git configuration and GitHub credentials are copied privately into
+`config/`; service environment overrides keep them independent of `/root`.
+Training environments/GPU drivers are independent prerequisites, not recreated by WebCodex startup. Runtime services
+do not put `/root` Conda/NVM on PATH. Git must support `check-attr --source=HEAD`;
+system Git 2.34 is insufficient. The Plugin JUnit parser needs only Python stdlib.
+
+Restore the user-owned SSH/proxy forward at `127.0.0.1:9090` for external access.
+Server/Runner can communicate locally without it; Tunnel reconnects when network
+access returns. Neither a surviving tmux process nor local MCP health proves that
+the externally hosted ChatGPT conversation can reach the Tunnel.
+
+## Restore after container recreation
+
+```bash
+bash /data/CoordExp/.local/webcodex-custom/bin/control.sh start
+bash /data/CoordExp/.local/webcodex-custom/bin/control.sh status
+```
+
+The dedicated tmux socket lives in `state/tmux.sock`; this does not touch the
+default tmux server or research sessions. `start` does not duplicate an existing
+session. If an existing session is partially unhealthy, inspect its logs and live
+Jobs before stopping/restarting; do not blindly launch a second runtime. Service
+loops append private logs and retry unexpected exits. Restore network access,
+then check the Tunnel ready event as well as authenticated Server/Runner status.
+Credentials remain the existing private files; do not paste them into commands.
+
+## Controlled update and rollback
+
+First inspect live Jobs and in-flight work through the authenticated runtime.
+Do not stop active research or execution just to switch a release. Save a
+consistent stopped-state backup of `state/server`, `config` and the project
+registry, preserving permissions. Keep the old deployment untouched.
+
+```bash
+bash /data/CoordExp/.local/webcodex-custom/bin/control.sh stop
+# Verify exact old Server/Runner/CLI/tunnel-client processes have exited.
+bash /data/CoordExp/.local/webcodex-custom/bin/control.sh switch <existing-release>
+bash /data/CoordExp/.local/webcodex-custom/bin/control.sh start
+```
+
+Switching is refused while the dedicated tmux session exists and never changes
+persistent state. Use the same sequence for the recorded rollback release. Do not
+restore a database backup over newer accepted work; restoring state is a separate
+explicit recovery decision. Validate matching Server/Runner build identities,
+existing Session records, canonical projects, Skills, Plugin describe/call,
+pytest report parsing and Tunnel connectivity. Inspect permissions and remove no
+old data merely because the new process started.
+
+The migration receipt names the exact source/build, dependency checksums, backup
+and tested rollback target. A rollback package may repair an omitted packaging
+file without modifying the original immutable release; its identity and
+provenance must be recorded separately.
